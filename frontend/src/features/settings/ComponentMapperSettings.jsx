@@ -2,6 +2,7 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { useEffect, useState } from "react";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const BYTES_PER_MIB = 1024 * 1024;
 
@@ -74,7 +75,7 @@ export function ComponentMapperSettings() {
   return (
     <>
       {!form && !error && <div className="subtle">Loading…</div>}
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={!form} onDismiss={() => setError(null)} />
       {form && (
         <form className="card" onSubmit={onSubmit}>
           <div className="form-section-title">Component Mapper</div>
@@ -223,7 +224,7 @@ export function ComponentMapperSettings() {
 
           <div className="form-row">
             <button type="submit" className="btn" disabled={saving}>
-              {saving ? "Saving…" : "Save Component Mapper Settings"}
+              {saving ? "Saving…" : "Save component mapper settings"}
             </button>
             {saved && (
               <span className="saved-indicator">

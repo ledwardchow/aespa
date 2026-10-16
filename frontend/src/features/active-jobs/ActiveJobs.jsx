@@ -10,6 +10,7 @@ import { nav } from "../../shared/navigation/router.js";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { usePolling } from "../../shared/hooks/usePolling.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 // ── Active jobs ───────────────────────────────────────────────────────────────
 
@@ -188,16 +189,7 @@ export function ActiveJobsPage() {
         </div>
       </div>
       <div className="content scroll-content">
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 16,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <PageError error={error} inline={!jobs} onDismiss={() => setError(null)} />
         {jobs === null && <div className="subtle">Loading…</div>}
         {jobs !== null && jobs.length === 0 && (
           <EmptyState

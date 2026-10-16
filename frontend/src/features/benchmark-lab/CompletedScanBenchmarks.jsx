@@ -1,3 +1,4 @@
+import { fmtDate } from "../../shared/lib/dates.js";
 import { scanType, scanModelLabel } from "./scanPresentation.js";
 import { useState } from "react";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
@@ -133,7 +134,7 @@ export function CompletedScanBenchmarks({
             disabled={busy}
             onChange={(event) => setDatasetId(event.target.value)}
           >
-            <option value="">Select a saved file...</option>
+            <option value="">Select a saved file…</option>
             {datasets.map((dataset) => (
               <option key={dataset.id} value={dataset.id}>
                 {dataset.label ? `${dataset.label} (${dataset.name})` : dataset.name} (
@@ -164,8 +165,11 @@ export function CompletedScanBenchmarks({
           className="btn primary"
           disabled={busy || !defaultModel || !datasetId || !selectedRuns.length}
         >
-          {busy ? "Working..." : `Benchmark ${selectedRuns.length} selected scans`}
+          {busy ? "Working…" : `Benchmark ${selectedRuns.length} selected scans`}
         </button>
+        {!!selectedRuns.length && !datasetId && (
+          <p className="subtle">Pick a ground truth file above to turn this on.</p>
+        )}
       </form>
       {error && (
         <div className="alert error" role="alert">
@@ -249,7 +253,7 @@ export function CompletedScanBenchmarks({
                   <td>{scanType(category, run.scan_models || run.result?.scan_models)}</td>
                   <td>{scanModelLabel(category, run.result?.scan_models || run.scan_models)}</td>
                   <td>{run.targetName}</td>
-                  <td>{run.completed_at ? new Date(run.completed_at).toLocaleString() : "—"}</td>
+                  <td>{run.completed_at ? fmtDate(run.completed_at) : "—"}</td>
                   <td>
                     {run.result ? (
                       <button

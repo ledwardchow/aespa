@@ -1,9 +1,12 @@
 import { useState } from "react";
+
+import { Notice } from "../ui/Notice.jsx";
 import { useColResize } from "../hooks/useColResize.js";
-import { parseDate } from "../lib/dates.js";
+import { fmtDate } from "../lib/dates.js";
 
 export function ScannerSessionsPanel({ data, refresh, onUpdate, onValidate }) {
   const [validating, setValidating] = useState(false);
+  const [notice, setNotice] = useState(null);
   const [sessColW, startSessResize] = useColResize("colw:sessions", [
     150,
     100,
@@ -27,7 +30,7 @@ export function ScannerSessionsPanel({ data, refresh, onUpdate, onValidate }) {
   const fmtAge = (iso) => {
     if (!iso) return "—";
     try {
-      return parseDate(iso).toLocaleString();
+      return fmtDate(iso);
     } catch {
       return iso;
     }
@@ -41,7 +44,7 @@ export function ScannerSessionsPanel({ data, refresh, onUpdate, onValidate }) {
       });
       await refresh();
     } catch (e) {
-      alert(e.message);
+      setNotice({ variant: "error", text: e.message });
     }
   };
   const setSessionActive = async (session, isActive) => {
@@ -53,7 +56,7 @@ export function ScannerSessionsPanel({ data, refresh, onUpdate, onValidate }) {
       });
       await refresh();
     } catch (e) {
-      alert(e.message);
+      setNotice({ variant: "error", text: e.message });
     }
   };
   const validateSessions = async () => {
@@ -66,15 +69,20 @@ export function ScannerSessionsPanel({ data, refresh, onUpdate, onValidate }) {
       const result = await onValidate();
       await refresh();
       const summary = `Checked ${result.checked}; ${result.valid} valid; ${result.evicted} evicted; ${result.errors} errors; ${result.skipped} skipped.`;
-      alert(summary);
+      setNotice({ variant: "success", text: summary });
     } catch (e) {
-      alert(e.message);
+      setNotice({ variant: "error", text: e.message });
     } finally {
       setValidating(false);
     }
   };
   return (
     <div className="intel-panel">
+      {notice && (
+        <Notice variant={notice.variant} onDismiss={() => setNotice(null)}>
+          {notice.text}
+        </Notice>
+      )}
       <div className="intel-toolbar">
         <div className="intel-title">
           <span>Scanner Sessions</span>

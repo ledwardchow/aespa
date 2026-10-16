@@ -34,3 +34,6 @@ saml.b64
 #extensions, other than the builtin
 /extensions/*
 !/extensions/builtin/
+
+# Local JavaScript dependencies and caches
+node_modules/

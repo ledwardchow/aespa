@@ -15,8 +15,12 @@ export const getApiAliceStatus = (id) => req(`/api/api-test-runs/${id}/alice/sta
 export const startApiAliceRun = (id, b) =>
   req(`/api/api-test-runs/${id}/alice/run`, { method: "POST", body: b });
 
-export const stopApiAliceRun = (id) =>
-  req(`/api/api-test-runs/${id}/alice/run`, { method: "DELETE" });
+// Without a tab id this stops ALICE work in every chat tab on the run.
+export const stopApiAliceRun = (id, tabId) =>
+  req(
+    `/api/api-test-runs/${id}/alice/run` + (tabId ? `?tab_id=${encodeURIComponent(tabId)}` : ""),
+    { method: "DELETE" },
+  );
 
 export const steerApiAliceGoal = (id, b) =>
   req(`/api/api-test-runs/${id}/alice/goal/steer`, { method: "POST", body: b });
@@ -52,6 +56,11 @@ export const getApiFindings = (id) => readFindings({ runKind: "api", runId: id }
 
 export const clearApiFindings = (id) =>
   req(`/api/api-test-runs/${id}/findings`, { method: "DELETE" });
+
+export const deleteApiFindingGroup = (id, title) =>
+  req(`/api/api-test-runs/${id}/findings?title=${encodeURIComponent(title)}`, {
+    method: "DELETE",
+  });
 
 export const deleteApiFinding = (id, fid) =>
   req(`/api/api-test-runs/${id}/findings/${fid}`, { method: "DELETE" });

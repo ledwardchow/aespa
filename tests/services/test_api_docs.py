@@ -13,12 +13,6 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture()
-def data_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
-    return tmp_path
-
-
-@pytest.fixture()
 def client(isolated_client, data_dir):
     return isolated_client
 

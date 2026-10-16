@@ -5,8 +5,6 @@ import json
 from sqlmodel import Session, select
 
 from aespa.models import (
-    System,
-    SystemTarget,
     AssessmentCampaign,
     CampaignTargetMember,
     CampaignValidationCase,
@@ -14,6 +12,8 @@ from aespa.models import (
     SastRun,
     ScanLead,
     Site,
+    System,
+    SystemTarget,
     TestRun,
 )
 from aespa.services import campaign_validation_cases as cases_svc

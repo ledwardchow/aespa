@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 from collections import defaultdict
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any
 
@@ -13,15 +15,23 @@ from sqlmodel import Session, select
 
 from aespa.db import get_engine
 from aespa.models import (
+    CoverageEvidence,
     CrawledPage,
+    DiscoveredTarget,
     PageOwaspTest,
+    ProbeExecution,
     ScanFinding,
+    ScanObligation,
+    TargetAccessObservation,
     TargetIntelItem,
     TestRun,
+    TrafficEntry,
 )
 from aespa.services import events as events_svc
 from aespa.services.llm import OWASP_WEB_CATEGORIES, OWASP_WEB_LABELS
 from aespa.services.references import ensure_finding_reference
+from aespa.services.scope import check_scope
+from aespa.services.target_catalog import exact_url, state_identity
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +51,29 @@ def _normalize_owasp_category(cat: str) -> str:
     """Extract the short OWASP code (A01–A10) from any variant the LLM may produce."""
     m = _OWASP_CODE_RE.search(cat or "")
     return m.group(1).upper() if m else (cat or "").strip().upper()
+
+
+def _request_body_identity(body: str | None) -> str | None:
+    if body is None:
+        return None
+    duplicate_keys = False
+
+    def pairs(items: list[tuple[str, Any]]) -> dict:
+        nonlocal duplicate_keys
+        if len({key for key, _ in items}) != len(items):
+            duplicate_keys = True
+        return dict(items)
+
+    try:
+        parsed = json.loads(body, object_pairs_hook=pairs)
+        canonical = (
+            body
+            if duplicate_keys
+            else json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+        )
+    except (TypeError, ValueError):
+        canonical = body
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 # ── OWASP Catalogs (Web 2025 & API 2023) ──────────────────────────────────────
@@ -358,6 +391,8 @@ def record_probe_execution(
     run_kind: str = "web",
     method: str | None = None,
     url: str | None = None,
+    target_id: int | None = None,
+    acting_actor_key: str | None = None,
 ) -> int:
     """Record a ProbeExecution row for a ScanObligation."""
     from aespa.models import ProbeExecution, ScanObligation
@@ -371,7 +406,41 @@ def record_probe_execution(
             raise ValueError("scan obligation belongs to a different run")
         if method and obligation.http_method != str(method).upper():
             raise ValueError("probe method does not match scan obligation")
-        if url and _normalize_url(url) != obligation.route_template:
+        if obligation.scope_kind == "object":
+            target = s.get(DiscoveredTarget, obligation.target_id)
+            if (
+                target is None
+                or target_id != target.id
+                or not method
+                or not url
+                or exact_url(url) != target.url
+                or acting_actor_key != obligation.comparison_actor_key
+                or traffic_id is None
+            ):
+                raise ValueError("probe does not match the selected object check")
+            traffic = s.get(TrafficEntry, traffic_id)
+            if (
+                traffic is None
+                or traffic.test_run_id != run_id
+                or exact_url(traffic.url) != target.url
+            ):
+                raise ValueError("probe traffic does not match the selected object")
+            if _request_body_identity(traffic.request_body) != obligation.body_identity:
+                raise ValueError("probe request body differs from the selected object")
+            direct_observation = s.exec(
+                select(TargetAccessObservation)
+                .where(TargetAccessObservation.test_run_id == run_id)
+                .where(TargetAccessObservation.target_id == target.id)
+                .where(TargetAccessObservation.source_kind == "traffic")
+                .where(TargetAccessObservation.source_id == traffic.id)
+                .where(TargetAccessObservation.actor_key == acting_actor_key)
+                .where(TargetAccessObservation.method == obligation.http_method)
+            ).first()
+            if direct_observation is None:
+                raise ValueError(
+                    "probe actor needs a verified direct response observation"
+                )
+        elif url and _normalize_url(url) != obligation.route_template:
             raise ValueError("probe URL does not match scan obligation")
         obligation.status = "attempted"
         obligation.updated_at = datetime.now(_UTC)
@@ -382,6 +451,13 @@ def record_probe_execution(
             run_id=run_id,
             obligation_id=obligation_id,
             traffic_id=traffic_id,
+            target_id=target_id,
+            request_identity=hashlib.sha256(
+                json.dumps([method, url, payload], separators=(",", ":")).encode()
+            ).hexdigest()
+            if target_id
+            else None,
+            acting_actor_key=acting_actor_key,
             session_identity=session_identity,
             payload_preview=payload_redacted,
             status_code=status_code,
@@ -400,14 +476,14 @@ def evaluate_coverage_evidence(
     evaluation_oracle: str,
     outcome: str,
     evidence_hash: str | None = None,
-) -> None:
+) -> int | None:
     """Record CoverageEvidence and update the obligation outcome."""
     from aespa.models import CoverageEvidence, ProbeExecution, ScanObligation
 
     with Session(get_engine()) as s:
         execution = s.get(ProbeExecution, execution_id)
         if execution is None:
-            return
+            return None
         evidence = CoverageEvidence(
             execution_id=execution_id,
             expected_behavior=expected_behavior,
@@ -432,6 +508,8 @@ def evaluate_coverage_evidence(
             s.add(obligation)
 
         s.commit()
+        s.refresh(evidence)
+        return evidence.id
 
 
 def _normalize_url(url: str) -> str:
@@ -798,13 +876,7 @@ def reopen_unjustified_web_skips(run_id: int) -> int:
 
 
 def _make_web_post_probe_fn(run_id: int):
-    """Return a callback for per-probe category and test-class tracking.
-
-    Matches the probed URL to a CrawledPage and flips the (page, category) cell
-    to ``in_progress``.  If no CrawledPage exists for the URL yet (the test lead
-    chose a page not in the original crawl), one is created on-the-fly so the
-    workprogram can track it.
-    """
+    """Track a probe only on an existing page with the exact requested URL."""
 
     def _post_probe(
         url: str,
@@ -826,7 +898,7 @@ def _make_web_post_probe_fn(run_id: int):
                 run_id=run_id,
                 url=url,
                 page_id=page_id,
-                create=response_status != 404,
+                create=False,
             )
             s.commit()
         if page_id is None:
@@ -861,16 +933,7 @@ def _clean_affected_url(raw: str) -> str:
 
 
 def _make_web_post_finding_fn(run_id: int):
-    """Return ``(ScanFinding) → None`` that flips the matching cell to ``finding``.
-
-    The shared resolver prefers an exact or canonical affected-URL match over
-    a stale page hint, then falls back to the finding's valid page_id. It
-    creates a placeholder only when neither identifies an existing page.
-
-    A placeholder is only the last resort — the LLM is increasingly being
-    prompted to pass a single specific URL, so this branch should be hit
-    rarely in practice.
-    """
+    """Mark finding coverage only for an exact existing page match."""
 
     def _post_finding(finding: Any) -> None:
         if finding is None:
@@ -890,7 +953,7 @@ def _make_web_post_finding_fn(run_id: int):
                 run_id=run_id,
                 url=affected_url,
                 page_id=getattr(finding, "page_id", None),
-                create=bool(affected_url),
+                create=False,
                 prefer_page_id=False,
             )
             s.commit()
@@ -917,29 +980,11 @@ def _make_web_post_finding_fn(run_id: int):
 
 
 def _match_page_for_url(url: str, pages: list[CrawledPage]) -> int | None:
-    """Find the best matching CrawledPage id for the given URL.
-
-    Tries exact match first, then normalised match (strips query string and
-    trailing slash).  Returns None if no page matches — callers should create
-    a placeholder page in that case.
-    """
     url = (url or "").strip()
     # 1. Exact match
-    for p in pages:
-        if p.url == url:
-            return p.id
-    # 2. Normalised match — strip query strings and trailing slashes on both sides
-    url_base = url.split("?")[0].rstrip("/")
-    for p in pages:
-        if p.url.split("?")[0].rstrip("/") == url_base:
-            return p.id
-    # 3. Canonical route match — collapse concrete numeric/UUID object IDs so
-    # dynamic observations of /users/2 enrich the crawled /users/1 route.
-    normalized_base = _normalize_url(url_base)
-    for p in pages:
-        page_base = p.url.split("?")[0].rstrip("/")
-        if _normalize_url(page_base) == normalized_base:
-            return p.id
+    matches = [page for page in pages if page.url == url and page.state_key is None]
+    if len(matches) == 1:
+        return matches[0].id
     return None
 
 
@@ -953,12 +998,9 @@ def resolve_web_page_id(
     scan_status: str = "pending",
     prefer_page_id: bool = True,
 ) -> int | None:
-    """Resolve the canonical page shared by web scan artifacts.
+    """Resolve an exact URL match, using page_id to select a browser state.
 
-    Callers retain their exact URL as request or finding evidence. This helper
-    supplies the stable CrawledPage identity used for attribution. Explicit
-    page IDs normally win so same-URL SPA states remain distinct; finding
-    callers can prefer a URL match when their page hint may be stale.
+    create=True is reserved for callers recording actual browser navigation.
     """
     pages = list(
         session.exec(
@@ -972,7 +1014,7 @@ def resolve_web_page_id(
         if page_id is not None
         else None
     )
-    if prefer_page_id and explicit is not None:
+    if prefer_page_id and explicit is not None and explicit.url == (url or "").strip():
         return explicit.id
 
     clean_url = (url or "").strip()
@@ -981,7 +1023,7 @@ def resolve_web_page_id(
     matched = _match_page_for_url(clean_url, pages)
     if matched is not None:
         return matched
-    if explicit is not None:
+    if explicit is not None and explicit.url == clean_url:
         return explicit.id
     if not create:
         return None
@@ -1190,6 +1232,19 @@ def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
                 .where(TargetIntelItem.kind == "endpoint")
             ).all()
         )
+        selected_checks = list(
+            s.exec(
+                select(ScanObligation)
+                .where(ScanObligation.run_kind == "web")
+                .where(ScanObligation.run_id == run_id)
+                .where(ScanObligation.scope_kind == "object")
+            )
+        )
+        selected_targets = {
+            check.target_id: s.get(DiscoveredTarget, check.target_id)
+            for check in selected_checks
+        }
+        _, confirmed_checks = _object_finding_ids(s, run_id)
 
     totals: dict[str, int] = {status: 0 for status in _STATUS_RANK}
     for cell in cells:
@@ -1204,7 +1259,14 @@ def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
             )
 
     candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    selected_parent_ids = {
+        check.parent_page_cell_id
+        for check in selected_checks
+        if check.parent_page_cell_id is not None
+    }
     for cell in cells:
+        if cell.id in selected_parent_ids:
+            continue
         page = pages.get(cell.page_id)
         if page is None or not page.in_scope or _is_static_asset(page.url):
             continue
@@ -1286,6 +1348,36 @@ def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
             )
 
     candidates.sort(key=lambda item: item[0])
+    for check in selected_checks:
+        if (
+            check.status in {"passed", "finding", "blocked"}
+            or check.id in confirmed_checks
+        ):
+            continue
+        target = selected_targets.get(check.target_id)
+        if target is None:
+            continue
+        candidates.insert(
+            0,
+            (
+                (-1, target.url),
+                {
+                    "check_id": check.id,
+                    "target_id": target.id,
+                    "url": target.url,
+                    "method": check.http_method,
+                    "owasp_category": check.owasp_category,
+                    "test_class": check.vulnerability_technique,
+                    "status": check.status,
+                    "baseline_actor": check.baseline_actor_key,
+                    "comparison_actor": check.comparison_actor_key,
+                    "reason": "Selected object comparison needs evidence",
+                },
+            ),
+        )
+    from aespa.services.workflow_workprogram import remaining_workflow_tests
+
+    workflow_gaps = remaining_workflow_tests(run_id)
     return {
         "tool": "coverage_gaps",
         "run_id": run_id,
@@ -1293,6 +1385,21 @@ def get_web_coverage_gaps(run_id: int, *, limit: int = 12) -> dict[str, Any]:
         "next_actions": [item[1] for item in candidates[:limit]],
         "remaining": len(candidates),
         "truncated": len(candidates) > limit,
+        "workflow_actions": [
+            {
+                "item_id": item["id"],
+                "name": item["name"],
+                "goal": item["goal"],
+                "url": item["reached_page_url"],
+                "owasp_category": item["owasp_category"],
+                "test_kind": item["test_kind"],
+                "test_guidance": item["test_guidance"],
+                "status": item["status"],
+            }
+            for item in workflow_gaps[:limit]
+        ],
+        "workflow_remaining": len(workflow_gaps),
+        "workflow_truncated": len(workflow_gaps) > limit,
     }
 
 
@@ -1304,7 +1411,10 @@ def _build_web_enforce_directive(run_id: int) -> str:
     ``http_request`` with the ``owasp_category`` it exercises.
     """
     obligations = _uncovered_web_obligations(run_id)
-    if not obligations:
+    from aespa.services.workflow_workprogram import remaining_workflow_tests
+
+    workflow_gaps = remaining_workflow_tests(run_id)
+    if not obligations and not workflow_gaps:
         return ""
     # Group by page
     grouped: dict[int, tuple[CrawledPage, list[str]]] = {}
@@ -1334,6 +1444,28 @@ def _build_web_enforce_directive(run_id: int) -> str:
         lines.append(
             f"  … and {len(items) - 60} more pages (use context_tool page_list)."
         )
+    if workflow_gaps:
+        lines.extend(
+            [
+                "",
+                "Workflow checks still to cover:",
+                "Run the listed test on each named workflow. Use "
+                "context_tool workflow_detail to inspect its reached state and "
+                "record_workflow_test to save the outcome with scan traffic. "
+                "A concrete blocker may be recorded as blocked; crawler traffic "
+                "and generic page probes do not cover a workflow check.",
+            ]
+        )
+        for item in workflow_gaps[:60]:
+            lines.append(
+                f"  id={item['id']} {item['owasp_category']} {item['name']} "
+                f"({item['test_kind']}, {item['status']}): {item['test_guidance']}"
+            )
+        if len(workflow_gaps) > 60:
+            lines.append(
+                f"  … and {len(workflow_gaps) - 60} more workflow checks "
+                "(use context_tool workflow_list)."
+            )
     return "\n".join(lines)
 
 
@@ -1594,6 +1726,399 @@ def _make_web_enforce_prober(run_id: int, llm_cfg):  # noqa: ARG001
 # ── Coverage matrix read ──────────────────────────────────────────────────────
 
 
+def select_object_access_check(
+    run_id: int,
+    target_id: int,
+    *,
+    baseline_observation_id: int,
+    comparison_actor_key: str,
+    method: str = "GET",
+    technique: str = "idor",
+    parameter: str | None = None,
+    body_identity: str | None = None,
+) -> ScanObligation:
+    method = method.upper()
+    with Session(get_engine(), expire_on_commit=False) as s:
+        run = s.get(TestRun, run_id)
+        target = s.get(DiscoveredTarget, target_id)
+        baseline = s.get(TargetAccessObservation, baseline_observation_id)
+        if run is None or target is None or target.test_run_id != run_id:
+            raise ValueError("Target does not belong to this web run")
+        if check_scope(target.url, run.site_id, run_id):
+            raise ValueError("Target is outside the run scope")
+        if (
+            baseline is None
+            or baseline.test_run_id != run_id
+            or baseline.target_id != target_id
+            or baseline.method != method
+            or baseline.result != "reached"
+            or baseline.source_kind != "traffic"
+            or not baseline.actor_key.startswith("credential:")
+        ):
+            raise ValueError(
+                "An identified direct baseline for this target is required"
+            )
+        baseline_traffic = s.get(TrafficEntry, baseline.source_id)
+        if baseline_traffic is None or baseline_traffic.test_run_id != run_id:
+            raise ValueError("Baseline traffic is missing")
+        actual_body_identity = _request_body_identity(baseline_traffic.request_body)
+        if body_identity is not None and body_identity != actual_body_identity:
+            raise ValueError("Selected body differs from the baseline request")
+        if method not in {"GET", "HEAD", "OPTIONS"} and actual_body_identity is None:
+            raise ValueError(
+                "A body-bearing selected check needs the baseline request body"
+            )
+        body_identity = actual_body_identity
+        if comparison_actor_key == baseline.actor_key or not (
+            comparison_actor_key == "anonymous"
+            or comparison_actor_key.startswith("credential:")
+        ):
+            raise ValueError("Comparison must use a different known actor")
+        if comparison_actor_key.startswith("credential:"):
+            from aespa.models import Credential
+
+            try:
+                credential = s.get(
+                    Credential, int(comparison_actor_key.partition(":")[2])
+                )
+            except ValueError as exc:
+                raise ValueError("Invalid comparison actor") from exc
+            if credential is None or credential.site_id != run.site_id:
+                raise ValueError("Comparison actor is not configured for this site")
+        selected_target_ids = set(
+            s.exec(
+                select(ScanObligation.target_id)
+                .where(ScanObligation.run_kind == "web")
+                .where(ScanObligation.run_id == run_id)
+                .where(ScanObligation.scope_kind == "object")
+            ).all()
+        )
+        material = json.dumps(
+            [
+                target.id,
+                method,
+                technique,
+                parameter,
+                body_identity,
+                baseline.actor_key,
+                comparison_actor_key,
+            ],
+            separators=(",", ":"),
+        )
+        selection_key = hashlib.sha256(material.encode()).hexdigest()
+        existing = s.exec(
+            select(ScanObligation)
+            .where(ScanObligation.run_kind == "web")
+            .where(ScanObligation.run_id == run_id)
+            .where(ScanObligation.selection_key == selection_key)
+        ).first()
+        if existing is not None:
+            return existing
+        if target_id not in selected_target_ids and len(selected_target_ids) >= 80:
+            raise ValueError("The selected object target budget is full")
+        per_target = len(
+            s.exec(
+                select(ScanObligation.id)
+                .where(ScanObligation.run_kind == "web")
+                .where(ScanObligation.run_id == run_id)
+                .where(ScanObligation.scope_kind == "object")
+                .where(ScanObligation.target_id == target_id)
+            ).all()
+        )
+        if per_target >= 3:
+            raise ValueError("The comparison actor budget for this target is full")
+        matching_pages = s.exec(
+            select(CrawledPage)
+            .where(CrawledPage.test_run_id == run_id)
+            .where(CrawledPage.url == target.url)
+            .where(CrawledPage.state_key == target.state_key)
+        ).all()
+        page = matching_pages[0] if len(matching_pages) == 1 else None
+        matching_parents = (
+            s.exec(
+                select(PageOwaspTest)
+                .where(PageOwaspTest.test_run_id == run_id)
+                .where(PageOwaspTest.page_id == page.id)
+                .where(PageOwaspTest.owasp_category == "A01")
+            ).all()
+            if page is not None
+            else []
+        )
+        parent = matching_parents[0] if len(matching_parents) == 1 else None
+        row = ScanObligation(
+            run_kind="web",
+            run_id=run_id,
+            scan_mode=run.coverage_mode,
+            owasp_catalog="web_2025",
+            owasp_category="A01",
+            vulnerability_technique=technique,
+            route_template=target.route_pattern,
+            http_method=method,
+            parameter=parameter,
+            scope_kind="object",
+            target_id=target.id,
+            selection_key=selection_key,
+            body_identity=body_identity,
+            baseline_actor_key=baseline.actor_key,
+            comparison_actor_key=comparison_actor_key,
+            baseline_observation_id=baseline.id,
+            parent_page_cell_id=parent.id if parent else None,
+            status="queued",
+        )
+        s.add(row)
+        s.commit()
+        s.refresh(row)
+        return row
+
+
+def record_object_check_result(
+    run_id: int,
+    check_id: int,
+    *,
+    traffic_id: int | None = None,
+    evaluation_id: int | None = None,
+    blocked_reason: str | None = None,
+    blocked_evidence_id: int | None = None,
+) -> ScanObligation:
+    """Apply only a result that proves this exact target, method and actor."""
+    with Session(get_engine(), expire_on_commit=False) as s:
+        check = s.get(ScanObligation, check_id)
+        if (
+            check is None
+            or check.run_kind != "web"
+            or check.run_id != run_id
+            or check.scope_kind != "object"
+        ):
+            raise ValueError("Selected check does not belong to this web run")
+        if blocked_reason:
+            blocked = (
+                s.get(TargetAccessObservation, blocked_evidence_id)
+                if blocked_evidence_id
+                else None
+            )
+            blocked_traffic = (
+                s.get(TrafficEntry, blocked.source_id)
+                if blocked is not None and blocked.source_kind == "traffic"
+                else None
+            )
+            if (
+                blocked is None
+                or blocked.test_run_id != run_id
+                or blocked.target_id != check.target_id
+                or blocked.method != check.http_method
+                or blocked.actor_key != check.comparison_actor_key
+                or blocked.result not in {"denied", "unknown"}
+                or blocked_traffic is None
+                or _request_body_identity(blocked_traffic.request_body)
+                != check.body_identity
+            ):
+                raise ValueError("A supported block needs evidence")
+            check.status = "blocked"
+            check.exemption_reason = blocked_reason
+        else:
+            traffic = s.get(TrafficEntry, traffic_id) if traffic_id else None
+            target = s.get(DiscoveredTarget, check.target_id)
+            evidence = s.get(CoverageEvidence, evaluation_id) if evaluation_id else None
+            execution = (
+                s.get(ProbeExecution, evidence.execution_id) if evidence else None
+            )
+            if (
+                traffic is None
+                or traffic.test_run_id != run_id
+                or traffic.api_test_run_id is not None
+                or exact_url(traffic.url) != target.url
+                or traffic.method.upper() != check.http_method
+                or execution is None
+                or execution.run_id != run_id
+                or execution.run_kind != "web"
+                or execution.obligation_id != check.id
+                or execution.traffic_id != traffic.id
+                or execution.target_id != target.id
+                or execution.acting_actor_key != check.comparison_actor_key
+                or _request_body_identity(traffic.request_body) != check.body_identity
+            ):
+                raise ValueError(
+                    "Result does not match the selected target and comparison"
+                )
+            check.status = (
+                evidence.outcome
+                if evidence.outcome in {"passed", "finding", "inconclusive"}
+                else "inconclusive"
+            )
+        check.updated_at = datetime.now(_UTC)
+        s.add(check)
+        s.commit()
+        s.refresh(check)
+        return check
+
+
+def validate_object_finding_link(
+    run_id: int, check_id: int, *, affected_url: str, category: str
+) -> ScanObligation:
+    with Session(get_engine(), expire_on_commit=False) as s:
+        check = s.get(ScanObligation, check_id)
+        if (
+            check is None
+            or check.run_kind != "web"
+            or check.run_id != run_id
+            or check.scope_kind != "object"
+            or category != "A01"
+        ):
+            raise ValueError("Finding does not identify a selected A01 object check")
+        target = s.get(DiscoveredTarget, check.target_id)
+        if target is None or exact_url(affected_url) != target.url:
+            raise ValueError("Finding URL differs from the selected exact object")
+        executions = s.exec(
+            select(ProbeExecution)
+            .where(ProbeExecution.run_kind == "web")
+            .where(ProbeExecution.run_id == run_id)
+            .where(ProbeExecution.obligation_id == check.id)
+            .where(ProbeExecution.target_id == target.id)
+            .where(ProbeExecution.acting_actor_key == check.comparison_actor_key)
+        ).all()
+        for execution in executions:
+            traffic = (
+                s.get(TrafficEntry, execution.traffic_id)
+                if execution.traffic_id
+                else None
+            )
+            if (
+                traffic is None
+                or traffic.test_run_id != run_id
+                or traffic.method.upper() != check.http_method
+                or _request_body_identity(traffic.request_body) != check.body_identity
+            ):
+                continue
+            reached = s.exec(
+                select(TargetAccessObservation)
+                .where(TargetAccessObservation.test_run_id == run_id)
+                .where(TargetAccessObservation.target_id == target.id)
+                .where(TargetAccessObservation.source_kind == "traffic")
+                .where(TargetAccessObservation.source_id == traffic.id)
+                .where(TargetAccessObservation.actor_key == check.comparison_actor_key)
+                .where(TargetAccessObservation.result == "reached")
+            ).first()
+            if reached is not None:
+                return check
+        raise ValueError("Finding needs a direct reached comparison for this actor")
+
+
+def _object_finding_ids(
+    s: Session, run_id: int
+) -> tuple[dict[int, list[int]], set[int]]:
+    linked: dict[int, list[int]] = defaultdict(list)
+    confirmed: set[int] = set()
+    for finding in s.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)):
+        if (
+            finding.object_check_id is None
+            or finding.id is None
+            or finding.owasp_category != "A01"
+        ):
+            continue
+        linked[finding.object_check_id].append(finding.id)
+        if finding.validation_status == "confirmed":
+            confirmed.add(finding.object_check_id)
+    return linked, confirmed
+
+
+def web_completion(
+    run_id: int, *, target_percent: int = 60, session: Session | None = None
+) -> dict:
+    with nullcontext(session) if session is not None else Session(get_engine()) as s:
+        cells = list(
+            s.exec(select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id))
+        )
+        pages = {
+            page.id: page
+            for page in s.exec(
+                select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+            )
+        }
+        checks = list(
+            s.exec(
+                select(ScanObligation)
+                .where(ScanObligation.run_kind == "web")
+                .where(ScanObligation.run_id == run_id)
+                .where(ScanObligation.scope_kind == "object")
+            )
+        )
+        _, confirmed_checks = _object_finding_ids(s, run_id)
+        by_parent: dict[int, list[ScanObligation]] = defaultdict(list)
+        for check in checks:
+            if check.parent_page_cell_id is not None:
+                by_parent[check.parent_page_cell_id].append(check)
+        roots: list[tuple[str, bool, bool]] = []
+        attempted = {
+            "attempted",
+            "evaluated",
+            "passed",
+            "finding",
+            "inconclusive",
+            "blocked",
+        }
+        resolved = {"passed", "finding", "blocked"}
+        for cell in cells:
+            page = pages.get(cell.page_id)
+            if page is None or page.in_scope is False:
+                continue
+            if cell.owasp_category == "A03" and not page.takes_input:
+                continue
+            raw_units = [(cell.owasp_category, cell.status)]
+            if cell.owasp_category == "A03" and page.takes_input:
+                classes = _load_test_classes(cell)
+                raw_units = [
+                    (name, classes.get(name, {}).get("status", "not_started"))
+                    for name in _A03_INPUT_TEST_CLASSES
+                ]
+            for name, status in raw_units:
+                children = [
+                    check
+                    for check in by_parent.get(cell.id, [])
+                    if (check.parent_test_class or cell.owasp_category) == name
+                ]
+                if status == "skipped" and not children and cell.skip_reason:
+                    continue
+                if children:
+                    exercised = all(
+                        child.status in attempted or child.id in confirmed_checks
+                        for child in children
+                    )
+                    closed = all(
+                        child.status in resolved or child.id in confirmed_checks
+                        for child in children
+                    )
+                else:
+                    exercised = status in {"in_progress", "covered", "finding"}
+                    closed = status in {"covered", "finding"}
+                roots.append((f"page:{cell.id}:{name}", exercised, closed))
+        for check in checks:
+            if check.parent_page_cell_id is None:
+                roots.append(
+                    (
+                        f"object:{check.id}",
+                        check.status in attempted or check.id in confirmed_checks,
+                        check.status in resolved or check.id in confirmed_checks,
+                    )
+                )
+        applicable = len(roots)
+        exercised = sum(item[1] for item in roots)
+        resolved_count = sum(item[2] for item in roots)
+        percent = round(exercised * 100 / applicable, 1) if applicable else 100.0
+        return {
+            "exercised_units": exercised,
+            "applicable_units": applicable,
+            "resolved_units": resolved_count,
+            "unresolved_units": [item[0] for item in roots if not item[2]],
+            "exercised": exercised,
+            "total": applicable,
+            "skipped": 0,
+            "percent": percent,
+            "target_percent": target_percent,
+            "target_met": applicable == 0
+            or exercised * 100 >= target_percent * applicable,
+        }
+
+
 def get_web_coverage_matrix(run_id: int) -> dict:
     """Return the full web workprogram matrix for a TestRun."""
     with Session(get_engine(), expire_on_commit=False) as s:
@@ -1617,6 +2142,7 @@ def get_web_coverage_matrix(run_id: int) -> dict:
                 "totals": {st: 0 for st in _STATUS_RANK},
                 "column_totals": {st: 0 for st in _STATUS_RANK},
                 "seeded": False,
+                "completion": web_completion(run_id),
             }
 
         page_ids = {c.page_id for c in cells}
@@ -1814,6 +2340,110 @@ def get_web_coverage_matrix(run_id: int) -> dict:
             }
         )
 
+    with Session(get_engine()) as s:
+        selected = list(
+            s.exec(
+                select(ScanObligation)
+                .where(ScanObligation.run_kind == "web")
+                .where(ScanObligation.run_id == run_id)
+                .where(ScanObligation.scope_kind == "object")
+            )
+        )
+        linked_findings, confirmed_checks = _object_finding_ids(s, run_id)
+        selected_targets = {
+            check.target_id: s.get(DiscoveredTarget, check.target_id)
+            for check in selected
+        }
+        selected_items = []
+        crawled_exact = {
+            (page.url, state_identity(page.state_key))
+            for page in pages.values()
+            if page.status == "crawled"
+        }
+        for check in selected:
+            target = selected_targets.get(check.target_id)
+            if target is None:
+                continue
+            selected_items.append(
+                {
+                    "id": check.id,
+                    "target_id": target.id,
+                    "url": target.url,
+                    "state_key": target.state_key,
+                    "route_pattern": target.route_pattern,
+                    "method": check.http_method,
+                    "baseline_actor": check.baseline_actor_key,
+                    "comparison_actor": check.comparison_actor_key,
+                    "status": "finding"
+                    if check.id in confirmed_checks
+                    else check.status,
+                    "finding_ids": linked_findings.get(check.id, []),
+                    "reason": check.exemption_reason,
+                    "crawled": (target.url, target.state_identity) in crawled_exact,
+                    "tested": check.status
+                    in {"attempted", "evaluated", "passed", "finding", "inconclusive"},
+                }
+            )
+    unmatched_checks = set(range(len(selected_items)))
+    for row in page_rows:
+        checks = []
+        for index, item in enumerate(selected_items):
+            if _normalize_url(item["url"]) == row["url"]:
+                checks.append(item)
+                unmatched_checks.discard(index)
+        if checks:
+            a01 = row["cells"].setdefault(
+                "A01",
+                {
+                    "cell_ids": [],
+                    "status": "not_started",
+                    "skip_reason": None,
+                    "finding_ids": [],
+                    "findings": [],
+                    "test_classes": {},
+                },
+            )
+            a01["selected_checks"] = {
+                "tested": sum(item["tested"] for item in checks),
+                "total": len(checks),
+                "unresolved": sum(
+                    item["status"] not in {"passed", "finding", "blocked"}
+                    for item in checks
+                ),
+                "items": checks,
+            }
+    for index in sorted(unmatched_checks):
+        item = selected_items[index]
+        page_rows.append(
+            {
+                "page_id": None,
+                "page_ids": [],
+                "url": _normalize_url(item["url"]),
+                "title": "",
+                "state_kind": "url",
+                "state_label": "",
+                "req_auth": None,
+                "cells": {
+                    "A01": {
+                        "cell_ids": [],
+                        "status": "not_started",
+                        "skip_reason": None,
+                        "finding_ids": [],
+                        "findings": [],
+                        "test_classes": {},
+                        "selected_checks": {
+                            "tested": int(item["tested"]),
+                            "total": 1,
+                            "unresolved": int(
+                                item["status"] not in {"passed", "finding", "blocked"}
+                            ),
+                            "items": [item],
+                        },
+                    }
+                },
+            }
+        )
+
     return {
         "run_id": run_id,
         "coverage_mode": coverage_mode,
@@ -1824,6 +2454,7 @@ def get_web_coverage_matrix(run_id: int) -> dict:
         "column_totals": column_totals,
         "class_totals": dict(class_totals),
         "seeded": True,
+        "completion": web_completion(run_id),
     }
 
 

@@ -4,6 +4,7 @@ import { BenchmarkPublishing } from "../benchmark-lab/public.js";
 
 import * as extensionsApi from "../../shared/api/extensions.js";
 import { Crumb, PageHeader, Sep } from "../../shared/ui/PageHeader.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 function ExtensionSettingField({ extensionId, field, value, hasSecret, onChange }) {
   const inputId = `extension-${extensionId}-${field.key}`;
@@ -161,11 +162,7 @@ export function ExtensionSettingsPage({ extensionId }) {
       />
       <div className="content scroll-content">
         {loading ? <div className="subtle">Loading…</div> : null}
-        {error ? (
-          <div className="alert error" role="alert">
-            {error}
-          </div>
-        ) : null}
+        <PageError error={error} inline={!extension} onDismiss={() => setError(null)} />
         {!loading && !extension && !error ? (
           <div className="subtle">Extension not found.</div>
         ) : null}

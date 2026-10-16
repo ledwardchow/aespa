@@ -150,3 +150,71 @@ test("ChatGPT plan models start with the documented budget and requested thinkin
   expect(screen.getByLabelText("Output budget (local)").value).toBe("128000");
   expect(screen.getByText(/do not support an output-token limit/)).toBeTruthy();
 });
+
+test("saves a Fast speed only for models that offer it", async () => {
+  const user = userEvent.setup();
+  const planProvider = {
+    ...provider,
+    api_format: "openai_chatgpt_plan",
+    models: ["gpt-6-astra", "gpt-5.6-sol"],
+    model_capabilities: {
+      "gpt-6-astra": {
+        context_window_tokens: 1050000,
+        supported_efforts: ["low", "high"],
+        service_tiers: [{ id: "priority", name: "Fast", description: "2x speed, increased usage" }],
+      },
+      "gpt-5.6-sol": { context_window_tokens: 1050000, supported_efforts: ["low", "high"] },
+    },
+  };
+  const astra = { ...profile, provider_id: planProvider.id, model: "gpt-6-astra" };
+  settingsApi.updateLLMModel.mockResolvedValue({ ...astra, service_tier: "priority" });
+
+  render(
+    <LLMModelForm mode="edit" profile={astra} providers={[planProvider]} modelConfigs={[astra]} />,
+  );
+
+  await user.selectOptions(screen.getByLabelText("Speed"), "priority");
+  expect(screen.getByText("2x speed, increased usage.")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Save model" }));
+  await waitFor(() => expect(settingsApi.updateLLMModel).toHaveBeenCalledTimes(1));
+  expect(settingsApi.updateLLMModel.mock.calls[0][1]).toMatchObject({ service_tier: "priority" });
+
+  await user.selectOptions(screen.getByLabelText("Model"), "gpt-5.6-sol");
+  expect(screen.queryByLabelText("Speed")).toBeNull();
+});
+
+test("a new model does not inherit another model's thinking level", async () => {
+  const firstProvider = {
+    ...provider,
+    models: ["model-a"],
+    model_capabilities: {
+      "model-a": {
+        context_window_tokens: 400000,
+        supported_efforts: ["low", "high", "xhigh"],
+        default_effort: "xhigh",
+      },
+    },
+  };
+  const chosenProvider = {
+    ...provider,
+    id: 8,
+    name: "Second provider",
+    models: ["no-levels-model"],
+    model_capabilities: { "no-levels-model": {} },
+  };
+
+  render(
+    <LLMModelForm
+      mode="new"
+      providers={[firstProvider, chosenProvider]}
+      initialProviderId={chosenProvider.id}
+      initialModel="no-levels-model"
+    />,
+  );
+
+  const thinking = screen.getByLabelText(/Thinking level/);
+  expect(thinking.value).toBe("");
+  expect([...thinking.options].map((option) => option.value)).toEqual([""]);
+  await waitFor(() => expect(settingsApi.discoverModelOptions).toHaveBeenCalled());
+  expect(thinking.value).toBe("");
+});

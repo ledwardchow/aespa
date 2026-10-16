@@ -12,8 +12,12 @@ from aespa.db import get_engine
 from aespa.models import (
     CrawledPage,
     Credential,
+    DiscoveredTarget,
     PageCredentialView,
     PageOwaspTest,
+    ScanLog,
+    ScanObligation,
+    TargetAccessObservation,
     TargetIntelItem,
     TestRun,
     TrafficEntry,
@@ -90,6 +94,21 @@ def build_recon_summary(
                 .order_by(TrafficEntry.created_at.desc())
             )
         )
+        direct_rows = list(
+            s.exec(
+                select(TargetAccessObservation, DiscoveredTarget)
+                .join(
+                    DiscoveredTarget,
+                    DiscoveredTarget.id == TargetAccessObservation.target_id,
+                )
+                .where(
+                    TargetAccessObservation.test_run_id == run_id,
+                    DiscoveredTarget.test_run_id == run_id,
+                )
+            )
+        )
+        direct_observations = [observation for observation, _target in direct_rows]
+        targets = {target.id: target for _observation, target in direct_rows}
 
         credentials: list[Credential] = []
         if run is not None:
@@ -105,10 +124,35 @@ def build_recon_summary(
             traffic_entries,
             page_access,
             credential_map,
+            direct_observations,
+            targets,
         )
-        coverage = _build_coverage(cells, pages, routes)
+        coverage = _build_coverage(run_id, cells, pages, routes, s)
         signals = _build_signals(pages, intel_items)
         technologies = _detect_technologies(s, run_id, pages, intel_items)
+        crawl_notes_checked = (
+            s.exec(
+                select(ScanLog.id)
+                .where(ScanLog.test_run_id == run_id)
+                .where(ScanLog.run_kind == "web")
+                .where(ScanLog.phase == "crawl_workflow")
+                .where(ScanLog.status == "complete")
+            ).first()
+            is not None
+        )
+        crawl_notes_failed = (
+            s.exec(
+                select(ScanLog.id)
+                .where(ScanLog.test_run_id == run_id)
+                .where(ScanLog.run_kind == "web")
+                .where(ScanLog.phase == "crawl_workflow")
+                .where(ScanLog.status == "error")
+            ).first()
+            is not None
+        )
+        from aespa.services.crawl_workflows import list_workflow_notes
+
+        crawl_notes = list_workflow_notes(s, run_id)
         waf = _build_waf_summary(run)
         if waf is not None:
             # Surface the WAF alongside the other detected technologies too, so
@@ -128,6 +172,10 @@ def build_recon_summary(
         access_counts = Counter(route["access"]["classification"] for route in routes)
         summary = {
             "schema_version": 2,
+            "route_groups": json.loads(run.route_groups_json or "[]") if run else [],
+            "crawl_notes": crawl_notes,
+            "crawl_notes_checked": crawl_notes_checked,
+            "crawl_notes_failed": crawl_notes_failed,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "route_count": len(routes),
             "routes": routes,
@@ -191,15 +239,10 @@ def _build_page_access(
     for page in pages:
         credential_ids: set[int] = set()
         usernames: set[str] = set()
-        anonymous = page.req_auth is False
+        anonymous = page.req_auth is False and page.status == "crawled"
         anonymous_texts: set[str] = set()
         authenticated_texts: set[str] = set()
         page_text = _comparable_page_text(page.page_text)
-        if page_text:
-            if anonymous:
-                anonymous_texts.add(page_text)
-            else:
-                authenticated_texts.add(page_text)
         try:
             credential_ids.update(
                 int(value) for value in json.loads(page.accessible_by or "[]")
@@ -218,9 +261,13 @@ def _build_page_access(
                     authenticated_texts.add(view_text)
             if view.username:
                 usernames.add(view.username)
+        if page_text:
+            (anonymous_texts if anonymous else authenticated_texts).add(page_text)
         observed_profile_ids.update(credential_ids)
         observed_usernames.update(usernames)
-        page_access[_canonical_url(page.url)] = {
+        page_access[f"{page.id}:{page.state_key or ''}"] = {
+            "url": page.url,
+            "state_key": page.state_key,
             "anonymous": anonymous,
             "credential_ids": credential_ids,
             "usernames": usernames,
@@ -256,6 +303,8 @@ def _build_routes(
     traffic_entries: list[TrafficEntry],
     page_access: dict[str, dict],
     credential_map: dict[int | None, Credential],
+    direct_observations: list[TargetAccessObservation],
+    targets: dict[int, DiscoveredTarget],
 ) -> list[dict]:
     grouped: dict[str, dict] = {}
 
@@ -350,6 +399,16 @@ def _build_routes(
                         source_url=metadata.get("page_url"),
                     )
 
+    for observation in direct_observations:
+        target = targets.get(observation.target_id)
+        if target is not None:
+            add_route(
+                target.url,
+                method=observation.method,
+                kind="direct_response",
+                source="direct_response",
+            )
+
     observed_by_operation: dict[str, dict[str, Counter]] = defaultdict(
         lambda: defaultdict(Counter)
     )
@@ -363,6 +422,19 @@ def _build_routes(
             continue
         observed_by_operation[operation][method][int(entry.status or 0)] += 1
         traffic_sources_by_operation[operation].add(entry.source or "traffic")
+
+    page_access_by_route: dict[str, list[dict]] = defaultdict(list)
+    for page_observation in page_access.values():
+        page_access_by_route[_canonical_url(page_observation["url"])].append(
+            page_observation
+        )
+    direct_by_route: dict[
+        str, list[tuple[TargetAccessObservation, DiscoveredTarget]]
+    ] = defaultdict(list)
+    for direct in direct_observations:
+        target = targets.get(direct.target_id)
+        if target is not None:
+            direct_by_route[_canonical_url(target.url)].append((direct, target))
 
     rows: list[dict] = []
     for canonical, route in grouped.items():
@@ -387,10 +459,76 @@ def _build_routes(
         methods.difference_update(rejected_methods)
         if method_observations:
             route["sources"].add("traffic")
-        access_sources = {canonical}
-        access_sources.update(_canonical_url(url) for url in route["source_urls"])
+        members: dict[tuple[str, str | None, str], dict] = {}
+        for page_observation in page_access_by_route.get(canonical, []):
+            key = (page_observation["url"], page_observation["state_key"], "GET")
+            member = members.setdefault(
+                key,
+                {
+                    "url": key[0],
+                    "state_key": key[1],
+                    "method": key[2],
+                    "anonymous": False,
+                    "anonymous_observed": False,
+                    "credential_ids": set(),
+                    "usernames": set(),
+                    "anonymous_texts": set(),
+                    "authenticated_texts": set(),
+                    "observations": [],
+                },
+            )
+            member["anonymous"] |= page_observation["anonymous"]
+            member["anonymous_observed"] |= page_observation["anonymous"]
+            member["credential_ids"].update(page_observation["credential_ids"])
+            member["usernames"].update(page_observation["usernames"])
+            member["anonymous_texts"].update(page_observation["anonymous_texts"])
+            member["authenticated_texts"].update(
+                page_observation["authenticated_texts"]
+            )
+        for direct, target in direct_by_route.get(canonical, []):
+            key = (target.url, target.state_key, direct.method.upper())
+            member = members.setdefault(
+                key,
+                {
+                    "url": key[0],
+                    "state_key": key[1],
+                    "method": key[2],
+                    "anonymous": False,
+                    "anonymous_observed": False,
+                    "credential_ids": set(),
+                    "usernames": set(),
+                    "anonymous_texts": set(),
+                    "authenticated_texts": set(),
+                    "observations": [],
+                },
+            )
+            member["observations"].append(
+                {
+                    "actor_key": direct.actor_key,
+                    "result": direct.result,
+                    "source_kind": direct.source_kind,
+                    "source_id": direct.source_id,
+                }
+            )
+            if direct.actor_key == "anonymous":
+                member["anonymous_observed"] = (
+                    direct.result in {"reached", "denied"}
+                    or member["anonymous_observed"]
+                )
+                member["anonymous"] |= direct.result == "reached"
+            elif (
+                direct.actor_key.startswith("credential:")
+                and direct.result == "reached"
+            ):
+                try:
+                    member["credential_ids"].add(
+                        int(direct.actor_key.partition(":")[2])
+                    )
+                except ValueError:
+                    pass
         observations = [
-            page_access[url] for url in access_sources if url in page_access
+            members[key]
+            for key in sorted(members, key=lambda key: (key[0], key[1] or "", key[2]))
         ]
         anonymous = any(observation["anonymous"] for observation in observations)
         credential_ids = sorted(
@@ -408,23 +546,19 @@ def _build_routes(
             }
         )
         authenticated = bool(credential_ids or usernames)
-        anonymous_texts = {
-            text
+        comparable = [
+            observation
             for observation in observations
-            for text in observation["anonymous_texts"]
-        }
-        authenticated_texts = {
-            text
-            for observation in observations
-            for text in observation["authenticated_texts"]
-        }
+            if observation["anonymous_texts"] and observation["authenticated_texts"]
+        ]
         identity_content = (
-            "equivalent"
-            if anonymous_texts
-            and authenticated_texts
-            and anonymous_texts == authenticated_texts
-            else "different"
-            if anonymous_texts and authenticated_texts
+            "different"
+            if any(
+                observation["anonymous_texts"] != observation["authenticated_texts"]
+                for observation in comparable
+            )
+            else "equivalent"
+            if comparable
             else "unknown"
         )
         classification = (
@@ -481,6 +615,30 @@ def _build_routes(
                     "credential_ids": credential_ids,
                     "labels": labels,
                     "identity_content": identity_content,
+                    "needs_anonymous_comparison": any(
+                        observation["credential_ids"]
+                        and not observation["anonymous_observed"]
+                        for observation in observations
+                    ),
+                    "members": [
+                        {
+                            "url": observation["url"],
+                            "state_key": observation["state_key"],
+                            "method": observation["method"],
+                            "anonymous": observation["anonymous"],
+                            "anonymous_observed": observation["anonymous_observed"],
+                            "credential_ids": sorted(observation["credential_ids"]),
+                            "observations": sorted(
+                                observation["observations"],
+                                key=lambda item: (
+                                    item["actor_key"],
+                                    item["source_kind"],
+                                    item["source_id"],
+                                ),
+                            ),
+                        }
+                        for observation in observations
+                    ],
                 },
                 "coverage": {"total": 0, "statuses": {}, "categories": []},
             }
@@ -496,9 +654,11 @@ def _build_routes(
 
 
 def _build_coverage(
+    run_id: int,
     cells: list[PageOwaspTest],
     pages: list[CrawledPage],
     routes: list[dict],
+    session: Session,
 ) -> dict:
     page_urls = {page.id: _canonical_url(page.url) for page in pages}
     page_map = {page.id: page for page in pages}
@@ -506,7 +666,6 @@ def _build_coverage(
     status_counts = Counter()
     category_counts: dict[str, Counter] = defaultdict(Counter)
     class_counts: dict[str, Counter] = defaultdict(Counter)
-    gaps: dict[str, set[str]] = defaultdict(set)
     grouped_cells: dict[str, dict[str, dict]] = defaultdict(dict)
 
     for cell in cells:
@@ -570,19 +729,85 @@ def _build_coverage(
             category_counts[category][status] += 1
             if test_class:
                 class_counts[test_class][status] += 1
-            if status in {"not_started", "in_progress"}:
-                gaps[category].add(canonical)
+
+    raw_gap_counts: Counter = Counter()
+    root_total_counts: Counter = Counter()
+    raw_gaps: dict[str, set[str]] = defaultdict(set)
+    selected = session.exec(
+        select(ScanObligation)
+        .where(ScanObligation.run_kind == "web")
+        .where(ScanObligation.run_id == run_id)
+        .where(ScanObligation.scope_kind == "object")
+    ).all()
+    from aespa.services.web_workprogram import _object_finding_ids, web_completion
+
+    _, confirmed_checks = _object_finding_ids(session, run_id)
+    children_by_unit: dict[tuple[int, str], list[ScanObligation]] = defaultdict(list)
+    for check in selected:
+        if check.parent_page_cell_id is not None:
+            parent = next(
+                (cell for cell in cells if cell.id == check.parent_page_cell_id), None
+            )
+            if parent is not None:
+                children_by_unit[
+                    (parent.id, check.parent_test_class or parent.owasp_category)
+                ].append(check)
+    for cell in cells:
+        canonical = page_urls.get(cell.page_id)
+        page = page_map.get(cell.page_id)
+        if canonical is None or page is None or page.in_scope is False:
+            continue
+        if cell.owasp_category == "A03" and not page.takes_input:
+            continue
+        if cell.owasp_category == "A03":
+            try:
+                class_states = json.loads(cell.test_classes_json or "{}")
+            except (ValueError, TypeError):
+                class_states = {}
+            units = [
+                (
+                    name,
+                    str((class_states.get(name) or {}).get("status") or "not_started"),
+                )
+                for name in _A03_INPUT_TEST_CLASSES
+            ]
+        else:
+            units = [(cell.owasp_category, cell.status)]
+        for name, status in units:
+            children = children_by_unit.get((cell.id, name), [])
+            if status == "skipped" and not children and cell.skip_reason:
+                continue
+            root_total_counts[cell.owasp_category] += 1
+            unresolved = (
+                any(
+                    child.status not in {"passed", "finding", "blocked"}
+                    and child.id not in confirmed_checks
+                    for child in children
+                )
+                if children
+                else status not in {"covered", "finding"}
+            )
+            if unresolved:
+                raw_gap_counts[cell.owasp_category] += 1
+                raw_gaps[cell.owasp_category].add(canonical)
+    for check in selected:
+        if check.parent_page_cell_id is not None:
+            continue
+        root_total_counts[check.owasp_category] += 1
+        if (
+            check.status in {"passed", "finding", "blocked"}
+            or check.id in confirmed_checks
+        ):
+            continue
+        target = session.get(DiscoveredTarget, check.target_id)
+        if target is not None:
+            raw_gap_counts[check.owasp_category] += 1
+            raw_gaps[check.owasp_category].add(_canonical_url(target.url))
+    completion = web_completion(run_id, session=session)
 
     for canonical, route in route_map.items():
         obligations = display_by_route.get(canonical, [])
         statuses = Counter(status for _category, status, _test_class in obligations)
-        category_statuses: dict[str, str] = {}
-        for category, status, _test_class in obligations:
-            current = category_statuses.get(category)
-            if current is None or _STATUS_ORDER.get(status, 0) > _STATUS_ORDER.get(
-                current, 0
-            ):
-                category_statuses[category] = status
         route["coverage"] = {
             "total": len(obligations),
             "statuses": dict(statuses),
@@ -591,38 +816,36 @@ def _build_coverage(
             ),
             "remaining_categories": sorted(
                 category
-                for category, status in category_statuses.items()
-                if status in {"not_started", "in_progress"}
+                for category, routes_with_gaps in raw_gaps.items()
+                if canonical in routes_with_gaps
             ),
         }
 
-    total = sum(status_counts.values())
-    resolved = sum(
-        status_counts[status] for status in ("covered", "finding", "skipped")
-    )
     by_category = []
     for category in OWASP_WEB_CATEGORIES:
         counts = category_counts[category]
         category_total = sum(counts.values())
-        if not category_total:
+        if not category_total and not root_total_counts[category]:
             continue
         by_category.append(
             {
                 "category": category,
                 "label": OWASP_WEB_LABELS.get(category, category),
-                "total": category_total,
+                "total": root_total_counts[category],
                 "statuses": dict(counts),
-                "remaining": counts["not_started"] + counts["in_progress"],
-                "gap_routes": sorted(gaps[category])[:10],
-                "gap_route_total": len(gaps[category]),
+                "remaining": raw_gap_counts[category],
+                "gap_routes": sorted(raw_gaps[category])[:10],
+                "gap_route_total": len(raw_gaps[category]),
             }
         )
     by_category.sort(key=lambda item: (-item["remaining"], item["category"]))
     return {
         "seeded": bool(cells),
-        "total": total,
-        "resolved": resolved,
-        "completion_percent": round(100 * resolved / total) if total else 0,
+        "total": completion["applicable_units"],
+        "resolved": completion["resolved_units"],
+        "completion_percent": completion["percent"],
+        "exercised_units": completion["exercised_units"],
+        "unresolved_units": completion["unresolved_units"],
         "statuses": {status: status_counts.get(status, 0) for status in _STATUS_ORDER},
         "by_category": by_category,
         "by_test_class": [

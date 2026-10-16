@@ -41,6 +41,7 @@ class AliceSessionsRequest(BaseModel):
 
 class AliceSteerRequest(BaseModel):
     message: str
+    tab_id: str | None = None
 
 
 # ── Chat session persistence helpers ──────────────────────────────────────────
@@ -265,13 +266,14 @@ async def start_alice_run(
 async def alice_stream(
     run_id: int,
     cursor: int = Query(default=0, ge=0),
+    tab_id: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> StreamingResponse:
     """SSE stream: replays buffered events from *cursor*, then live events."""
     if session.get(TestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="Test run not found")
     return StreamingResponse(
-        alice_tasks.stream_events(run_id, cursor),
+        alice_tasks.stream_events(run_id, cursor, tab_id=tab_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -284,12 +286,13 @@ async def alice_stream(
 @router.delete("/api/test-runs/{run_id}/alice/run")
 async def stop_alice_run(
     run_id: int,
+    tab_id: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> dict:
-    """Cancel the running ALICE task for this run."""
+    """Cancel ALICE work for one chat tab, or for every tab when none is given."""
     if session.get(TestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="Test run not found")
-    stopped = await alice_tasks.stop(run_id)
+    stopped = await alice_tasks.stop(run_id, tab_id=tab_id)
     return {"ok": True, "stopped": stopped}
 
 
@@ -301,7 +304,7 @@ async def steer_alice_goal(
 ) -> dict:
     if session.get(TestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="Test run not found")
-    accepted = await alice_tasks.steer_goal(run_id, req.message)
+    accepted = await alice_tasks.steer_goal(run_id, req.message, tab_id=req.tab_id)
     if not accepted:
         raise HTTPException(status_code=409, detail="No active ALICE goal")
     return {"ok": True}
@@ -310,9 +313,10 @@ async def steer_alice_goal(
 @router.get("/api/test-runs/{run_id}/alice/status")
 def alice_status(
     run_id: int,
+    tab_id: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> dict:
     """Return whether an ALICE task is currently running for this run."""
     if session.get(TestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="Test run not found")
-    return alice_tasks.status(run_id)
+    return alice_tasks.status(run_id, tab_id=tab_id)

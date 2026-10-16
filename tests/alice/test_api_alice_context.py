@@ -835,7 +835,7 @@ def test_alice_tasks_start_stores_run_type():
     finally:
         at_mod._run = orig_run
         # Clean up registry
-        alice_tasks._registry.pop(999, None)
+        alice_tasks._registry.pop(("api", 999, "t1"), None)
 
 
 def test_alice_tasks_start_default_run_type_is_site():
@@ -864,7 +864,7 @@ def test_alice_tasks_start_default_run_type_is_site():
         assert task.run_type == "site"
     finally:
         at_mod._run = orig_run
-        alice_tasks._registry.pop(998, None)
+        alice_tasks._registry.pop(("site", 998, "t"), None)
 
 
 # ── API endpoint: start_alice_run passes run_type=api ─────────────────────────

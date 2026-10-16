@@ -14,9 +14,20 @@ from pydantic import BaseModel, Field, SecretStr
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
+from aespa.services.settings import get_upstream_proxy_config
+from aespa.services.tls import httpx_verify
 
 from .models import Dataset, PublishingSettings, PublishingUploadToken, ScanResult
 from .transfer import dataset_key, identity
+
+DEFAULT_SITE_URL = "https://benchmarks.aespa.app"
+SITE_URL_ALIASES = frozenset(
+    {DEFAULT_SITE_URL, "https://aespa-benchmarks.maranthis.chatgpt.site"}
+)
+
+
+def same_site_url(left: str, right: str) -> bool:
+    return left == right or {left, right} == SITE_URL_ALIASES
 
 
 def site_url(value: str) -> str:
@@ -24,7 +35,10 @@ def site_url(value: str) -> str:
     if (
         parsed.scheme != "https"
         or not parsed.hostname
-        or not parsed.hostname.endswith(".chatgpt.site")
+        or not (
+            parsed.hostname.endswith(".chatgpt.site")
+            or parsed.hostname == "benchmarks.aespa.app"
+        )
         or parsed.username
         or parsed.password
         or parsed.port not in (None, 443)
@@ -32,7 +46,9 @@ def site_url(value: str) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        raise ValueError("Enter an HTTPS Sites URL without a path")
+        raise ValueError(
+            "Enter the benchmarks.aespa.app URL or an HTTPS Sites URL without a path"
+        )
     return f"https://{parsed.hostname}"
 
 
@@ -93,13 +109,16 @@ def token_counts(core, row, models: dict) -> dict | None:
     return totals if recorded else None
 
 
-def graph_bundle(store) -> dict:
+def graph_bundle(store, dataset_ids: set[int] | None = None) -> dict:
     from .router import result_out
 
     output = []
     with store.session() as session, Session(get_engine()) as core:
         session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        for row in session.exec(select(ScanResult).order_by(ScanResult.id)):
+        query = select(ScanResult).order_by(ScanResult.id)
+        if dataset_ids is not None:
+            query = query.where(ScanResult.dataset_id.in_(sorted(dataset_ids)))
+        for row in session.exec(query):
             result = result_out(row, core)
             dataset = session.get(Dataset, row.dataset_id)
             if dataset is None:
@@ -126,6 +145,10 @@ def graph_bundle(store) -> dict:
                     "scan_cost_usd": result.get("scan_cost_usd"),
                     "tokens": token_counts(core, row, models),
                     "summary": result["summary"],
+                    "score": result["score"],
+                    "category_counts": result["category_counts"],
+                    "category_totals": result["category_totals"],
+                    "comment": result["comment"],
                     "updated_at": timestamp(row.updated_at),
                 }
             )
@@ -167,7 +190,7 @@ def decode_connection_token(value: str, url: str) -> tuple[str, str]:
         or not all(isinstance(v, str) for v in data.values())
     ):
         raise ValueError(error)
-    if data["site_url"] != url:
+    if not same_site_url(data["site_url"], url):
         raise ValueError("This token was generated for a different site")
     service, upload = data["service_token"], data["upload_token"]
     if not re.fullmatch(r"[\x21-\x7e]{1,8192}", service) or not re.fullmatch(
@@ -184,13 +207,19 @@ class PublishingIn(BaseModel):
     upload_token: SecretStr | None = Field(default=None)
 
 
+class PublishIn(BaseModel):
+    dataset_ids: list[int] | None = Field(default=None, max_length=1000)
+
+
 def register_publishing(router: APIRouter, store) -> None:
     @router.get("/publishing")
     def get_publishing() -> dict:
         with store.session() as session:
             saved = session.get(PublishingSettings, 1)
             return {
-                "site_url": saved.site_url if saved else "",
+                "site_url": saved.site_url
+                if saved and saved.site_url
+                else DEFAULT_SITE_URL,
                 "token_saved": bool(saved and saved.service_token),
                 "upload_token_saved": bool(
                     (upload := session.get(PublishingUploadToken, 1)) and upload.token
@@ -247,9 +276,13 @@ def register_publishing(router: APIRouter, store) -> None:
                 except ValueError as exc:
                     raise HTTPException(422, str(exc)) from None
             # Never reuse a site's credential for a different site.
-            if saved.site_url and saved.site_url != url and not token:
+            if saved.site_url and not same_site_url(saved.site_url, url) and not token:
                 raise HTTPException(422, "Enter a token generated for the new site")
-            if saved.site_url and saved.site_url != url and not upload_token:
+            if (
+                saved.site_url
+                and not same_site_url(saved.site_url, url)
+                and not upload_token
+            ):
                 raise HTTPException(422, "Enter a token generated for the new site")
             if upload_token is not None:
                 if not re.fullmatch(r"aespa_upload_[a-f0-9]{64}", upload_token):
@@ -282,8 +315,23 @@ def register_publishing(router: APIRouter, store) -> None:
         return graph_bundle(store)
 
     @router.post("/publish")
-    async def publish_graphs() -> dict:
+    async def publish_graphs(payload: PublishIn | None = None) -> dict:
+        dataset_ids = (
+            set(payload.dataset_ids)
+            if payload is not None and payload.dataset_ids is not None
+            else None
+        )
+        if dataset_ids is not None and not dataset_ids:
+            raise HTTPException(422, "Choose at least one application to publish")
         with store.session() as session:
+            if dataset_ids is not None:
+                found = set(
+                    session.exec(
+                        select(Dataset.id).where(Dataset.id.in_(sorted(dataset_ids)))
+                    )
+                )
+                if found != dataset_ids:
+                    raise HTTPException(422, "A selected ground truth no longer exists")
             saved = session.get(PublishingSettings, 1)
             if not saved or not saved.site_url or not saved.service_token:
                 raise HTTPException(422, "Save the site connection first")
@@ -299,7 +347,11 @@ def register_publishing(router: APIRouter, store) -> None:
                 )
             token = saved.service_token
             upload_token = upload.token
-        results = graph_bundle(store)["results"]
+        results = graph_bundle(store, dataset_ids)["results"]
+        if dataset_ids is not None and not results:
+            raise HTTPException(
+                422, "The selected applications have no results to publish"
+            )
         batches, batch = [], []
         for result in results:
             candidate = [*batch, result]
@@ -328,10 +380,24 @@ def register_publishing(router: APIRouter, store) -> None:
                 raise HTTPException(422, "A result is too large to publish")
         if batch:
             batches.append(batch)
-        stored = skipped = sent = 0
-        async with httpx.AsyncClient(
-            timeout=30, follow_redirects=False, trust_env=False
-        ) as client:
+        stored = skipped = protected = sent = 0
+        with Session(get_engine()) as core:
+            network = get_upstream_proxy_config(core)
+        client_options = {
+            "timeout": 30,
+            "follow_redirects": False,
+            "trust_env": False,
+        }
+        if network.proxy_llm and network.llm_proxy_url:
+            client_options["proxy"] = network.llm_proxy_url
+        try:
+            client_options["verify"] = httpx_verify(network.llm_ca_bundle_path, True)
+            client = httpx.AsyncClient(**client_options)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                502, "The configured CA bundle could not be loaded"
+            ) from exc
+        async with client:
             for batch in batches:
                 try:
                     response = await client.post(
@@ -365,7 +431,12 @@ def register_publishing(router: APIRouter, store) -> None:
                             isinstance(report.get(key), int) and report[key] >= 0
                             for key in ("stored", "skipped_stale")
                         )
-                        or report["stored"] + report["skipped_stale"] != len(batch)
+                        or not isinstance(report.get("skipped_site_edits", 0), int)
+                        or report.get("skipped_site_edits", 0) < 0
+                        or report["stored"]
+                        + report["skipped_stale"]
+                        + report.get("skipped_site_edits", 0)
+                        != len(batch)
                     ):
                         raise ValueError("Invalid upload receipt")
                 except (httpx.HTTPError, ValueError, TypeError) as exc:
@@ -376,9 +447,11 @@ def register_publishing(router: APIRouter, store) -> None:
                 sent += len(batch)
                 stored += report["stored"]
                 skipped += report["skipped_stale"]
+                protected += report.get("skipped_site_edits", 0)
         return {
             "received": sent,
             "stored": stored,
             "skipped_stale": skipped,
+            "skipped_site_edits": protected,
             "site_url": url,
         }

@@ -1,7 +1,9 @@
+import { fmtDate } from "../../shared/lib/dates.js";
 import * as statisticsApi from "../../shared/api/statistics.js";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { fmtTok } from "../../shared/ui/TokenUsageBar.jsx";
+import { fmtUsd } from "../../shared/lib/money.ts";
 
 function currentMonth() {
   const now = new Date();
@@ -20,11 +22,6 @@ function monthLabel(month) {
     month: "long",
     year: "numeric",
   });
-}
-
-function fmtUsd(value) {
-  if (value === null || value === undefined) return "—";
-  return `$${Number(value).toFixed(4)}`;
 }
 
 function fmtCount(value) {
@@ -267,16 +264,14 @@ export function StatisticsPage() {
       </span>
       <span className="subtle stats-price-meta">
         Price data:{" "}
-        {data?.price_feed?.fetched_at
-          ? new Date(data.price_feed.fetched_at).toLocaleString()
-          : "not downloaded"}
+        {data?.price_feed?.fetched_at ? fmtDate(data.price_feed.fetched_at) : "not downloaded"}
       </span>
     </>
   );
   return (
     <>
       <div className="topbar">
-        <div className="topbar-title">LLM Statistics</div>
+        <div className="topbar-title">Usage</div>
         <div className="topbar-actions">
           <button className="btn secondary" onClick={refresh} disabled={busy}>
             {busy ? "Working…" : "Refresh prices"}

@@ -40,7 +40,7 @@ export function ModelsList({ visible, models, providers, busyId, onEdit, onDelet
             });
       // Keep models in a predictable name order when providers compare equal.
       if (cmp === 0 && field === "provider_name") {
-        return String(a.name || "").localeCompare(String(b.name || ""), undefined, {
+        cmp = String(a.name || "").localeCompare(String(b.name || ""), undefined, {
           sensitivity: "base",
           numeric: true,
         });

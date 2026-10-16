@@ -247,7 +247,7 @@ export function ApiRunAgentsTab({ runId, scanRunning }) {
                             (cActive ? " agent-badge-active" : " agent-badge-complete")
                           }
                         >
-                          {cActive ? "ACTIVE" : "DONE"}
+                          {cActive ? "ACTIVE" : "COMPLETE"}
                         </span>
                         <span className="agent-current-task" title={cTask}>
                           {cTask.length > 90 ? cTask.slice(0, 89) + "…" : cTask}
@@ -339,7 +339,7 @@ export function ApiRunAgentsTab({ runId, scanRunning }) {
                             (vaActive ? " agent-badge-active" : " agent-badge-complete")
                           }
                         >
-                          {vaActive ? "ACTIVE" : "DONE"}
+                          {vaActive ? "ACTIVE" : "COMPLETE"}
                         </span>
                         <span className="agent-current-task" title={vaTask}>
                           {vaTask.length > 90 ? vaTask.slice(0, 89) + "…" : vaTask}
@@ -387,7 +387,11 @@ export function ApiRunAgentsTab({ runId, scanRunning }) {
                 "agent-badge" + (isActive ? " agent-badge-active" : " agent-badge-complete")
               }
             >
-              {isActive ? "ACTIVE" : isComplete ? "DONE" : (agent.status || "IDLE").toUpperCase()}
+              {isActive
+                ? "ACTIVE"
+                : isComplete
+                  ? "COMPLETE"
+                  : (agent.status || "IDLE").toUpperCase()}
             </span>
             {task && (
               <span className="agent-current-task" title={task}>

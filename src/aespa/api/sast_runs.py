@@ -15,6 +15,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     status,
@@ -30,7 +31,6 @@ from aespa.models import (
     AgentLog,
     ApiCollection,
     ApiTestRun,
-    BenchmarkEvaluation,
     PhaseCheckpoint,
     SastRun,
     SastWorker,
@@ -599,16 +599,7 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
 @router.delete("/api/sast-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
-    if (
-        session.exec(
-            select(BenchmarkEvaluation).where(BenchmarkEvaluation.sast_run_id == run_id)
-        ).first()
-        is not None
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Delete benchmark evaluations before deleting this SAST run",
-        )
+    run_cleanup.ensure_sast_run_deletable(session, run_id)
     from aespa.services import campaigns as campaigns_svc
     from aespa.services import sast_scanner, sast_sources
 
@@ -964,6 +955,106 @@ class SastLeadHandoffRequest(BaseModel):
     run_id: int
 
 
+class SastLiveTestRunCreate(BaseModel):
+    target_type: str
+    target_id: int
+
+
+@router.get("/api/sast-runs/{run_id}/live-targets")
+def get_sast_live_targets(
+    run_id: int, session: Session = Depends(get_session)
+) -> list[dict]:
+    """List saved applications that can receive a new live test run."""
+    _get_run_or_404(session, run_id)
+    sites = session.exec(select(Site).order_by(Site.name)).all()
+    collections = session.exec(select(ApiCollection).order_by(ApiCollection.name)).all()
+    return [
+        {
+            "target_type": "site",
+            "target_id": site.id,
+            "name": site.name,
+            "url": site.base_url,
+        }
+        for site in sites
+    ] + [
+        {
+            "target_type": "api_collection",
+            "target_id": collection.id,
+            "name": collection.name,
+            "url": collection.base_url,
+        }
+        for collection in collections
+    ]
+
+
+@router.post("/api/sast-runs/{run_id}/leads/{lead_id}/live-test-runs", status_code=201)
+def create_sast_live_test_run(
+    run_id: int,
+    lead_id: int,
+    body: SastLiveTestRunCreate,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Create a SAST Validate run containing one independent finding copy."""
+    source_run = _get_run_or_404(session, run_id)
+    lead = session.get(ScanLead, lead_id)
+    if (
+        lead is None
+        or lead.producer_run_type != "sast"
+        or lead.producer_run_id != run_id
+        or lead.imported_into_run_id is not None
+    ):
+        raise HTTPException(status_code=404, detail="SAST finding not found")
+    if not lead.reportable or lead.validation_status != "confirmed":
+        raise HTTPException(
+            status_code=409, detail="Only confirmed findings can be tested live"
+        )
+    if body.target_type == "site":
+        target = session.get(Site, body.target_id)
+        run_type = "web"
+    elif body.target_type == "api_collection":
+        target = session.get(ApiCollection, body.target_id)
+        run_type = "api"
+    else:
+        raise HTTPException(
+            status_code=422, detail="target_type must be site or api_collection"
+        )
+    if target is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    name = f"Live test {lead.reference or f'#{lead.id}'}"
+    if run_type == "web":
+        new_run = TestRun(
+            site_id=target.id,
+            name=name,
+            llm_profile_id=source_run.llm_profile_id,
+            coverage_mode="sast_validate",
+        )
+    else:
+        new_run = ApiTestRun(
+            collection_id=target.id,
+            name=name,
+            llm_profile_id=source_run.llm_profile_id,
+            coverage_mode="sast_validate",
+        )
+    from aespa.services.scan_leads import copy_lead_to_run_in_session
+
+    try:
+        session.add(new_run)
+        session.flush()
+        copied = copy_lead_to_run_in_session(session, lead_id, run_type, new_run.id)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    return {
+        "run_type": run_type,
+        "run_id": new_run.id,
+        "lead_id": copied.id,
+        "lead_reference": copied.reference,
+        "target_name": target.name,
+    }
+
+
 @router.post("/api/sast-runs/{run_id}/leads/{lead_id}/handoff")
 def handoff_sast_lead(
     run_id: int,
@@ -1052,10 +1143,24 @@ def get_api_run_leads(
 def list_api_run_available_sast_runs(
     run_id: int,
     session: Session = Depends(get_session),
-) -> list[dict]:
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=10, ge=1, le=50),
+    q: str = Query(default="", max_length=200),
+) -> list[dict] | dict:
     """Completed standalone SAST runs available for explicit lead import."""
     if session.get(ApiTestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="API test run not found")
+    if page is not None:
+        from aespa.services.sast_imports import search_import_sources
+
+        return search_import_sources(
+            session,
+            run_kind="api",
+            run_id=run_id,
+            query=q,
+            page=page,
+            page_size=page_size,
+        )
     runs = session.exec(
         select(SastRun)
         .where(SastRun.status == "completed")

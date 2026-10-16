@@ -3,6 +3,15 @@ import { req } from "./request.ts";
 
 export const getWebCoverageMatrix = (id) => req(`/api/test-runs/${id}/coverage`);
 
+export const getDiscoveredTargets = (id, { routePattern, search = "", cursor, limit = 50 }) => {
+  const params = new URLSearchParams({ route_pattern: routePattern, limit: String(limit) });
+  if (search) params.set("search", search);
+  if (cursor) params.set("cursor", cursor);
+  return req(`/api/test-runs/${id}/discovered-targets?${params}`);
+};
+
+export const getWorkflowCoverage = (id) => req(`/api/test-runs/${id}/workflow-coverage`);
+
 export const seedWebWorkprogram = (id) =>
   req(`/api/test-runs/${id}/coverage/seed`, { method: "POST" });
 
@@ -50,6 +59,12 @@ export const importCrawl = (id, file) => {
   return req(`/api/test-runs/${id}/crawl/import`, { method: "POST", body: fd });
 };
 
+export const saveCrawl = (id, b) =>
+  req(`/api/test-runs/${id}/crawl/save`, { method: "POST", body: b });
+
+export const loadSavedCrawl = (id, savedId) =>
+  req(`/api/test-runs/${id}/crawl/load/${savedId}`, { method: "POST" });
+
 export const getGraph = (id) => req(`/api/test-runs/${id}/graph`);
 
 export const listPages = (id) => req(`/api/test-runs/${id}/pages`);
@@ -74,6 +89,27 @@ export const validateScannerSessions = (id) =>
   req(`/api/test-runs/${id}/scanner-sessions/validate`, { method: "POST" });
 
 export const getReconSummary = (id) => req(`/api/test-runs/${id}/recon-summary`);
+
+export const getWorkflowNotes = (id) => req(`/api/test-runs/${id}/crawl/workflows`);
+
+export const getWorkflowRetryStatus = (id) =>
+  req(`/api/test-runs/${id}/crawl/workflows/retry/status`);
+
+export const retryWorkflow = (
+  id,
+  noteId,
+  instructions,
+  saveToSite = false,
+  generateSampleData = false,
+) =>
+  req(`/api/test-runs/${id}/crawl/workflows/${noteId}/retry`, {
+    method: "POST",
+    body: {
+      instructions,
+      save_to_site: saveToSite,
+      generate_sample_data: generateSampleData,
+    },
+  });
 
 export const setPageScope = (runId, pgId, b) =>
   req(`/api/test-runs/${runId}/pages/${pgId}/scope`, { method: "PATCH", body: b });
@@ -117,7 +153,11 @@ export const getAliceStatus = (id) => req(`/api/test-runs/${id}/alice/status`);
 export const startAliceRun = (id, b) =>
   req(`/api/test-runs/${id}/alice/run`, { method: "POST", body: b });
 
-export const stopAliceRun = (id) => req(`/api/test-runs/${id}/alice/run`, { method: "DELETE" });
+// Without a tab id this stops ALICE work in every chat tab on the run.
+export const stopAliceRun = (id, tabId) =>
+  req(`/api/test-runs/${id}/alice/run` + (tabId ? `?tab_id=${encodeURIComponent(tabId)}` : ""), {
+    method: "DELETE",
+  });
 
 export const steerAliceGoal = (id, b) =>
   req(`/api/test-runs/${id}/alice/goal/steer`, { method: "POST", body: b });

@@ -152,10 +152,14 @@ uv run aespa          # starts the server at http://127.0.0.1:8000
 Runtime configuration is read from a `.env` file:
 
 ```
-AESPA_DATABASE_URL = sqlite:///./aespa.db
+AESPA_DATABASE_URL = sqlite:///./aespa_data/aespa.db
 AESPA_HOST         = 127.0.0.1
 AESPA_PORT         = 8000
 ```
+
+Desktop builds also read a writable `settings.env` in the per-user AESPA
+application support directory. The console's Data Folder setting writes there
+on desktop builds and to `.env` for source runs; it takes effect after restart.
 
 ---
 
@@ -286,6 +290,7 @@ Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm
 | `max_request_body_bytes` | `65536` | Probe body size cap (bytes) |
 | `follow_redirects` | `true` | |
 | `allow_subdomains` | `true` | Allow crawling/probing subdomains of the target |
+| `retire_auto_update` | `true` | Download the latest Retire.js vulnerable-library list at scan start (at most once a day). When off, or when the download fails, scans use the last downloaded copy, or the copy shipped with AESPA. Edited under **Settings → Global → Vulnerable Libraries**. |
 
 ### Python Sandbox (`CodeExecutionConfig` model)
 
@@ -338,6 +343,8 @@ Singleton row (id = 1). Routes scanner and/or LLM traffic through independently 
 |---|---|---|
 | `scanner_proxy_url` | — | `http://host:port` proxy URL for testing traffic |
 | `llm_proxy_url` | — | `http://host:port` proxy URL for LLM traffic |
+| `scanner_ca_bundle_path` | — | PEM CA bundle for scanner HTTP certificate checks |
+| `llm_ca_bundle_path` | — | PEM CA bundle for application traffic, including LLM and Benchmark Lab requests |
 | `proxy_scanner` | `false` | Route scanner HTTP and Playwright traffic through proxy |
 | `proxy_llm` | `false` | Route LLM API calls through proxy |
 
@@ -425,6 +432,7 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | Model | Purpose |
 |---|---|
 | `Site` | Target website (base URL, auth settings, associated credentials) |
+| `SavedCrawl` | Gzip-compressed crawl archive kept on a site so new runs can load it instead of crawling |
 | `Credential` | Login credentials tied to a site (username, password, login URL) |
 | `LLMProviderConfig` | Reusable LLM provider connection settings (API keys, base URLs, account, cloud project, and model discovery) |
 | `LLMConfig` | Saved LLM configuration/execution profile linked to a provider |
@@ -509,13 +517,50 @@ start_crawl(run_id)
                  v.   Enqueue new URLs (in-scope, within depth/page limits)
                  vi.  Persist CrawledPage + PageLinks + TrafficEntries
        3. Extract TargetIntelItems (endpoints, forms, inputs, IDs, scripts, JWT hints)
-       4. Update TestRun status → crawled
+       4. List reached functions and ask the crawler model about workflows suggested by the page inventory
+          • Try a few visible browser actions to reach them, except deletion
+          • Save newly reached pages with replay steps and record workflow notes
+          • Record deletion or blocked workflows without exercising them
+       5. Update TestRun status → crawled
 ```
 
 The run view reports the crawl in plain-language stages. Each page event includes
 the credential in use, the phase number, the URL, and the current step: opening
 the page, checking access, analyzing content and links, or moving to the next
 URL. Navigation errors and login-blocked pages are recorded too.
+
+The Workflows subtab under Attack Surface & Coverage groups retry attempts under
+their original workflow and shows live retry progress. Status
+shows a notice when a workflow needs input and has a Notifications subtab for
+workflows that stopped because the crawler lacked
+sample data or instructions. Users can supply test data there to continue one
+workflow. Submitting the data opens Workflows so the user can watch the retry.
+The workflow inventory includes the latest named crawl note for each retry chain.
+Input fields, business-logic tags, and navigation clicks alone do not create workflows.
+Unreached workflows appear in coverage with crawl progress and no security checks.
+Reached named workflows seed security checks. Each check belongs to the original note, so
+a retry updates the same workflow. A04 covers the sequence;
+an authenticated or object-specific workflow also gets an A01 access check. The
+crawler reaching a workflow does not count as a security test.
+The retry keeps the same deletion checks and adds its result
+to the workflow notes. The retry status endpoint reports the current browser
+step, page path, completed actions, and final result. A completed retry clears the earlier notification. If
+the crawler needs more information, it adds a new notification with the specific
+request and the submitted instructions ready to edit. Ordinary workflows and retries generate missing sample values by default.
+Generated values are added to the editable instructions. Payment workflows do
+not generate data, and deletion workflows remain blocked. Payment details,
+existing passwords, verification codes, and API keys require supplied values.
+Clearly new passwords for test accounts can be generated. Account-opening and
+contact forms can use generated values without being classified as payments.
+The action guard checks the chosen control and its target, and the browser
+blocks DELETE requests and delete paths. Other ordinary state changes, such as
+submitting a review, are allowed.
+The Site saves the instructions and generated values only after the workflow is
+reached. Site
+configuration lists these saved workflows and lets the user edit or remove
+them. Future crawls load the saved instructions and try those workflows again,
+even if the normal page crawl did not rediscover their starting URL. The URL
+must still belong to the site's host, and deletion remains blocked.
 
 For authenticated sites with multiple credentials, an optional **cross-user
 access check** can follow the crawl. AESPA loads known pages again for each
@@ -528,6 +573,27 @@ verification of known pages, not new page discovery.
 By default, the crawler schedules an anonymous phase alongside the authenticated phases. All phases run concurrently, so public pages are not guaranteed to be visited before authenticated pages. A run pinned to a valid `crawl_credential_id` uses only that credential when the site requires authentication. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
 
 **`max_pages` caps the total site-map size.** All phases run concurrently and share `_CrawlShared` (the `crawled_norms` dedup map + a `pages_done` counter, guarded by an `asyncio.Lock`). New nodes — both HTML pages and promoted API endpoints — are only created while `pages_done < max_pages`, so the number of distinct `CrawledPage` nodes in the site map never exceeds `max_pages` regardless of how many credential phases run. Already-discovered URLs still fall through the cap so every phase records its own access view of them (this is the differential broken-access-control signal); they don't create new nodes.
+
+URL crawls can optionally use **Group similar pages** (`services/route_sampling.py`). It uses no site-specific rules.
+
+- **Routes.** Before adding links to the browser queue, the crawler groups them into routes by URL shape. A path segment or query value that contains digits, is 20 or more characters long, or joins three or more words is treated as changing (an ID or slug); other segments are fixed words. A route can vary one segment, every changing segment together (`/{slug}/p/{id}`, `/2024/10/23/{id}/{slug}`), or its ID-like query values (`?p=123`, `?page=7`). A path route may group links that have different query values, but each complete URL remains a separate member. Single top-level pages are never grouped. Action words (account, admin, cart, checkout, login, search, new, edit, delete and similar) may be fixed parts of a route, such as `/admin/products/{slug}`, but never the part that varies; a URL ending in an action, such as `/admin/products/new` or `/orders/{id}/edit`, varies only its ID-like parts, so forms for different kinds of record are each visited. The target inventory keeps query order, repeated and empty query values, trailing slashes, fragments, and explicit browser state keys.
+- **When a route forms.** Links are counted per route across the whole crawl. A route forms at 10 links, or at 2 when other routes of the same URL shape already add up to 10 links or one has formed. This lets a news site's many small sections join quickly.
+- **Examples.** The crawler holds the route's other links, and visits examples it has not already queued ahead of ordinary links. It starts with three spread-out examples, then two more. Among candidate routes of one shape, only the largest takes examples; the others wait for its decision.
+- **Comparing pages.** Pages are compared by layout: a bottom-k sketch (256 hashes) of the element tag, id and class-name tokens, with digits and hex runs normalised. The typical example is the one most similar to the rest. An example belongs with it when its similarity is at least 0.75 of the typical similarity, and at least 0.5. This adapts to sites whose pages of one template are 0.65 similar as well as to those at 0.95. A route is confirmed when at least 75% of five or more examples belong together. The others are reported as examples that looked different.
+- **Rejection.** If no two of the first three examples match, or 12 examples are not enough, the route is rejected and its held links are crawled normally. Examples that fail to load are replaced (up to two). A mix of login-blocked and loaded examples rejects the route. A route whose links have all been visited is confirmed from three matching examples.
+- **Templates.** A confirmed route's typical page becomes a template for that account. A new route whose first example matches it is confirmed from that one page, so each further news section or product family costs one visit.
+- **Accounts.** Each account compares its own examples and reuses another account's example URLs, needing three. Accounts may see different pages.
+- **Leftover checks.** When an account's queue empties, any check that cannot finish releases its held links, so links are never silently dropped.
+- **Saving state.** Sampler state, including 256-hash sketches only for undecided examples and templates, is saved on the run when a route's status changes, otherwise at most every five seconds and when the crawl ends.
+- **Results.** Confirmed routes are shown in the site map and listed in the scan's recon context. Grouping limits crawl visits and indexing only. The Test Lead can test other in-scope URLs and object IDs without first indexing every page, including records outside the crawl sample for access control, ownership, and business-logic checks. Matching layouts do not prove that records share access rules. Traffic and finding evidence retain the concrete URLs tested. Route-level coverage does not prove that every record in a group was tested. The default **Visit each URL** mode and Interactive SPA mode do not use this grouping.
+
+The exact link inventory lives in `DiscoveredTarget`, with link sightings in `TargetDiscovery` and direct responses in `TargetAccessObservation`. A link sighting records which account saw the link. It does not prove access or ownership. The crawler saves eligible links before sampling. Inventory reads use SQL filters and cursor paging rather than a fixed list in the lead prompt.
+
+Object checks use `ScanObligation` with an exact target, method, and ordered pair of accounts. A successful response under an identified account supplies the baseline for a comparison. The comparison keeps its own execution and evidence. Unknown access and missing ownership evidence remain inconclusive. Discovered links alone create no coverage work or page records.
+
+`web_workprogram.web_completion` counts applicable page checks and deliberately selected object checks. An exact object check attaches to a page check only when that page match is unambiguous. A selected check on an uncrawled target adds one separate unit. Pending child checks remain pending even when the page has an earlier covered result. Grouped rows are a display view and do not decide completion.
+
+Attack Surface expands each group into a searchable, paged list of exact links. OWASP Coverage expands selected object checks inside their route. Finding markers remain visible while other checks are pending. Saved crawl archives retain the inventory and provenance. Older archives cannot recover links that were never saved.
 
 Interactive mode also explores bounded, replayable browser workflows. It can
 select radio buttons, checkboxes, and select options, then follow controls that
@@ -617,6 +683,12 @@ modal/no-route logins, non-standard field labels, and multi-step flows that the
 selector heuristics miss. Credential values are kept out of this LLM call: the
 model returns named placeholders such as `{{credential.policy_number}}` and the
 crawler substitutes the real values locally.
+
+### Reusing a crawl (export, import, and saved crawls)
+
+`services/crawl_archives.py` serializes a run's crawl into an `aespa-crawl-export` archive. The archive holds pages, links, per-credential views, target intelligence, traffic, scanner sessions, OWASP applicability, and crawl activity, including workflow notes and retries. `import_into_run()` restores an archive into a new pending run with no crawl data. It checks that the archive's base URL matches the site, reconnects workflow retries to their original notes, rebuilds the recon summary, and seeds a fresh coverage workprogram. Coverage results are not copied.
+
+Saved crawls (`SavedCrawl`, `services/saved_crawls.py`) store such an archive, gzip-compressed, on the **site** instead of in a file. They are created from a run (`POST /api/test-runs/{id}/crawl/save`) or from an uploaded export file (`POST /api/sites/{id}/saved-crawls/upload`), and loaded with `POST /api/test-runs/{id}/crawl/load/{saved_id}`. A saved crawl keeps `source_run_id` only as a plain reference, so it outlives the run it came from. Saved crawls are deleted when their site is deleted. List endpoints never return the archive itself.
 
 ---
 
@@ -954,6 +1026,33 @@ Input-bearing A03 cells additionally persist class-level states in `test_classes
 - `TestRun.coverage_mode` selects **Quick** (`track`), **Standard** (`standard`), **Full** (`enforce`), or **SAST Validate** (`sast_validate`). Standard requires the configured coverage percentage. In Full mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop. SAST Validate does not use the work program; it validates only open imported SAST leads and retains the HTTPS TLS posture check.
 - `get_web_coverage_matrix(run_id)` powers the coverage view inside the **Attack Surface & Coverage** tab (`GET /api/test-runs/{id}/coverage`).
 
+OWASP Coverage has **Pages** and **Workflows** tabs. The Pages tab keeps the
+page-by-category matrix and progress from applicable page and selected object checks. The Workflows tab reads
+workflow inventory and `WorkflowCoverageItem` rows from
+`GET /api/test-runs/{id}/workflow-coverage`. Crawl progress is separate from
+security check status. Reaching a page confirms the function or state was
+observed, not that a transaction was completed or security was tested.
+The Test Lead records a workflow result with expected and observed behavior and
+scan traffic IDs. Full mode keeps an untested or inconclusive workflow check
+open; a concrete blocker can close the check without counting it as covered.
+Standard mode lists the checks for the Test Lead but keeps its page coverage
+percentage unchanged. Deep mode creates named workflow testers from these same
+rows. The Test Lead's `coverage_gaps` view includes remaining workflow checks
+alongside page gaps, and the Full mode checklist names those checks.
+
+### Outdated JavaScript libraries (Retire.js)
+
+**Files**: `src/aespa/services/js_libraries.py`, `src/aespa/services/retire_repository.py`
+
+A deterministic module (`_run_outdated_js_module` in `scanner.py`) runs with the other site-level checks, including in passive mode. It reads script responses captured during the crawl, re-fetches in-scope scripts whose stored body was truncated (CDN scripts are judged from their URL and stored body only), and asks the live browser page for library versions. Versions are matched against the Retire.js list, and each outdated library version becomes one A06 finding naming the matched CVEs, where the version was found, and the version to upgrade to.
+
+SAST uses the same detector: Deep scans match npm/bower manifests and lockfiles from the repository model and scan vendored `.js` files; Light scans run the same checks after discovery (`browser_library_candidates`). Results become pending leads that go through normal validation.
+
+- The list is the Retire.js `jsrepository-v6.json`. A copy ships in `services/data/retire/` and is refreshed by the weekly `update-retire.yml` workflow (`scripts/update_retire_repository.py`).
+- When `retire_auto_update` is on, `retire_repository.ensure_fresh()` downloads the latest list into `<data_dir>/retire/` at scan start if the cached copy is more than a day old, using the ETag to skip unchanged files. A download is used only after `validate()` accepts it; any failure leaves the current copy in place.
+- **Settings → Global → Vulnerable Libraries** shows which copy is in use (`GET /api/settings/retire-list`) and has a **Refresh now** button (`POST /api/settings/retire-list/refresh`) that downloads the latest list immediately, even when automatic updates are off.
+- Supported extractors: `uri`, `filename`, `filecontent`, `filecontentreplace`, `hashes`, and browser-only `func` expressions. Retire.js `ast` extractors are not used, and the rare pattern Python cannot compile is skipped. Libraries that share a package (jQuery UI and its widgets) are reported together.
+
 ---
 
 ## 8. Multi-Agent System
@@ -1147,7 +1246,7 @@ The LLM service uses Anthropic prompt caching for large, repeated context blocks
 
 ### Upstream proxy
 
-All LLM SDK clients (GitHub Copilot, Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). Copilot receives this through its child-process `HTTP_PROXY` and `HTTPS_PROXY` environment. The direct HTTP clients use the proxy configuration described in `llm.py`.
+LLM SDK clients honour the saved application proxy and CA bundle. Bedrock credential refresh and model discovery use those settings too. Direct model discovery, model metadata, and ChatGPT sign-in requests use the same settings. CLI providers receive the proxy and CA path in their child-process environment. The CLI decides which certificate environment variables it supports. Scanner session checks use the testing proxy and CA bundle; Retire.js list updates use the testing CA bundle.
 
 ### Rate Limiting & Pacing
 
@@ -1188,7 +1287,7 @@ Active scan tasks are tracked by run. Stopping a run or disabling the extension 
 Findings are deduplicated as they are written, on the dynamic finding-write path in `scanner.py`:
 
 1. **Title normalisation** — before a finding is persisted, `llm.normalize_finding_titles` asks the LLM to rewrite its title to a canonical form so near-identical findings (same vulnerability class, different parameter name) collapse to the same heading. ALICE findings skip this pass (`skip_normalize=True`) because they already carry specific, human-readable titles — see §15.
-2. **Exact-title deduplication** — `_dynamic_finding_exists` then rejects any finding whose (normalised) title already exists at the same URL for the run, so genuinely identical findings are not written twice.
+2. **Matching saved findings** — The scanner compares the normalised title and exact affected URL within the run. If the new finding has higher severity in the same OWASP category, it replaces the earlier report's title, evidence, rating, and write-up while keeping its finding ID and public reference. The updated finding is validated again. Lower-severity repeats are skipped. Specialist reports with matching severity can still add supporting evidence.
 
 ### Validation
 
@@ -1731,7 +1830,7 @@ ALICE wrapper is made fully API-aware.
 
 ## 17. SAST Scanner & Scan Leads
 
-**Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
+**Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/sast_scanner_light.py`, `src/aespa/services/sast_scan_shared.py`, `src/aespa/services/source_tools.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
 
 The SAST scanner is a standalone agentic static-analysis pass over an immutable source archive that produces high-confidence vulnerability **leads**. Uploads use `POST /api/sast-runs` (multipart). Extension source providers use `POST /api/sast-runs/from-source`; the run enters `preparing` while the provider resolves the source and AESPA creates the archive. In both cases `collection_id` is NULL and the final archive is stored on the run (`source_archive_path` / `source_filename`). Users choose `analysis_mode=light` for the original lower-cost workflow or `analysis_mode=deep` for the current semantic workflow. The mode is saved on the run and used for starts, resumes, and reruns. Existing runs are migrated as Light. New API callers that omit the field use Deep. A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
 
@@ -1901,7 +2000,7 @@ The dynamic loop investigates leads via the shared `update_lead` action, which s
 
 Quick, Standard, and SAST Validate scans receive a compact index of every open imported lead and use `lead_detail` to retrieve the complete evidence one lead at a time. Quick and Standard scans keep their normal coverage work, but cannot finish while an imported lead is still open. A resumed scan receives a refreshed index so leads added or resolved after its checkpoint do not leave the conversation with stale work. Full scans retain the capped detailed lead block used by the general coverage workflow. The web and API Test Leads must verify every attack-path hop against live responses before calling `update_lead`. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
 
-Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import. The SAST run view also supports a complete JSON run export and restore. That bundle includes the source ZIP, saved phase/coverage/report state, original leads, activity logs, and component facts.
+Leads are exportable to Markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a structured JSON block for re-import. The same import dialog accepts external SARIF 2.1.0 and structured Markdown reports through `POST /api/test-runs/{id}/import-report` and its API-run equivalent. Multipart requests default to read-only preview; `preview=false` reparses and saves open, unverified `ScanLead` rows owned by the selected dynamic run. External rows use `producer_run_type="external"`, with `producer_run_id` pointing to the destination run for ownership rather than a source SAST run. Scanner/report provenance lives in `source_trace_json` and `provenance_json`. No source SAST run, source archive, scan job, or confirmed finding is created. Fingerprints deduplicate external findings within the destination run kind and ID. See [external scanner lead imports](external-scanner-leads.md) for formats and limits. The SAST run view also supports a complete JSON run export and restore. That bundle includes the source ZIP, saved phase/coverage/report state, original leads, activity logs, and component facts.
 
 The SAST workspace reads `GET /api/sast-runs/{id}/analysis` for authoritative
 phase state and deterministic coverage receipts. `GET .../handoff-targets` lists
@@ -1945,6 +2044,9 @@ Each result also saves the Test Lead model for a Site or API scan, and the SAST
 model for a SAST scan. If a Site or API scan imported SAST leads, the result
 lists the model for each source SAST run. Imported leads are matched by run type
 and ID so Site and API runs with the same numeric ID stay separate.
+Benchmark Lab model comparisons use the saved LLM proxy and CA bundle in a
+request-local scope, including older SAST assisted evaluations. Result publishing
+uses the same settings for its HTTPS upload.
 
 Ground truth and comparison results stay in the extension database. They are not
 included in scanner prompts, checkpoints, evidence receipts, SAST exports, or

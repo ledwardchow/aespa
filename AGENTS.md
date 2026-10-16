@@ -21,7 +21,8 @@ uv sync                              # install deps
 uv run playwright install chromium   # one-time, required for web crawl/scan
 uv run aespa                         # run the server -> http://127.0.0.1:8000
 
-uv run pytest                        # full suite, in-memory SQLite; requires local ports
+uv run pytest                        # full suite in parallel (pytest-xdist), in-memory SQLite; requires local ports
+uv run pytest -n 0                   # run serially, e.g. for breakpoints or print debugging
 uv run pytest tests/test_scanner_service.py            # one file
 uv run pytest tests/test_scanner_service.py::test_name # one test
 uv run pytest -k "validator and not api"               # by keyword
@@ -61,7 +62,7 @@ Frontend refactoring notes:
 ### Frontend layout and visual QA
 
 - Reusable tab bars depend on their parent layout. For example, Attack Surface and Coverage use `.activity-sub-tab-bar` with `.coverage-sub-tab-bar` inside a full-width wrapper. Do not copy only the child tab classes into a padded container.
-- The Agent Settings page has padded content: its scroll area has 16px top padding and the content column has 16px left padding. A full-width inner tab bar must be a sibling above the overflowed scroll area, or live inside a wrapper that owns the full-bleed layout. Negative margins inside `.scroll-content` do not work because its `overflow-x: hidden` clips the bar. Otherwise dark gutters appear along the top or left edge.
+- The Agent Settings page has padded content: its scroll area has 16px top padding and the content column has the standard 28px left page gutter. A full-width inner tab bar must be a sibling above the overflowed scroll area, or live inside a wrapper that owns the full-bleed layout. Negative margins inside `.scroll-content` do not work because its `overflow-x: hidden` clips the bar. Otherwise dark gutters appear along the top or left edge.
 - When changing a nested tab bar or panel, inspect the computed bounds of the bar and its parent after the build. Check the real route in a screenshot at desktop width and confirm that the bar reaches the same edges as its surrounding panel before finishing.
 
 ## Configuration
@@ -204,3 +205,12 @@ When updating `CHANGELOG.md`, write for users rather than implementation special
 - Avoid casual phrasing, promotional language, and repetitive sentence patterns that make the entry sound machine-generated.
 - Do not include source file paths or internal function and class names unless they are genuinely useful to the intended reader.
 - Preserve released changelog text and unrelated unreleased entries unless the user explicitly asks for them to be revised. You may revise or consolidate entries for the current unreleased work as described above.
+
+### Pull requests to `main`
+
+When the user asks for a pull request to `main`, do all of the following without asking for further confirmation:
+
+1. Commit all outstanding changes on the current branch and push it.
+2. Open the pull request with `gh pr create --base main`.
+3. Rename the `## Unreleased` heading in `CHANGELOG.md` to `## [PR #<number>] <Month> <Day> - <short title>`, matching earlier release headings (for example, `## [PR #283] October 16 - Workflow detection, grouped page routes`). Keep any short title the user has already added to the Unreleased heading.
+4. Commit and push the changelog heading change to the same branch so it is part of the pull request.

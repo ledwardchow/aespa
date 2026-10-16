@@ -33,6 +33,8 @@ const VARIANT = {
 };
 
 const LABEL_OVERRIDE = {
+  complete: "completed",
+  scanned: "completed",
   analyzing: "analysing",
   sast_running: "scanning code",
   correlating: "matching context",
@@ -42,8 +44,12 @@ const LABEL_OVERRIDE = {
   preparing: "preparing source",
 };
 
-export function StatusBadge({ status, className = "" }) {
+export function StatusBadge({ status, className = "", title }) {
   const variant = VARIANT[status] || "neutral";
   const label = LABEL_OVERRIDE[status] || status;
-  return <span className={`badge ${variant} ${className}`.trim()}>{label}</span>;
+  return (
+    <span className={`badge ${variant} ${className}`.trim()} title={title || undefined}>
+      {label}
+    </span>
+  );
 }

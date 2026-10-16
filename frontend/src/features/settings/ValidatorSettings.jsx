@@ -1,6 +1,7 @@
 import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect } from "react";
 import { validatorPayload, validatorToForm } from "./validatorForm.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function ValidatorSettings() {
   const [form, setForm] = useState(null);
@@ -44,7 +45,7 @@ export function ValidatorSettings() {
   return (
     <>
       {!form && !error && <div className="subtle">Loading…</div>}
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={!form} onDismiss={() => setError(null)} />
       {form && (
         <form className="card" onSubmit={onSubmit}>
           <div className="form-section-title">Adversarial Validator</div>

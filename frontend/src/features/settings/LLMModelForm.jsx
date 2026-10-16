@@ -1,7 +1,7 @@
 import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect, useMemo } from "react";
 import { llmProfileToForm, llmPayload, modelDefaults } from "./modelForm.js";
-import { API_FORMAT_LABELS } from "./providerMetadata.js";
+import { API_FORMAT_LABELS, DEFAULT_LLM_FORM } from "./providerMetadata.js";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
 import { sortModelNames } from "../../shared/lib/modelSorting.js";
@@ -21,7 +21,7 @@ export function LLMModelForm({
     if (mode !== "new" || !initialProviderId || !initialModel) return initialForm;
     const initialProvider = providers.find((item) => item.id === initialProviderId);
     return {
-      ...initialForm,
+      ...DEFAULT_LLM_FORM,
       ...modelDefaults(initialProvider, initialModel),
       name: initialProvider?.name ? `${initialProvider.name}/${initialModel}` : initialModel,
       provider_id: initialProviderId,
@@ -131,6 +131,10 @@ export function LLMModelForm({
     }));
   }, [mode, documentedOutput, preferredEffort]);
   const levels = Array.isArray(capability.supported_efforts) ? capability.supported_efforts : [];
+  const speedTiers = Array.isArray(capability.service_tiers)
+    ? capability.service_tiers.filter((tier) => tier?.id)
+    : [];
+  const selectedSpeed = speedTiers.find((tier) => tier.id === form.service_tier);
   const discoveredCapability = discoveredCapabilities[form.model] || {};
   const discoveredContext = Number(
     discoveredCapability.context_window_tokens || discoveredCapability.context_length || 0,
@@ -146,7 +150,6 @@ export function LLMModelForm({
   }, [detectedContext, form.max_context_auto]);
   return (
     <>
-      {error && <div className="alert error">{error}</div>}
       <form className="card" onSubmit={onSubmit}>
         <div className="form-section-title">Model</div>
         <div className="field">
@@ -176,6 +179,7 @@ export function LLMModelForm({
                 provider_id: newProviderId,
                 model: newModel,
                 reasoning_effort: "",
+                service_tier: "",
                 ...modelDefaults(provider, newModel),
                 ...limitsForModel(newProviderId, newModel),
               };
@@ -205,6 +209,7 @@ export function LLMModelForm({
               const updates = {
                 model: newModel,
                 reasoning_effort: "",
+                service_tier: "",
                 ...modelDefaults(selectedProvider, newModel),
                 ...limitsForModel(form.provider_id, newModel),
               };
@@ -261,6 +266,32 @@ export function LLMModelForm({
             </div>
           )}
         </div>
+        {(speedTiers.length > 0 || form.service_tier) && (
+          <div className="field">
+            <label htmlFor="model-config-speed">Speed</label>
+            <select
+              id="model-config-speed"
+              className="select"
+              value={form.service_tier || ""}
+              onChange={(e) => upd({ service_tier: e.target.value })}
+            >
+              <option value="">Standard</option>
+              {speedTiers.map((tier) => (
+                <option key={tier.id} value={tier.id}>
+                  {tier.name || tier.id}
+                </option>
+              ))}
+              {form.service_tier && !selectedSpeed && (
+                <option value={form.service_tier}>{form.service_tier} (saved)</option>
+              )}
+            </select>
+            <div className="field-hint">
+              {selectedSpeed?.description
+                ? `${selectedSpeed.description}.`
+                : "Faster speeds use your plan's usage limits more quickly."}
+            </div>
+          </div>
+        )}
         <div className="divider" />
         <div className="form-section-title">Sampling</div>
         <div className="two-col">
@@ -456,6 +487,11 @@ export function LLMModelForm({
               </span>
             )}
           </div>
+          {error && (
+            <div className="alert error form-error" role="alert">
+              {error}
+            </div>
+          )}
           <div className="row">
             {onCancel && (
               <button type="button" className="btn ghost" onClick={onCancel}>

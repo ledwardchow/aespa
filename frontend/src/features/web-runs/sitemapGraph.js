@@ -181,31 +181,56 @@ function groupedPageNode(identity, memberNodes) {
   };
 }
 
-function groupPageRoutes(pageNodes, pageDisplay) {
+function groupPageRoutes(pageNodes, pageDisplay, routeGroups = []) {
   if (pageDisplay !== "grouped") {
     return { nodes: pageNodes, nodeToGroup: new Map(), groups: [] };
   }
 
   const candidates = new Map();
   const individualNodes = [];
+  const sampledRoutes = new Map();
+  for (const routeGroup of routeGroups) {
+    for (const url of routeGroup.example_urls || []) sampledRoutes.set(url, routeGroup);
+  }
   for (const node of pageNodes) {
     if (node.state_kind === "interactive") {
       individualNodes.push(node);
       continue;
     }
     const identity = pageRouteIdentity(node);
-    if (!candidates.has(identity.key)) candidates.set(identity.key, { identity, members: [] });
-    candidates.get(identity.key).members.push(node);
+    const sampledRoute = sampledRoutes.get(node.url);
+    const key = sampledRoute ? `crawl:${sampledRoute.route_pattern}` : identity.key;
+    const routeIdentity = sampledRoute
+      ? {
+          key,
+          origin: new URL(node.url).origin,
+          path: sampledRoute.route_pattern.slice(new URL(node.url).origin.length),
+          slots: [],
+        }
+      : identity;
+    if (!candidates.has(key))
+      candidates.set(key, { identity: routeIdentity, members: [], sampledRoute });
+    candidates.get(key).members.push(node);
   }
 
   const groups = [];
   const nodeToGroup = new Map();
-  for (const { identity, members } of candidates.values()) {
+  for (const { identity, members, sampledRoute } of candidates.values()) {
     if (members.length < 2) {
       individualNodes.push(...members);
       continue;
     }
     const group = groupedPageNode(identity, members);
+    if (sampledRoute) {
+      group.isCrawlRouteGroup = true;
+      group.routeGroup = sampledRoute;
+      group.title = sampledRoute.label;
+      group.context =
+        `${sampledRoute.links_seen} links seen; ${sampledRoute.pages_sampled} example pages visited` +
+        (sampledRoute.examples_different
+          ? `; ${sampledRoute.examples_different} looked different.`
+          : ".");
+    }
     groups.push(group);
     for (const member of members) nodeToGroup.set(member.id, group.id);
   }
@@ -217,12 +242,13 @@ export function buildSitemapDisplayGraph(
   excludedExtensions,
   apiDisplay = "grouped",
   pageDisplay = "grouped",
+  routeGroups = [],
 ) {
   if (!graph) return null;
   const extensionFiltered = filterSitemapGraph(graph, excludedExtensions, false);
   const apiNodes = extensionFiltered.nodes.filter(isApiGraphNode);
   const rawPageNodes = extensionFiltered.nodes.filter((node) => !isApiGraphNode(node));
-  const pageResult = groupPageRoutes(rawPageNodes, pageDisplay);
+  const pageResult = groupPageRoutes(rawPageNodes, pageDisplay, routeGroups);
   const nodeToGroup = new Map(pageResult.nodeToGroup);
 
   let apiDisplayNodes = [];

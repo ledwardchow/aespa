@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import * as settingsApi from "../../shared/api/settings.js";
 import { IconCheck } from "../../shared/ui/Icons.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const DEFAULTS = {
   max_concurrent_workers: 6,
@@ -63,7 +64,7 @@ export function DeepScanSettings() {
   return (
     <>
       {!form && !error && <div className="subtle">Loading…</div>}
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={!form} onDismiss={() => setError(null)} />
       {form && (
         <form className="card" onSubmit={save}>
           <div className="form-section-title">Deep web scan</div>
@@ -224,7 +225,7 @@ export function DeepScanSettings() {
               )}
             </div>
             <button type="submit" className="btn" disabled={saving}>
-              {saving ? "Saving…" : "Save Deep Scan Settings"}
+              {saving ? "Saving…" : "Save Deep Scan settings"}
             </button>
           </div>
         </form>

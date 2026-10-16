@@ -225,7 +225,7 @@ export async function installFixtures(page, { empty = false } = {}) {
         workspace_mb: 16,
         output_limit_bytes: 65536,
         artifact_limit_bytes: 10485760,
-        max_requests_per_execution: 20,
+        max_requests_per_execution: 50,
         max_concurrent_requests: 5,
         max_concurrent_executions: 2,
         retain_redacted_source: true,

@@ -4,6 +4,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
@@ -824,120 +825,115 @@ def test_candidate_ledger_keeps_other_parameters_and_distant_sinks():
     }
 
 
-def test_candidate_ledger_merges_same_operation_with_different_agent_labels():
-    candidates = [
-        {
-            "candidate_id": 1,
-            "category": "A10",
-            "title": "SSRF in document import URL fetch",
-            "location": "src/handlers/import.py:70",
-            "suggested_endpoint": "POST /documents/import",
-            "source_trace": {"file": "src/handlers/import.py"},
-            "sink_trace": {
-                "file": "src/handlers/import.py",
-                "line": 70,
-                "symbol": "fetch_url",
-            },
-        },
-        {
-            "candidate_id": 2,
-            "category": "A10",
-            "title": "SSRF via URL fetch in document import",
-            "location": "src/handlers/import.py:74",
-            "suggested_endpoint": "POST /documents/import",
-            "source_trace": {"file": "src/handlers/import.py"},
-            "sink_trace": {
-                "file": "src/handlers/import.py",
-                "line": 74,
-                "symbol": "requests.get",
-            },
-        },
-    ]
-    assert reconcile_candidate_ledger(candidates)["unique"] == 1
+def _ledger_lead(
+    candidate_id: int,
+    category: str,
+    title: str,
+    endpoint: str,
+    source_file: str,
+    sink: str,
+    symbol: str,
+) -> dict:
+    sink_file, sink_line = sink.rsplit(":", 1)
+    return {
+        "candidate_id": candidate_id,
+        "category": category,
+        "title": title,
+        "location": sink,
+        "suggested_endpoint": endpoint,
+        "source_trace": {"file": source_file},
+        "sink_trace": {"file": sink_file, "line": int(sink_line), "symbol": symbol},
+    }
 
 
-def test_candidate_ledger_merges_same_output_sink_across_callers():
-    candidates = [
-        {
-            "candidate_id": 1,
-            "category": "A03",
-            "title": "Stored XSS from unescaped comment body in document view",
-            "location": "web/view.js:72",
-            "suggested_endpoint": "POST /comments",
-            "source_trace": {"file": "api/comments.py"},
-            "sink_trace": {"file": "web/view.js", "line": 72, "symbol": "innerHTML"},
-        },
-        {
-            "candidate_id": 2,
-            "category": "A03",
-            "title": "Stored XSS via unescaped comment body in document view",
-            "location": "web/view.js:72",
-            "suggested_endpoint": "GET /documents/{id}",
-            "source_trace": {"file": "api/documents.py"},
-            "sink_trace": {
-                "file": "web/view.js",
-                "line": 72,
-                "symbol": "renderComments",
-            },
-        },
-    ]
-    assert reconcile_candidate_ledger(candidates)["unique"] == 1
-
-
-def test_candidate_ledger_merges_shared_middleware_sink_across_routes():
-    candidates = [
-        {
-            "candidate_id": 1,
-            "category": "A07",
-            "title": "Token signature validation bypass in shared decoder",
-            "location": "src/auth/decode.py:48",
-            "suggested_endpoint": "GET /accounts",
-            "source_trace": {"file": "src/middleware/auth.py"},
-            "sink_trace": {
-                "file": "src/auth/decode.py",
-                "line": 48,
-                "symbol": "decode",
-            },
-        },
-        {
-            "candidate_id": 2,
-            "category": "A07",
-            "title": "Token signature not validated in shared decoder",
-            "location": "src/auth/decode.py:52",
-            "suggested_endpoint": "GET /profile",
-            "source_trace": {"file": "src/middleware/auth.py"},
-            "sink_trace": {
-                "file": "src/auth/decode.py",
-                "line": 52,
-                "symbol": "parseClaims",
-            },
-        },
-    ]
-    assert reconcile_candidate_ledger(candidates)["unique"] == 1
-
-
-def test_candidate_ledger_does_not_merge_different_methods_and_sinks():
-    candidates = [
-        {
-            "candidate_id": 1,
-            "category": "A03",
-            "title": "SQL injection in customer query",
-            "location": "api/customer.py:20",
-            "suggested_endpoint": "GET /customers",
-            "source_trace": {"file": "api/customer.py"},
-            "sink_trace": {"file": "api/customer.py", "line": 20, "symbol": "search"},
-        },
-        {
-            "candidate_id": 2,
-            "category": "A03",
-            "title": "SQL injection in customer query",
-            "location": "api/customer.py:25",
-            "suggested_endpoint": "POST /customers",
-            "source_trace": {"file": "api/customer.py"},
-            "sink_trace": {"file": "api/customer.py", "line": 25, "symbol": "create"},
-        },
-    ]
-    assert reconcile_candidate_ledger(candidates)["unique"] == 2
+@pytest.mark.parametrize(
+    ("first", "second", "unique"),
+    [
+        pytest.param(
+            (
+                "A10",
+                "SSRF in document import URL fetch",
+                "POST /documents/import",
+                "src/handlers/import.py",
+                "src/handlers/import.py:70",
+                "fetch_url",
+            ),
+            (
+                "A10",
+                "SSRF via URL fetch in document import",
+                "POST /documents/import",
+                "src/handlers/import.py",
+                "src/handlers/import.py:74",
+                "requests.get",
+            ),
+            1,
+            id="same_operation_with_different_agent_labels",
+        ),
+        pytest.param(
+            (
+                "A03",
+                "Stored XSS from unescaped comment body in document view",
+                "POST /comments",
+                "api/comments.py",
+                "web/view.js:72",
+                "innerHTML",
+            ),
+            (
+                "A03",
+                "Stored XSS via unescaped comment body in document view",
+                "GET /documents/{id}",
+                "api/documents.py",
+                "web/view.js:72",
+                "renderComments",
+            ),
+            1,
+            id="same_output_sink_across_callers",
+        ),
+        pytest.param(
+            (
+                "A07",
+                "Token signature validation bypass in shared decoder",
+                "GET /accounts",
+                "src/middleware/auth.py",
+                "src/auth/decode.py:48",
+                "decode",
+            ),
+            (
+                "A07",
+                "Token signature not validated in shared decoder",
+                "GET /profile",
+                "src/middleware/auth.py",
+                "src/auth/decode.py:52",
+                "parseClaims",
+            ),
+            1,
+            id="shared_middleware_sink_across_routes",
+        ),
+        pytest.param(
+            (
+                "A03",
+                "SQL injection in customer query",
+                "GET /customers",
+                "api/customer.py",
+                "api/customer.py:20",
+                "search",
+            ),
+            (
+                "A03",
+                "SQL injection in customer query",
+                "POST /customers",
+                "api/customer.py",
+                "api/customer.py:25",
+                "create",
+            ),
+            2,
+            id="different_methods_and_sinks_stay_separate",
+        ),
+    ],
+)
+def test_candidate_ledger_merges_only_the_same_issue(first, second, unique):
+    candidates = [_ledger_lead(1, *first), _ledger_lead(2, *second)]
+    assert reconcile_candidate_ledger(candidates)["unique"] == unique
 
 
 def test_candidate_ledger_does_not_fold_combined_issues_into_one_cause():

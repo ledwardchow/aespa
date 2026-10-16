@@ -19,6 +19,8 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import httpx
 import jwt
 
+from aespa.services.llm_network import httpx_options
+
 AUTH_URL = "https://auth.openai.com/api/accounts/authorize"
 TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token"
 JWKS_URL = "https://auth.openai.com/.well-known/jwks.json"
@@ -29,6 +31,13 @@ _lock = asyncio.Lock()
 _pending: dict[str, dict[str, Any]] = {}
 _access_check_lock = asyncio.Lock()
 _access_checks: dict[str, tuple[float, dict[str, Any]]] = {}
+
+_DEAD_REFRESH_ERRORS = {"invalid_grant", "invalid_client", "unauthorized_client"}
+
+
+class ChatGPTSignInRequired(RuntimeError):
+    """The saved ChatGPT sign-in is missing or was rejected; sign in again."""
+
 
 _ACCESS_CHECK_MODELS = (
     "gpt-6-sol",
@@ -175,7 +184,7 @@ async def start_login(client_id: str | None = None) -> dict[str, str]:
                 issued_id = client_id or issued_id
                 if not code or not issued_id or issued_id == "dynamic_agent_client":
                     raise ValueError("ChatGPT did not complete registration")
-                async with httpx.AsyncClient(timeout=20) as http:
+                async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
                     response = await http.post(
                         TOKEN_URL,
                         data={
@@ -320,6 +329,17 @@ def login_status(login_id: str) -> dict[str, str]:
     return {"status": attempt["status"], "error": attempt.get("error", "")}
 
 
+def _oauth_error_code(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        error = error.get("code")
+    return str(error) if isinstance(error, str) else ""
+
+
 async def access_token(client_id: str | None = None) -> str:
     async with _lock:
         async with _credential_lock():
@@ -327,23 +347,47 @@ async def access_token(client_id: str | None = None) -> str:
             client_id = client_id or data.get("active")
             account = data.get("accounts", {}).get(client_id) if client_id else None
             if not account or not account.get("refresh_token"):
-                raise RuntimeError(
+                raise ChatGPTSignInRequired(
                     "Sign in with ChatGPT in LLM settings before starting a scan"
                 )
             if account.get("expires_at", 0) > time.time() + 120:
                 return account["access_token"]
-            async with httpx.AsyncClient(timeout=20) as http:
-                response = await http.post(
-                    TOKEN_URL,
-                    data={
-                        "grant_type": "refresh_token",
-                        "client_id": client_id,
-                        "refresh_token": account["refresh_token"],
-                        "resource": RESOURCE,
-                    },
+            try:
+                async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
+                    response = await http.post(
+                        TOKEN_URL,
+                        data={
+                            "grant_type": "refresh_token",
+                            "client_id": client_id,
+                            "refresh_token": account["refresh_token"],
+                            "resource": RESOURCE,
+                        },
+                    )
+            except httpx.HTTPError as exc:
+                raise RuntimeError(
+                    f"Could not reach ChatGPT to renew sign-in: {exc}"
+                ) from exc
+            if response.status_code >= 400:
+                code = _oauth_error_code(response)
+                if response.status_code == 401 or code in _DEAD_REFRESH_ERRORS:
+                    for key in (
+                        "access_token",
+                        "refresh_token",
+                        "id_token",
+                        "expires_at",
+                    ):
+                        account.pop(key, None)
+                    _write(data)
+                    _access_checks.pop(client_id, None)
+                    raise ChatGPTSignInRequired(
+                        "ChatGPT sign-in has expired or was revoked. "
+                        "Sign in again in LLM settings."
+                    )
+                raise RuntimeError(
+                    "ChatGPT sign-in could not be renewed "
+                    f"(HTTP {response.status_code}{f', {code}' if code else ''})"
                 )
-                response.raise_for_status()
-                tokens = response.json()
+            tokens = response.json()
             scopes = set(tokens.get("scope", "").split()) or set(
                 account.get("scopes", [])
             )
@@ -359,19 +403,43 @@ async def access_token(client_id: str | None = None) -> str:
             return account["access_token"]
 
 
-async def discover_models(client_id: str | None = None) -> list[str]:
+def _service_tiers(row: dict[str, Any]) -> list[dict[str, str]]:
+    """Return the optional speed tiers, such as Fast, offered for one model."""
+    tiers: list[dict[str, str]] = []
+    for item in row.get("service_tiers") or []:
+        if isinstance(item, str):
+            item = {"id": item}
+        if not isinstance(item, dict):
+            continue
+        tier_id = str(item.get("id") or "").strip()
+        if not tier_id or any(tier["id"] == tier_id for tier in tiers):
+            continue
+        tier = {"id": tier_id, "name": str(item.get("name") or tier_id).strip()}
+        if isinstance(item.get("description"), str) and item["description"].strip():
+            tier["description"] = item["description"].strip()
+        tiers.append(tier)
+    return tiers
+
+
+async def discover_model_options(
+    client_id: str | None = None,
+) -> list[dict[str, Any]]:
     token = await access_token(client_id)
-    async with httpx.AsyncClient(timeout=20) as http:
+    async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
         response = await http.get(
             f"{RESOURCE}/models", headers={"Authorization": f"Bearer {token}"}
         )
         response.raise_for_status()
         rows = response.json().get("models", [])
     return [
-        str(row["slug"])
+        {"id": str(row["slug"]), "service_tiers": _service_tiers(row)}
         for row in rows
-        if row.get("visibility") == "list" and row.get("slug")
+        if isinstance(row, dict) and row.get("visibility") == "list" and row.get("slug")
     ]
+
+
+async def discover_models(client_id: str | None = None) -> list[str]:
+    return [row["id"] for row in await discover_model_options(client_id)]
 
 
 async def _probe_model(
@@ -450,12 +518,17 @@ async def check_access(client_id: str, *, force: bool = False) -> dict[str, Any]
         if cached and not force and cached[0] > time.time():
             return cached[1]
         token = await access_token(client_id)
-        async with httpx.AsyncClient(timeout=30) as http:
+        async with httpx.AsyncClient(timeout=30, **httpx_options()) as http:
             limit = asyncio.Semaphore(2)
 
             async def check(model: str) -> dict[str, Any]:
                 async with limit:
-                    return await _probe_model(http, token, model)
+                    try:
+                        return await _probe_model(http, token, model)
+                    except httpx.TimeoutException as exc:
+                        raise RuntimeError(
+                            f"ChatGPT access check timed out while checking {model}"
+                        ) from exc
 
             results = await asyncio.gather(
                 *(check(model) for model in _ACCESS_CHECK_MODELS)
@@ -513,7 +586,7 @@ async def sign_out(client_id: str) -> None:
                 raise ValueError("Saved ChatGPT account was not found")
             refresh_token = account.get("refresh_token")
             if refresh_token:
-                async with httpx.AsyncClient(timeout=20) as http:
+                async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
                     discovery = await http.get(
                         f"{ISSUER}/.well-known/openid-configuration"
                     )

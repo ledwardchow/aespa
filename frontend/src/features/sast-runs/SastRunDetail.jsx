@@ -10,13 +10,15 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
+import { useHashTab } from "../../shared/navigation/useHashTab.js";
 import { sastCandidatesToMarkdown, sastReportFilename } from "../../shared/leads/files.js";
 import { downloadTextFile } from "../../shared/lib/download.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
-import { DismissibleAlert } from "../../shared/ui/DismissibleAlert.jsx";
+import { Notice, PageError } from "../../shared/ui/Notice.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
+import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { jsonListValue } from "../../shared/ui/SastLeadDetails.jsx";
 
 const DEEP_PHASES = [
@@ -101,7 +103,11 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const [profiles, setProfiles] = useState([]);
   const [tokenUsage, setTokenUsage] = useState(null);
   const tab = normaliseTab(initialTab);
-  const [activePhase, setActivePhase] = useState(null);
+  const [activePhase] = useHashTab(
+    "phase",
+    DEEP_PHASES.map((phase) => phase.key),
+    null,
+  );
   const [selectedLeadId, setSelectedLeadId] = useState(null);
   const [scanRunning, setScanRunning] = useState(false);
   const [resumableWork, setResumableWork] = useState(false);
@@ -126,7 +132,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           sastRunsApi.getSastAgentLog(runId),
           sastRunsApi.getSastLeads(runId),
           sastRunsApi.getSastTokenUsage(runId),
-          sastRunsApi.getSastHandoffTargets(runId),
+          sastRunsApi.getSastLiveTargets(runId),
         ]);
       setRun(runData);
       setScanRunning(status.running);
@@ -208,7 +214,9 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
       ? "report"
       : phases.find((phase) => statuses[phase.key] === "pending")?.key) ||
     "report";
-  const displayedPhase = activePhase || TAB_PHASES[tab] || currentPhase;
+  const displayedPhase = phases.some((phase) => phase.key === activePhase)
+    ? activePhase
+    : TAB_PHASES[tab] || currentPhase;
   const selectedLead = useMemo(
     () => leads.find((lead) => lead.id === selectedLeadId) || leads[0] || null,
     [leads, selectedLeadId],
@@ -235,7 +243,6 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const efficiencyTelemetry = analysis.report?.efficiency_telemetry || [];
   const semanticStatus = scanRunning ? "running" : run?.status;
   const goTab = (nextTab) => {
-    setActivePhase(null);
     nav(runHref({ runKind: "sast", runId }, nextTab));
   };
   const onStart = async () => {
@@ -243,7 +250,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     setError(null);
     try {
       await sastRunsApi.startSastScan(runId);
-      setActivePhase(null);
+      if (activePhase) nav(runHref({ runKind: "sast", runId }, tab));
       setScanRunning(true);
       await loadData();
     } catch (err) {
@@ -299,7 +306,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     }
   };
   const onDelete = async () => {
-    if (!confirm("Delete this SAST run and all its leads?")) return;
+    if (!confirm(`Delete "${run?.name || "this SAST run"}" and all its leads?`)) return;
     try {
       const collId = run?.collection_id;
       await sastRunsApi.deleteSastRun(runId);
@@ -313,13 +320,11 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     setError(null);
     setNotice(null);
     try {
-      const result = await sastRunsApi.handoffSastLead(runId, lead.id, {
-        run_type: target.run_type,
-        run_id: target.run_id,
+      const result = await sastRunsApi.createSastLiveTestRun(runId, lead.id, {
+        target_type: target.target_type,
+        target_id: target.target_id,
       });
-      setNotice(
-        `Lead ${lead.reference || `#${lead.id}`} queued as ${result.lead_reference || `#${result.lead_id}`} in ${target.run_type.toUpperCase()} run #${target.run_id}.`,
-      );
+      nav(runHref({ runKind: result.run_type, runId: result.run_id }));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -399,7 +404,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         title={
           <span className="sast-header-title">
             <span className="sast-header-main">
-              <Crumb href="#/sast-runs">SAST</Crumb>
+              <Crumb href="#/sast-runs">SAST Scans</Crumb>
               <Sep />
               <span className="sast-header-name">{run.name}</span>
               <span className="badge neutral">
@@ -429,7 +434,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             />
             {canStart && (
               <button className="btn" disabled={startBusy} onClick={onStart}>
-                {startBusy ? "Starting…" : "Start SAST Scan"}
+                {startBusy ? "Starting…" : "Start scan"}
               </button>
             )}
             {canResume && (
@@ -437,8 +442,8 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
                 {startBusy
                   ? "Resuming…"
                   : run.status === "paused"
-                    ? "Resume SAST Scan"
-                    : "Resume Failed Work"}
+                    ? "Resume scan"
+                    : "Resume failed work"}
               </button>
             )}
             {canResumeSource && (
@@ -493,8 +498,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               key={phase.key}
               className={`sast-phase-step ${displayedPhase === phase.key ? "active" : ""} status-${statuses[phase.key]}`}
               onClick={() => {
-                setActivePhase(phase.key);
-                nav(runHref({ runKind: "sast", runId }, phase.view));
+                nav(`${runHref({ runKind: "sast", runId }, phase.view)}?phase=${phase.key}`);
               }}
               role="tab"
               aria-selected={displayedPhase === phase.key}
@@ -543,25 +547,22 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
             </button>
           ))}
         </div>
+        <TokenUsageBar
+          tokenUsage={tokenUsage}
+          tokenExpanded={tokenExpanded}
+          setTokenExpanded={setTokenExpanded}
+        />
         <div
           className={"sast-run-content" + (tab === "activity" ? " sast-run-content--activity" : "")}
         >
-          {error ? (
-            <DismissibleAlert variant="error" onDismiss={() => setError(null)}>
-              {error}
-            </DismissibleAlert>
-          ) : null}
+          <PageError error={error} onDismiss={() => setError(null)} />
           {run.error_message && ["failed", "cancelled"].includes(run.status) ? (
             <div className="alert error">{run.error_message}</div>
           ) : null}
           {notice ? (
-            <DismissibleAlert
-              variant="info"
-              className="sast-inline-notice"
-              onDismiss={() => setNotice(null)}
-            >
+            <Notice variant="info" onDismiss={() => setNotice(null)}>
               {notice}
-            </DismissibleAlert>
+            </Notice>
           ) : null}
           {tab === "coverage" ? (
             <div className="sast-summary-grid sast-run-summary-grid">
@@ -613,6 +614,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           ) : null}
           {tab === "candidates" && (
             <CandidatesView
+              runId={runId}
               leads={leads}
               selectedLead={selectedLead}
               onSelect={setSelectedLeadId}
@@ -624,6 +626,10 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               onRevalidate={onRevalidate}
               revalidatingLeadId={revalidatingLeadId}
               canRevalidate={run?.status === "completed" && !scanRunning && !resumableWork}
+              initialLeadRef={initialLeadRef}
+              onCloseDetail={() => {
+                if (initialLeadRef) nav(runHref({ runKind: "sast", runId }, "candidates"));
+              }}
             />
           )}
           {tab === "coverage" && (
@@ -669,9 +675,6 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               logs={logs}
               agentLog={agentLog}
               scanRunning={scanRunning}
-              tokenUsage={tokenUsage}
-              tokenExpanded={tokenExpanded}
-              setTokenExpanded={setTokenExpanded}
               runId={runId}
               analysisMode={run.analysis_mode}
             />

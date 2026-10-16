@@ -3,20 +3,27 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from aespa.db import get_session
 from aespa.models import (
+    CoverageEvidence,
     CrawledPage,
+    DiscoveredTarget,
     PageCredentialView,
     PageLink,
+    PageOwaspTest,
+    ProbeExecution,
     SastRun,
     ScanFinding,
     ScannerSession,
+    ScanObligation,
     Site,
+    TargetAccessObservation,
+    TargetDiscovery,
     TargetIntelItem,
     TestRun,
     TestRunStatus,
@@ -29,6 +36,8 @@ from aespa.schemas import (
     CredentialSummary,
     GraphData,
     PageCredentialViewOut,
+    SavedCrawlCreate,
+    SavedCrawlOut,
     ScanLeadOut,
     ScannerSessionOut,
     ScannerSessionSummary,
@@ -43,9 +52,11 @@ from aespa.schemas import (
     TestRunUpdate,
 )
 from aespa.services import active_jobs as active_jobs_svc
-from aespa.services import crawl_archives, run_cleanup
+from aespa.services import crawl_archives, crawl_then_pentest, run_cleanup
+from aespa.services import crawl_workflows as crawl_workflows_svc
 from aespa.services import crawler as crawler_svc
 from aespa.services import recon_summary as recon_summary_svc
+from aespa.services import saved_crawls as saved_crawls_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services import settings as settings_service
@@ -56,6 +67,13 @@ from aespa.services.run_graph import build_run_graph
 from aespa.services.settings import get_llm_config_for_run
 
 router = APIRouter(tags=["test_runs"])
+
+
+class WorkflowRetryBody(BaseModel):
+    instructions: str
+    save_to_site: bool = False
+    generate_sample_data: bool = False
+
 
 _CRAWL_OWNED_PHASES = {"created", "crawling", "reconciling", "finalizing"}
 
@@ -86,6 +104,11 @@ def _run_summary(run: TestRun, session: Session) -> TestRunSummary:
         for c in (site.credentials if site else [])
     ]
     s = TestRunSummary.model_validate(run)
+    try:
+        groups = json.loads(run.route_groups_json or "[]")
+        s.route_groups = groups if isinstance(groups, list) else []
+    except (TypeError, ValueError):
+        s.route_groups = []
     s.credentials = creds
     policy = settings_service.get_run_scanner_policy(session, run)
     s.scanner_policy = policy.model_dump(mode="json")
@@ -140,10 +163,42 @@ def _auto_name(session: Session, site_id: int) -> str:
     return f"Run #{len(existing) + 1}"
 
 
+def _validate_page_selection(crawler_mode: str, page_selection: str) -> None:
+    if crawler_mode != "url" and page_selection != "each_url":
+        raise HTTPException(
+            status_code=422,
+            detail="Group similar pages is available only with URL crawl",
+        )
+
+
 def _clear_crawl_state(session: Session, run: TestRun) -> None:
     run_id = run.id
     if run_id is None:
         return
+
+    executions = session.exec(
+        select(ProbeExecution).where(ProbeExecution.run_kind == "web").where(ProbeExecution.run_id == run_id)
+    ).all()
+    for execution in executions:
+        for evidence in session.exec(select(CoverageEvidence).where(CoverageEvidence.execution_id == execution.id)).all():
+            session.delete(evidence)
+        session.delete(execution)
+    for row in session.exec(
+        select(ScanObligation).where(ScanObligation.run_kind == "web").where(ScanObligation.run_id == run_id)
+    ).all():
+        session.delete(row)
+    session.flush()
+    for row in session.exec(select(TargetAccessObservation).where(TargetAccessObservation.test_run_id == run_id)).all():
+        session.delete(row)
+    for row in session.exec(select(TargetDiscovery).where(TargetDiscovery.test_run_id == run_id)).all():
+        session.delete(row)
+    session.flush()
+    for cell in session.exec(select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)).all():
+        session.delete(cell)
+    session.flush()
+    for row in session.exec(select(DiscoveredTarget).where(DiscoveredTarget.test_run_id == run_id)).all():
+        session.delete(row)
+    session.flush()
 
     for finding in session.exec(
         select(ScanFinding).where(ScanFinding.test_run_id == run_id)
@@ -179,6 +234,10 @@ def _clear_crawl_state(session: Session, run: TestRun) -> None:
     run.error_message = None
     run.current_url = None
     run.per_user_progress = None
+    run.crawl_started_once = False
+    run.route_groups_json = "[]"
+    run.route_sampling_state_json = "{}"
+    run.discovery_completeness = "incomplete"
     session.add(run)
 
 
@@ -196,6 +255,7 @@ def create_test_run(
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     _get_site_or_404(session, site_id)
+    _validate_page_selection(payload.crawler_mode, payload.page_selection)
     if payload.llm_config_id is not None:
         from aespa.models import LLMConfig
 
@@ -214,6 +274,7 @@ def create_test_run(
         max_depth=payload.max_depth,
         max_pages=payload.max_pages,
         crawler_mode=payload.crawler_mode,
+        page_selection=payload.page_selection,
         scan_mode=policy.scan_mode,
         scanner_policy_json="{}",
         llm_config_id=payload.llm_config_id,
@@ -258,6 +319,7 @@ def get_test_run(
 @router.delete("/api/test-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_test_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
+    crawl_then_pentest.cancel(run_id)
     from aespa.services import campaigns as campaigns_svc
 
     await campaigns_svc.stop_member_tasks_for_run("web", run_id)
@@ -296,12 +358,27 @@ async def delete_test_run(run_id: int, session: Session = Depends(get_session)) 
 
 @router.get("/api/test-runs/{run_id}/sast-runs/available")
 def list_available_sast_runs(
-    run_id: int, session: Session = Depends(get_session)
-) -> list[dict]:
-    """Completed SAST runs with leads — the dropdown source for importing leads."""
+    run_id: int,
+    session: Session = Depends(get_session),
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=10, ge=1, le=50),
+    q: str = Query(default="", max_length=200),
+) -> list[dict] | dict:
+    """Completed SAST sources; opt into searchable pages with the page parameter."""
     from aespa.models import SastRun
 
     _get_run_or_404(session, run_id)
+    if page is not None:
+        from aespa.services.sast_imports import search_import_sources
+
+        return search_import_sources(
+            session,
+            run_kind="web",
+            run_id=run_id,
+            query=q,
+            page=page,
+            page_size=page_size,
+        )
     runs = session.exec(
         select(SastRun)
         .where(SastRun.status == "completed")
@@ -436,6 +513,17 @@ def update_test_run(
         raise HTTPException(
             status_code=409, detail="Cannot edit settings while crawl is running"
         )
+    next_crawler_mode = payload.crawler_mode or run.crawler_mode
+    next_page_selection = payload.page_selection or run.page_selection
+    _validate_page_selection(next_crawler_mode, next_page_selection)
+    if run.crawl_started_once and (
+        next_crawler_mode != run.crawler_mode
+        or next_page_selection != run.page_selection
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Clear or restart the crawl to change its mode or page selection",
+        )
     run.max_depth = payload.max_depth
     run.max_pages = payload.max_pages
     run.llm_max_concurrency = (
@@ -445,6 +533,8 @@ def update_test_run(
     )
     if payload.crawler_mode is not None:
         run.crawler_mode = payload.crawler_mode
+    if payload.page_selection is not None:
+        run.page_selection = payload.page_selection
     if payload.llm_config_id is not None:
         # Validate the model exists
         from aespa.models import LLMConfig
@@ -500,6 +590,37 @@ async def start_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    next_crawler_mode = (
+        body.crawler_mode if body and body.crawler_mode else run.crawler_mode
+    )
+    next_page_selection = (
+        body.page_selection if body and body.page_selection else run.page_selection
+    )
+    _validate_page_selection(next_crawler_mode, next_page_selection)
+    if run.crawl_started_once and (
+        next_crawler_mode != run.crawler_mode
+        or next_page_selection != run.page_selection
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Clear or restart the crawl to change its mode or page selection",
+        )
+    if body and body.start_pentest_after_crawl:
+        from aespa.api.scan import _reject_incompatible_scan_mode
+
+        if scanner_svc.is_thinking_running(run_id):
+            raise HTTPException(status_code=409, detail="Dynamic Scan already running")
+        if body.coverage_mode is not None:
+            _reject_incompatible_scan_mode(session, run, body.coverage_mode)
+            run.coverage_mode = body.coverage_mode
+        if run.coverage_mode == "sast_validate":
+            from aespa.services.scan_leads import get_leads_for_run
+
+            if not get_leads_for_run("web", run_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail="No open imported SAST leads are available to validate",
+                )
     if body and body.crawl_credential_id is not None:
         from aespa.models import Credential
 
@@ -516,9 +637,14 @@ async def start_test_run(
     # Clear stale per_user_progress synchronously so the response (and the
     # first poll) never contains data from a previous crawl.
     run.per_user_progress = None
+    run.crawler_mode = next_crawler_mode
+    run.page_selection = next_page_selection
+    run.crawl_started_once = True
     session.add(run)
     session.commit()
-    await crawler_svc.start_crawl(run_id)
+    crawl_task = await crawler_svc.start_crawl(run_id)
+    if body and body.start_pentest_after_crawl:
+        crawl_then_pentest.schedule(run_id, crawl_task)
     return _run_summary(run, session)
 
 
@@ -537,6 +663,13 @@ async def restart_test_run(
             status_code=400,
             detail="No LLM configuration found. Configure it in Settings first.",
         )
+    next_crawler_mode = (
+        body.crawler_mode if body and body.crawler_mode else run.crawler_mode
+    )
+    next_page_selection = (
+        body.page_selection if body and body.page_selection else run.page_selection
+    )
+    _validate_page_selection(next_crawler_mode, next_page_selection)
     if body and body.crawl_credential_id is not None:
         from aespa.models import Credential
 
@@ -550,6 +683,9 @@ async def restart_test_run(
     else:
         run.crawl_credential_id = None
     _clear_crawl_state(session, run)
+    run.crawler_mode = next_crawler_mode
+    run.page_selection = next_page_selection
+    run.crawl_started_once = True
     session.commit()
     session.refresh(run)
     summary = _run_summary(run, session)
@@ -626,17 +762,6 @@ async def import_test_run_crawl(
 ) -> TestRunSummary:
     """Populate a new run from an exported crawl without re-running Playwright."""
     run = _get_run_or_404(session, run_id)
-    if run.status != TestRunStatus.pending:
-        raise HTTPException(
-            status_code=409,
-            detail="Crawl data can only be imported into a new pending run",
-        )
-    if session.exec(
-        select(CrawledPage).where(CrawledPage.test_run_id == run_id)
-    ).first():
-        raise HTTPException(
-            status_code=409, detail="Clear this run's crawl data before importing"
-        )
     raw = await file.read()
     try:
         payload = json.loads(raw)
@@ -646,18 +771,47 @@ async def import_test_run_crawl(
         ) from exc
     site = _get_site_or_404(session, run.site_id)
     try:
-        crawl = crawl_archives.validate_archive(payload, site.base_url)
+        crawl_archives.import_into_run(session, run, payload, site)
     except crawl_archives.ArchiveError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return _run_summary(run, session)
 
+
+@router.post(
+    "/api/test-runs/{run_id}/crawl/save",
+    response_model=SavedCrawlOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def save_test_run_crawl(
+    run_id: int, payload: SavedCrawlCreate, session: Session = Depends(get_session)
+) -> SavedCrawlOut:
+    """Keep this run's crawl on its site so later runs can load it."""
+    run = _get_run_or_404(session, run_id)
     try:
-        pages_by_url = crawl_archives.restore_archive_records(
-            session, run_id, crawl, site
+        saved = saved_crawls_svc.save_from_run(
+            session, run, payload.name, payload.notes
         )
     except crawl_archives.ArchiveError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return SavedCrawlOut.model_validate(saved).model_copy(
+        update={"source_run_exists": True}
+    )
 
-    crawl_archives.finish_archive_import(session, run, crawl, pages_by_url)
+
+@router.post(
+    "/api/test-runs/{run_id}/crawl/load/{saved_crawl_id}",
+    response_model=TestRunSummary,
+)
+def load_saved_crawl(
+    run_id: int, saved_crawl_id: int, session: Session = Depends(get_session)
+) -> TestRunSummary:
+    """Populate a new pending run from a crawl saved on its site."""
+    run = _get_run_or_404(session, run_id)
+    try:
+        saved = saved_crawls_svc.get_for_site(session, run.site_id, saved_crawl_id)
+        saved_crawls_svc.load_into_run(session, saved, run)
+    except crawl_archives.ArchiveError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     return _run_summary(run, session)
 
 
@@ -668,6 +822,7 @@ def stop_test_run(
     run = _get_run_or_404(session, run_id)
     if not crawler_svc.is_running(run_id):
         raise HTTPException(status_code=409, detail="Crawl is not currently running")
+    crawl_then_pentest.cancel(run_id)
     crawler_svc.request_stop(run_id)
     # The Dynamic Scan can run at the same time as the crawler and owns the
     # shared run status once its phase starts. Stopping the crawler must not
@@ -693,6 +848,31 @@ def get_web_coverage_matrix(
     return web_workprogram.get_web_coverage_matrix(run_id)
 
 
+@router.get("/api/test-runs/{run_id}/discovered-targets")
+def get_discovered_targets(
+    run_id: int,
+    route_pattern: str | None = None,
+    search: str | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    session: Session = Depends(get_session),
+) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services.target_catalog import list_targets
+
+    try:
+        return list_targets(
+            run_id,
+            route_pattern_filter=route_pattern,
+            search=search,
+            cursor=cursor,
+            limit=limit,
+            session=session,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/api/test-runs/{run_id}/coverage/seed")
 def seed_web_coverage(run_id: int, session: Session = Depends(get_session)) -> dict:
     _get_run_or_404(session, run_id)
@@ -700,6 +880,18 @@ def seed_web_coverage(run_id: int, session: Session = Depends(get_session)) -> d
 
     created = web_workprogram.seed_web_workprogram(run_id)
     return {"ok": True, "created": created}
+
+
+@router.get("/api/test-runs/{run_id}/workflow-coverage")
+def get_workflow_coverage(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services.workflow_workprogram import (
+        list_workflow_tests,
+        seed_workflow_tests,
+    )
+
+    seed_workflow_tests(run_id)
+    return list_workflow_tests(run_id)
 
 
 # ── Pages + graph ─────────────────────────────────────────────────────────────
@@ -1009,6 +1201,57 @@ def get_recon_summary(
     # The tab polls while a scan is active. Rebuild from canonical rows so routes,
     # access observations, findings, and coverage never lag behind stored JSON.
     return recon_summary_svc.build_recon_summary(run_id, session=session, persist=False)
+
+
+@router.get("/api/test-runs/{run_id}/crawl/workflows")
+def get_crawl_workflows(run_id: int, session: Session = Depends(get_session)) -> dict:
+    _get_run_or_404(session, run_id)
+    return {"notes": crawl_workflows_svc.list_workflow_notes(session, run_id)}
+
+
+@router.get("/api/test-runs/{run_id}/crawl/workflows/retry/status")
+def get_crawl_workflow_retry_status(
+    run_id: int, session: Session = Depends(get_session)
+) -> dict:
+    _get_run_or_404(session, run_id)
+    return crawl_workflows_svc.workflow_retry_status(run_id)
+
+
+@router.post("/api/test-runs/{run_id}/crawl/workflows/{note_id}/retry")
+async def retry_crawl_workflow(
+    run_id: int,
+    note_id: int,
+    body: WorkflowRetryBody,
+    session: Session = Depends(get_session),
+) -> dict:
+    run = _get_run_or_404(session, run_id)
+    if run.status == TestRunStatus.running:
+        raise HTTPException(status_code=409, detail="Wait for the run to finish first.")
+    note = next(
+        (
+            item
+            for item in crawl_workflows_svc.list_workflow_notes(session, run_id)
+            if item["id"] == note_id
+        ),
+        None,
+    )
+    if note is None:
+        raise HTTPException(status_code=404, detail="Workflow note not found.")
+    if not crawl_workflows_svc.can_retry_workflow(note):
+        raise HTTPException(
+            status_code=409,
+            detail="This workflow cannot be retried.",
+        )
+    try:
+        return crawl_workflows_svc.start_workflow_retry(
+            run_id,
+            note,
+            body.instructions,
+            save_to_site=body.save_to_site,
+            generate_sample_data=body.generate_sample_data,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 # ── Scope management ──────────────────────────────────────────────────────────

@@ -3,7 +3,8 @@ import * as sitesApi from "../../shared/api/sites.js";
 import { useState, useEffect } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
-import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { PageHeader, Breadcrumbs } from "../../shared/ui/PageHeader.jsx";
+import { useRecordName } from "../../shared/hooks/useRecordName.ts";
 
 export function TestRunForm({ siteId }) {
   const [form, setForm] = useState({
@@ -11,6 +12,7 @@ export function TestRunForm({ siteId }) {
     max_depth: 3,
     max_pages: 500,
     crawler_mode: "url",
+    page_selection: "each_url",
     llm_profile_id: null,
   });
   const [saving, setSaving] = useState(false);
@@ -21,6 +23,7 @@ export function TestRunForm({ siteId }) {
       ...f,
       ...p,
     }));
+  const siteName = useRecordName(sitesApi.getSite, siteId);
   useEffect(() => {
     (async () => {
       try {
@@ -41,6 +44,7 @@ export function TestRunForm({ siteId }) {
         max_depth: Number(form.max_depth),
         max_pages: Number(form.max_pages),
         crawler_mode: form.crawler_mode,
+        page_selection: form.page_selection,
         llm_profile_id: form.llm_profile_id || null,
       });
       nav(`#/runs/${run.id}`);
@@ -54,15 +58,18 @@ export function TestRunForm({ siteId }) {
       <PageHeader
         title={
           <>
-            <Crumb href={`#/sites/${siteId}`}>Site</Crumb>
-            <Sep />
-            New test run
+            <Breadcrumbs
+              items={[
+                { label: "Sites", href: "#/" },
+                { label: siteName || "Site", href: `#/sites/${siteId}` },
+                { label: "New test run" },
+              ]}
+            />
           </>
         }
       />
       <div className="content scroll-content">
         <form className="card" onSubmit={onSubmit}>
-          {error && <div className="alert error">{error}</div>}
           <div className="form-section-title">Run Configuration</div>
           <div className="field">
             <label>
@@ -120,15 +127,32 @@ export function TestRunForm({ siteId }) {
             <select
               className="select"
               value={form.crawler_mode}
-              onChange={(e) => upd({ crawler_mode: e.target.value })}
+              onChange={(e) => upd({ crawler_mode: e.target.value, page_selection: "each_url" })}
             >
-              <option value="url">URL crawl — each URL is a page</option>
+              <option value="url">URL crawl</option>
               <option value="interactive">Interactive SPA - major UI change is a page</option>
             </select>
             <div className="field-hint">
               Use "Interactive SPA" mode if your site doesn't change the URL when you navigate.
             </div>
           </div>
+          {form.crawler_mode === "url" && (
+            <div className="field">
+              <label>Page selection</label>
+              <select
+                className="select"
+                value={form.page_selection}
+                onChange={(e) => upd({ page_selection: e.target.value })}
+              >
+                <option value="each_url">Visit each URL (current crawl)</option>
+                <option value="group_similar">Group similar pages</option>
+              </select>
+              <div className="field-hint">
+                Group similar pages samples repeated routes, such as large product catalogues. It
+                keeps example pages for testing.
+              </div>
+            </div>
+          )}
           <div
             className="alert"
             style={{
@@ -163,6 +187,11 @@ export function TestRunForm({ siteId }) {
               ))}
             </select>
           </div>
+          {error && (
+            <div className="alert error form-error" role="alert">
+              {error}
+            </div>
+          )}
           <div className="row spread">
             <button type="button" className="btn ghost" onClick={() => nav(`#/sites/${siteId}`)}>
               Cancel

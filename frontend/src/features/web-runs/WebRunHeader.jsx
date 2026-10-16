@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState } from "react";
+import { WorkflowInputPill } from "./WorkflowInputDrawer.jsx";
 import { IconChevronDown, IconPlay, IconStop } from "../../shared/ui/Icons.jsx";
-import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { PageHeader, Breadcrumbs } from "../../shared/ui/PageHeader.jsx";
 import { resolveRunPrimaryAction, RUN_PRIMARY_ACTION } from "./runState.js";
+import { LoadSavedCrawlButton, SaveCrawlButton } from "./SavedCrawlControls.jsx";
 
 const RUN_ACTION_DETAILS = {
-  [RUN_PRIMARY_ACTION.START_CRAWL]: { label: "Start Crawl", className: "run-start-action" },
-  [RUN_PRIMARY_ACTION.START_PENTEST]: { label: "Start Pentest", className: "run-start-action" },
-  [RUN_PRIMARY_ACTION.RESUME_PENTEST]: { label: "Resume Pentest", className: "run-resume-action" },
+  [RUN_PRIMARY_ACTION.START_CRAWL]: { label: "Start crawl", className: "run-start-action" },
+  [RUN_PRIMARY_ACTION.START_CRAWL_THEN_PENTEST]: {
+    label: "Start crawl then scan",
+    className: "run-start-action",
+  },
+  [RUN_PRIMARY_ACTION.START_PENTEST]: { label: "Start scan", className: "run-start-action" },
+  [RUN_PRIMARY_ACTION.RESUME_PENTEST]: { label: "Resume scan", className: "run-start-action" },
 };
 
 function RunStartControl({
@@ -14,11 +20,10 @@ function RunStartControl({
   canStartCrawl,
   canStartPentest,
   canResumePentest,
-  canExportCrawl,
   onStartCrawl,
+  onStartCrawlThenPentest,
   onStartPentest,
   onResumePentest,
-  onExportCrawl,
 }) {
   const [open, setOpen] = useState(false);
   const controlRef = useRef(null);
@@ -41,6 +46,7 @@ function RunStartControl({
 
   const handlers = {
     [RUN_PRIMARY_ACTION.START_CRAWL]: onStartCrawl,
+    [RUN_PRIMARY_ACTION.START_CRAWL_THEN_PENTEST]: onStartCrawlThenPentest,
     [RUN_PRIMARY_ACTION.START_PENTEST]: onStartPentest,
     [RUN_PRIMARY_ACTION.RESUME_PENTEST]: onResumePentest,
   };
@@ -54,9 +60,10 @@ function RunStartControl({
     canStartCrawl &&
       primaryAction !== RUN_PRIMARY_ACTION.START_CRAWL &&
       RUN_PRIMARY_ACTION.START_CRAWL,
+    canStartCrawl && canStartPentest && RUN_PRIMARY_ACTION.START_CRAWL_THEN_PENTEST,
   ].filter(Boolean);
   const primary = RUN_ACTION_DETAILS[primaryAction];
-  const hasMenu = menuActions.length > 0 || canExportCrawl;
+  const hasMenu = menuActions.length > 0;
 
   const runAction = (action) => {
     setOpen(false);
@@ -77,7 +84,7 @@ function RunStartControl({
       {hasMenu && (
         <button
           className={`btn sm run-start-toggle ${primary.className}`}
-          aria-label="More crawl and Pentest options"
+          aria-label="More crawl and scan options"
           aria-haspopup="menu"
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
@@ -97,18 +104,6 @@ function RunStartControl({
               <IconPlay /> {RUN_ACTION_DETAILS[action].label}
             </button>
           ))}
-          {canExportCrawl && (
-            <button
-              className="run-export-action"
-              role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                onExportCrawl();
-              }}
-            >
-              Export Crawl
-            </button>
-          )}
         </div>
       )}
     </div>
@@ -134,14 +129,19 @@ export function WebRunHeader({
   showTeamScan = false,
   onCoverageMode,
   onStart,
+  onStartCrawlThenPentest,
   onStop,
   onStartScan,
   onStopScan,
   onResume,
-  onExportCrawl,
   onImportCrawl,
+  onSavedCrawlLoaded,
+  onError,
   aliceRunning,
   onStopAlice,
+  workflowInputCount = 0,
+  workflowInputOpen = false,
+  onToggleWorkflowInput,
 }) {
   const profile = profiles.find((item) => item.id === run?.llm_profile_id);
   const hasCrawlResult = (run?.pages_discovered || 0) > 0;
@@ -164,10 +164,14 @@ export function WebRunHeader({
       titleStyle={{ flexDirection: "column", alignItems: "flex-start", gap: 2 }}
       title={
         <>
-          <div className="row" style={{ alignItems: "center", gap: 0 }}>
-            <Crumb href={run ? `#/sites/${run.site_id}` : "#/"}>{siteName || "Site"}</Crumb>
-            <Sep />
-            {run ? run.name : "…"}
+          <div className="row" style={{ alignItems: "center", gap: 8 }}>
+            <Breadcrumbs
+              items={[
+                { label: "Sites", href: "#/" },
+                { label: siteName || "Site", href: run ? `#/sites/${run.site_id}` : "#/" },
+                { label: run ? run.name : "…" },
+              ]}
+            />
             {run && (
               <span className="run-agent-badges">
                 <span
@@ -178,6 +182,11 @@ export function WebRunHeader({
                 </span>
               </span>
             )}
+            <WorkflowInputPill
+              count={workflowInputCount}
+              open={workflowInputOpen}
+              onClick={onToggleWorkflowInput}
+            />
           </div>
           {run?.llm_profile_id && profiles.length > 0 && (
             <div style={{ fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>
@@ -193,11 +202,22 @@ export function WebRunHeader({
               Import crawl
             </button>
           )}
+          {canImportCrawl && onSavedCrawlLoaded && (
+            <LoadSavedCrawlButton
+              siteId={run?.site_id}
+              runId={run?.id}
+              onLoaded={onSavedCrawlLoaded}
+              onError={onError}
+            />
+          )}
+          {hasCrawlResult && !crawlerActive && !crawlStopping && onError && (
+            <SaveCrawlButton run={run} onError={onError} />
+          )}
           {canStartPentest && (
             <label
               className="subtle"
               style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}
-              title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: test every applicable page × category obligation. Deep: use a persistent tester queue and attack workers. Team: run independent Standard Test Leads followed by a coverage and chain review. SAST Validate: validate only imported SAST leads."
+              title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: run every applicable test on every page. Deep: use a persistent tester queue and attack workers. Team: run independent Standard Test Leads followed by a coverage and chain review. SAST Validate: validate only imported SAST leads."
             >
               Scan mode:
               <select
@@ -241,11 +261,10 @@ export function WebRunHeader({
               canStartCrawl={canStart}
               canStartPentest={canStartPentest}
               canResumePentest={canResume}
-              canExportCrawl={hasCrawlResult && !crawlStopping}
               onStartCrawl={onStart}
+              onStartCrawlThenPentest={onStartCrawlThenPentest}
               onStartPentest={onStartScan}
               onResumePentest={onResume}
-              onExportCrawl={onExportCrawl}
             />
           )}
           {canStop && (
@@ -260,7 +279,7 @@ export function WebRunHeader({
           )}
           {!canStop && !crawlStopping && canStopScan && (
             <button className="btn danger-outline" onClick={onStopScan} disabled={scanStopping}>
-              <IconStop /> {scanStopping ? "Stopping…" : "Stop Dynamic Scan"}
+              <IconStop /> {scanStopping ? "Stopping…" : "Stop scan"}
             </button>
           )}
           {aliceRunning && (

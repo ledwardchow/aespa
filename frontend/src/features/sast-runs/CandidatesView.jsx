@@ -1,26 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { SastLeadDetails } from "../../shared/ui/SastLeadDetails.jsx";
 
+import { getSastSarifUrl } from "../../shared/api/sastRuns.js";
 import { LeadReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
+import { normalizeSeverity, severityRank } from "../../shared/findings/severity.js";
 
-export const CANDIDATE_COLUMN_WIDTHS_KEY = "sast-candidate-columns:v1";
-
-export const CANDIDATE_SPLIT_KEY = "sast-candidate-split:v1";
+export const CANDIDATE_COLUMN_WIDTHS_KEY = "sast-candidate-columns:v2";
 
 export const CANDIDATE_HIDDEN_STATUSES_KEY = "sast-candidate-hidden-statuses:v1";
 
-export const DEFAULT_CANDIDATE_COLUMN_WIDTHS = [88, null, 96, 132];
+export const DEFAULT_CANDIDATE_COLUMN_WIDTHS = [112, 88, null, 96, 190];
 
-export const MIN_CANDIDATE_SPLIT = 35;
-
-export const MAX_CANDIDATE_SPLIT = 72;
-
-export const DEFAULT_CANDIDATE_SPLIT = 54;
-
-export const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-
-const SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+const severityLabel = (lead) => normalizeSeverity(lead.severity, "medium");
+const referenceLabel = (lead) => lead.reference || (lead.id == null ? "—" : `#${lead.id}`);
 
 const VALIDATION_RANK = {
   confirmed: 5,
@@ -32,7 +25,8 @@ const VALIDATION_RANK = {
 };
 
 const SORT_VALUES = {
-  severity: (lead) => SEVERITY_RANK[(lead.severity || "medium").toLowerCase()] ?? -1,
+  reference: referenceLabel,
+  severity: (lead) => severityRank(lead.severity, "medium"),
   title: (lead) => (lead.title || "").toLowerCase(),
   confidence: (lead) => Number(lead.confidence || 0),
   validation: (lead) => VALIDATION_RANK[lead.validation_status || "pending"] ?? 0,
@@ -48,8 +42,17 @@ export function sortLeads(leads, sort) {
       const left = value(a.lead);
       const right = value(b.lead);
       const result =
-        typeof left === "string" ? left.localeCompare(right) : left < right ? -1 : left > right;
-      return Number(result) * direction || a.index - b.index;
+        typeof left === "string"
+          ? left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" })
+          : left < right
+            ? -1
+            : left > right;
+      if (result) return Number(result) * direction;
+      if (sort.key === "severity") {
+        const titleOrder = SORT_VALUES.title(a.lead).localeCompare(SORT_VALUES.title(b.lead));
+        if (titleOrder) return titleOrder;
+      }
+      return a.index - b.index;
     })
     .map((item) => item.lead);
 }
@@ -63,6 +66,59 @@ export function readStoredValue(key, fallback, validate) {
   }
 }
 
+function FindingsExportMenu({ runId, onExport, disabled }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsideClick = (event) => {
+      if (!menuRef.current?.contains(event.target)) setOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className="sast-actions-menu" ref={menuRef}>
+      <button
+        type="button"
+        className="btn ghost sm"
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        Export findings ↓
+      </button>
+      {open && (
+        <div className="sast-actions-popover" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onExport();
+            }}
+          >
+            Export Markdown
+          </button>
+          <a href={getSastSarifUrl(runId)} download role="menuitem" onClick={() => setOpen(false)}>
+            Export SARIF
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CandidateTable({
   leads,
   selectedId,
@@ -70,16 +126,22 @@ export function CandidateTable({
   onRevalidate,
   revalidatingLeadId,
   canRevalidate,
+  onVisibleLeadsChange,
 }) {
-  const [widths, setWidths] = useState(() =>
-    readStoredValue(
+  const [widths, setWidths] = useState(() => {
+    const previousWidths = readStoredValue(
+      "sast-candidate-columns:v1",
+      null,
+      (value) => Array.isArray(value) && value.length === 4,
+    );
+    return readStoredValue(
       CANDIDATE_COLUMN_WIDTHS_KEY,
-      DEFAULT_CANDIDATE_COLUMN_WIDTHS,
+      previousWidths ? [112, ...previousWidths] : DEFAULT_CANDIDATE_COLUMN_WIDTHS,
       (value) => Array.isArray(value) && value.length === DEFAULT_CANDIDATE_COLUMN_WIDTHS.length,
-    ),
-  );
+    );
+  });
   const widthsRef = useRef(widths);
-  const [sort, setSort] = useState({ key: null, direction: "desc" });
+  const [sort, setSort] = useState({ key: "reference", direction: "asc" });
   const [hiddenStatuses, setHiddenStatuses] = useState(() =>
     readStoredValue(
       CANDIDATE_HIDDEN_STATUSES_KEY,
@@ -102,6 +164,9 @@ export function CandidateTable({
     [leads, hiddenStatuses],
   );
   const sortedLeads = useMemo(() => sortLeads(visibleLeads, sort), [visibleLeads, sort]);
+  useEffect(() => {
+    onVisibleLeadsChange?.(sortedLeads.map((lead) => lead.id));
+  }, [onVisibleLeadsChange, sortedLeads]);
   const toggleStatus = (status) =>
     setHiddenStatuses((current) => {
       const next = current.includes(status)
@@ -114,8 +179,8 @@ export function CandidateTable({
     });
   const toggleSort = (key) =>
     setSort((current) => {
-      if (current.key !== key) return { key, direction: key === "title" ? "asc" : "desc" };
-      const firstDirection = key === "title" ? "asc" : "desc";
+      const firstDirection = key === "title" || key === "reference" ? "asc" : "desc";
+      if (current.key !== key) return { key, direction: firstDirection };
       if (current.direction === firstDirection)
         return { key, direction: firstDirection === "asc" ? "desc" : "asc" };
       return { key: null, direction: "desc" };
@@ -123,7 +188,7 @@ export function CandidateTable({
 
   const updateWidth = (index, width) => {
     const next = [...widthsRef.current];
-    next[index] = Math.max(index === 1 ? 220 : 64, Math.round(width));
+    next[index] = Math.max(index === 2 ? 220 : index === 4 ? 150 : 64, Math.round(width));
     widthsRef.current = next;
     setWidths(next);
   };
@@ -230,10 +295,11 @@ export function CandidateTable({
             </colgroup>
             <thead>
               <tr>
-                {header("Severity", 0, "severity")}
-                {header("Finding", 1, "title")}
-                {header("Confidence", 2, "confidence")}
-                {header("Status", 3, "validation")}
+                {header("Reference", 0, "reference")}
+                {header("Severity", 1, "severity")}
+                {header("Finding", 2, "title")}
+                {header("Confidence", 3, "confidence")}
+                {header("Status", 4, "validation")}
               </tr>
             </thead>
             <tbody>
@@ -252,11 +318,10 @@ export function CandidateTable({
                   role="button"
                   aria-pressed={selectedId === lead.id}
                 >
+                  <td className="sast-candidate-reference">{referenceLabel(lead)}</td>
                   <td>
-                    <span
-                      className={`sast-severity sast-severity-${(lead.severity || "medium").toLowerCase()}`}
-                    >
-                      {(lead.severity || "medium").toUpperCase()}
+                    <span className={`sast-severity sast-severity-${severityLabel(lead)}`}>
+                      {severityLabel(lead).toUpperCase()}
                     </span>
                   </td>
                   <td>
@@ -299,6 +364,7 @@ export function CandidateTable({
 }
 
 export function CandidatesView({
+  runId,
   leads,
   selectedLead,
   onSelect,
@@ -310,108 +376,122 @@ export function CandidatesView({
   onRevalidate,
   revalidatingLeadId,
   canRevalidate,
+  initialLeadRef,
+  onCloseDetail,
 }) {
-  const [ledgerWidth, setLedgerWidth] = useState(() =>
-    readStoredValue(
-      CANDIDATE_SPLIT_KEY,
-      DEFAULT_CANDIDATE_SPLIT,
-      (value) =>
-        Number.isFinite(value) && value >= MIN_CANDIDATE_SPLIT && value <= MAX_CANDIDATE_SPLIT,
-    ),
-  );
-  const ledgerWidthRef = useRef(ledgerWidth);
+  const [detailOpen, setDetailOpen] = useState(Boolean(initialLeadRef));
+  const [visibleLeadIds, setVisibleLeadIds] = useState([]);
   const layoutRef = useRef(null);
+  const backButtonRef = useRef(null);
+  const listScrollTop = useRef(0);
+  const restoreListScroll = useRef(false);
+  const currentIndex = visibleLeadIds.indexOf(selectedLead?.id);
 
-  const updateLedgerWidth = (width) => {
-    const next = clamp(width, MIN_CANDIDATE_SPLIT, MAX_CANDIDATE_SPLIT);
-    ledgerWidthRef.current = next;
-    setLedgerWidth(next);
+  useEffect(() => {
+    if (initialLeadRef) setDetailOpen(true);
+  }, [initialLeadRef]);
+
+  useLayoutEffect(() => {
+    if (detailOpen) {
+      backButtonRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    if (!restoreListScroll.current) return;
+    restoreListScroll.current = false;
+    const scrollArea = layoutRef.current?.closest(".sast-run-content");
+    if (scrollArea) scrollArea.scrollTop = listScrollTop.current;
+    layoutRef.current
+      ?.querySelector(".sast-candidate-table tr.selected")
+      ?.focus({ preventScroll: true });
+  }, [detailOpen]);
+
+  const openLead = (id) => {
+    const scrollArea = layoutRef.current?.closest(".sast-run-content");
+    listScrollTop.current = scrollArea?.scrollTop || 0;
+    if (scrollArea) scrollArea.scrollTop = 0;
+    onSelect(id);
+    setDetailOpen(true);
   };
-  const saveLedgerWidth = () => {
-    try {
-      localStorage.setItem(CANDIDATE_SPLIT_KEY, JSON.stringify(ledgerWidthRef.current));
-    } catch {}
+  const closeLead = () => {
+    restoreListScroll.current = true;
+    setDetailOpen(false);
+    onCloseDetail?.();
   };
-  const startSplitResize = (event) => {
-    event.preventDefault();
-    const bounds = layoutRef.current?.getBoundingClientRect();
-    if (!bounds?.width) return;
-    const previousCursor = document.body.style.cursor;
-    const previousUserSelect = document.body.style.userSelect;
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    const onMove = (moveEvent) =>
-      updateLedgerWidth(((moveEvent.clientX - bounds.left) / bounds.width) * 100);
-    const onEnd = () => {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onEnd);
-      document.removeEventListener("pointercancel", onEnd);
-      document.body.style.cursor = previousCursor;
-      document.body.style.userSelect = previousUserSelect;
-      saveLedgerWidth();
-    };
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onEnd);
-    document.addEventListener("pointercancel", onEnd);
-  };
-  const resizeSplitWithKeyboard = (event) => {
-    const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
-    if (!direction) return;
-    event.preventDefault();
-    updateLedgerWidth(ledgerWidthRef.current + direction * 2);
-    saveLedgerWidth();
+  const moveLead = (direction) => {
+    const nextId = visibleLeadIds[currentIndex + direction];
+    if (nextId == null) return;
+    onSelect(nextId);
+    const scrollArea = layoutRef.current?.closest(".sast-run-content");
+    if (scrollArea) scrollArea.scrollTop = 0;
   };
 
   return (
-    <div
-      className="sast-candidates-layout"
-      ref={layoutRef}
-      style={{ "--sast-ledger-width": `${ledgerWidth}%` }}
-    >
-      <section className="sast-panel sast-candidate-ledger">
+    <div className="sast-findings-view" ref={layoutRef}>
+      <section className="sast-panel sast-candidate-ledger" hidden={detailOpen}>
         <div className="sast-panel-header">
           <div>
             <div className="sast-panel-title">Findings</div>
+            <div className="sast-panel-sub">Review possible issues found in the source.</div>
           </div>
           <div className="row">
             <span className="sast-state sast-state-open">{reportableCount} reportable</span>
-            <button className="btn ghost sm" disabled={!leads.length} onClick={onExport}>
-              Export report ↓
-            </button>
+            <FindingsExportMenu runId={runId} onExport={onExport} disabled={!leads.length} />
           </div>
         </div>
         <CandidateTable
           leads={leads}
           selectedId={selectedLead?.id}
-          onSelect={onSelect}
+          onSelect={openLead}
           onRevalidate={onRevalidate}
           revalidatingLeadId={revalidatingLeadId}
           canRevalidate={canRevalidate}
+          onVisibleLeadsChange={setVisibleLeadIds}
         />
       </section>
-      <div
-        className="sast-layout-resizer"
-        role="separator"
-        aria-label="Resize findings list and finding details"
-        aria-orientation="vertical"
-        aria-valuemin={MIN_CANDIDATE_SPLIT}
-        aria-valuemax={MAX_CANDIDATE_SPLIT}
-        aria-valuenow={Math.round(ledgerWidth)}
-        tabIndex="0"
-        onPointerDown={startSplitResize}
-        onKeyDown={resizeSplitWithKeyboard}
-      >
-        <span aria-hidden="true" />
-      </div>
-      <LeadEvidence
-        lead={selectedLead}
-        targets={targets}
-        onQueue={onQueue}
-        queueBusy={queueBusy}
-        onRevalidate={onRevalidate}
-        revalidatingLeadId={revalidatingLeadId}
-        canRevalidate={canRevalidate}
-      />
+      {detailOpen && (
+        <div className="sast-finding-detail">
+          <div className="sast-finding-toolbar">
+            <button
+              type="button"
+              className="sast-finding-back"
+              onClick={closeLead}
+              ref={backButtonRef}
+            >
+              ← Back to findings
+            </button>
+            <div className="sast-finding-navigation" aria-label="Finding navigation">
+              <button
+                type="button"
+                className="btn ghost sm"
+                onClick={() => moveLead(-1)}
+                disabled={currentIndex <= 0}
+              >
+                ← Previous
+              </button>
+              <span>
+                {currentIndex >= 0 ? `${currentIndex + 1} of ${visibleLeadIds.length}` : "Finding"}
+              </span>
+              <button
+                type="button"
+                className="btn ghost sm"
+                onClick={() => moveLead(1)}
+                disabled={currentIndex < 0 || currentIndex >= visibleLeadIds.length - 1}
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+          <LeadEvidence
+            lead={selectedLead}
+            targets={targets}
+            onQueue={onQueue}
+            queueBusy={queueBusy}
+            onRevalidate={onRevalidate}
+            revalidatingLeadId={revalidatingLeadId}
+            canRevalidate={canRevalidate}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -431,32 +511,37 @@ export function LeadEvidence({
   }, [lead?.id]);
   if (!lead)
     return (
-      <aside className="sast-evidence-panel">
+      <section className="sast-evidence-panel">
         <div className="sast-panel-empty">Select a finding to see its details.</div>
-      </aside>
+      </section>
     );
   const selectedTarget = targets.find(
-    (target) => `${target.run_type}:${target.run_id}` === targetKey,
+    (target) => `${target.target_type}:${target.target_id}` === targetKey,
   );
+  const canTestLive = lead.reportable && lead.validation_status === "confirmed";
   return (
-    <aside className="sast-evidence-panel">
-      <div className="sast-panel-header">
-        <div>
-          <div className="sast-panel-title">Finding details</div>
+    <section className="sast-evidence-panel">
+      <div className="sast-panel-header sast-finding-header">
+        <div className="sast-finding-header-main">
+          <span className={`sast-severity sast-severity-${severityLabel(lead)}`}>
+            {severityLabel(lead).toUpperCase()}
+          </span>
+          <span className={`sast-state sast-state-${lead.validation_status || "pending"}`}>
+            {lead.validation_status || "pending"}
+          </span>
+          <h2>{lead.title || "Untitled finding"}</h2>
           <div className="sast-panel-sub">
+            {lead.location || "Location not provided"} · {Math.round((lead.confidence || 0) * 100)}%
+            confidence ·{" "}
             <LeadReferenceLink
               reference={lead.reference || `#${lead.id}`}
               title={lead.title}
               description={lead.description}
               severity={lead.severity}
-            />{" "}
-            · {lead.fingerprint?.slice(0, 10) || "no fingerprint"}
+            />
           </div>
         </div>
-        <div className="sast-lead-validation-actions">
-          <span className={`sast-state sast-state-${lead.validation_status || "pending"}`}>
-            {lead.validation_status || "pending"}
-          </span>
+        <div className="sast-finding-header-actions">
           {lead.validation_status === "inconclusive" && onRevalidate && (
             <button
               type="button"
@@ -467,42 +552,58 @@ export function LeadEvidence({
               {revalidatingLeadId === lead.id ? "Starting…" : "Re-validate"}
             </button>
           )}
+          <div className="sast-live-testing">
+            <strong>Live testing</strong>
+            <span>
+              {canTestLive
+                ? "Create a run for this finding. You can start the test from the new run."
+                : "Confirm this finding before testing it live."}
+            </span>
+            <div className="sast-live-testing-controls">
+              <select
+                aria-label="Application for live testing"
+                value={targetKey}
+                disabled={!canTestLive || queueBusy}
+                onChange={(event) => setTargetKey(event.target.value)}
+              >
+                <option value="">Select app…</option>
+                <optgroup label="Sites">
+                  {targets
+                    .filter((target) => target.target_type === "site")
+                    .map((target) => (
+                      <option key={`site:${target.target_id}`} value={`site:${target.target_id}`}>
+                        {target.name} · {target.url}
+                      </option>
+                    ))}
+                </optgroup>
+                <optgroup label="API collections">
+                  {targets
+                    .filter((target) => target.target_type === "api_collection")
+                    .map((target) => (
+                      <option
+                        key={`api_collection:${target.target_id}`}
+                        value={`api_collection:${target.target_id}`}
+                      >
+                        {target.name} · {target.url}
+                      </option>
+                    ))}
+                </optgroup>
+              </select>
+              <button
+                type="button"
+                className="btn sm"
+                disabled={!canTestLive || !selectedTarget || queueBusy}
+                onClick={() => onQueue(lead, selectedTarget)}
+              >
+                {queueBusy ? "Creating…" : "Create test run"}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
       <div className="sast-evidence-body">
         <SastLeadDetails lead={lead} showSummary={false} />
-        <div className="sast-handoff-box">
-          <strong>Live testing</strong>
-          <span>
-            {lead.reportable
-              ? "Send this confirmed finding to a web or API run to test it against the live app."
-              : "Only confirmed, reportable findings can be sent for live testing."}
-          </span>
-          <select
-            aria-label="Dynamic target run"
-            value={targetKey}
-            disabled={!lead.reportable || queueBusy}
-            onChange={(event) => setTargetKey(event.target.value)}
-          >
-            <option value="">Select target run…</option>
-            {targets.map((target) => (
-              <option
-                key={`${target.run_type}:${target.run_id}`}
-                value={`${target.run_type}:${target.run_id}`}
-              >
-                {target.run_type.toUpperCase()} · {target.target} · {target.name}
-              </option>
-            ))}
-          </select>
-          <button
-            className="btn sm"
-            disabled={!lead.reportable || !selectedTarget || queueBusy}
-            onClick={() => onQueue(lead, selectedTarget)}
-          >
-            {queueBusy ? "Queuing…" : "Queue live test"}
-          </button>
-        </div>
       </div>
-    </aside>
+    </section>
   );
 }

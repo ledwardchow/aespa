@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { usePolling } from "../../shared/hooks/usePolling.js";
 import { TargetIntelligencePanel } from "./TargetIntelligencePanel.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const totalItems = (data) =>
   Object.values(data?.counts || {}).reduce((total, count) => total + count, 0);
@@ -57,7 +58,7 @@ export function WebRunIntelligenceTab({ runId, active, captureActive, onTotalCha
     <div
       style={{ display: active ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}
     >
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={!data} onDismiss={() => setError(null)} />
       <TargetIntelligencePanel
         data={data}
         selectedKind={selectedKind}

@@ -223,6 +223,33 @@ that used `aespa.sast-benchmarking` keep their enabled setting, and the saved
 extension database is copied into `aespa.benchmarking.db` once. The old file is
 left in place. Disabling the extension removes its routes and sidebar entry but
 preserves the database.
+The legacy primary-database tables remain available for this one-time import,
+but new Benchmark Lab data and settings are handled only by the extension.
+
+The `aespa.chatgptplanusage` API extension is disabled by default. While enabled, it reads
+AESPA's monthly usage totals for the ChatGPT plan and Codex CLI providers every 15 seconds (and
+before each request) and stores the increase per provider and model in its own database. It
+never writes to the primary database. Every few minutes (setting `codex_poll_minutes`, default
+5) it starts a separate, short-lived Codex app-server, reads `account/read` and
+`account/rateLimits/read`, and saves a reading for each 300-minute or 10080-minute window of
+the `codex` limit whose percentage or reset time changed. It also reads the Active Jobs list and
+resolves each running job's LLM profile for every agent role, read-only. When a job using the
+ChatGPT plan or Codex CLI provider starts or ends, it saves a reading for every window with the
+job's name in the note, and it checks every `scan_poll_minutes` (default 2) while such a job
+runs. Turn Codex readings off with the `codex_readings` setting. Readings cannot be entered by
+hand.
+
+If Codex and the ChatGPT plan provider are signed in to different accounts, only Codex CLI usage
+is compared with readings. Usage between two readings in the same window, or from the window
+start to a reading when the reset time is known, is priced with the Usage page's API prices to
+estimate the cost of 1% and 100% of the window. Intervals where the percentage changed while
+AESPA used no tokens are skipped. A reading with no AESPA usage on either side and a percentage
+change on at least one side is deleted after each Codex check and on start-up; the first and
+last reading of each window are kept, so the estimate does not change. Usage recorded before
+the extension was first enabled has no time and is not compared with readings. Its routes are
+`GET /summary?window=five_hour|weekly`, `DELETE /readings/{id}`, `POST /codex/check`, and
+`POST /sample`, below `/extension/aespa.chatgptplanusage/`. Its code is in
+`extensions/builtin/chatgpt_plan_usage/`.
 
 ## Testing and packaging
 
@@ -271,6 +298,6 @@ Extensions → Benchmark Lab → Settings includes a Hosted benchmark graphs pan
 
 Only graph data is uploaded: stable result ID, dataset name and fingerprint, scan type, model/provider names, SAST source models, finding counts, estimated scan cost, scan start time, and update time. Finding text, evidence, ground-truth items, source files, and model credentials are excluded. Unknown cost or dates stay unknown. Dataset fingerprints keep different ground-truth versions separate.
 
-The extension sends `POST /api/v1/results` with `{ "version": 1, "results": [...] }` and the service credential in `OAI-Sites-Authorization: Bearer <token>`. Batches contain at most 100 results and 256 KiB. Repeated uploads update the same UUIDs; older updates are skipped. A failed upload can be retried, including when earlier batches succeeded. Publishing does not delete hosted results that were removed locally.
+The extension sends `POST /api/v1/results` with `{ "version": 1, "results": [...] }` and the service credential in `OAI-Sites-Authorization: Bearer <token>`. Batches contain at most 100 results and 256 KiB. Repeated uploads update the same UUIDs unless a result was edited on the site; site-edited results are protected, and older updates are skipped. A failed upload can be retried, including when earlier batches succeeded. Publishing does not delete hosted results that were removed locally.
 
-`GET /extension/aespa.benchmarking/graph-export` returns the compact upload format. `GET` and `PUT /extension/aespa.benchmarking/publishing` read or save the connection; the read response only says whether a token exists. `POST /extension/aespa.benchmarking/publishing/token` reveals the saved token on request with `Cache-Control: no-store`. `POST /extension/aespa.benchmarking/publish` sends saved results. Only HTTPS URLs on `.chatgpt.site` are accepted, and upload redirects are disabled. Extension writes stay in the extension database.
+`GET /extension/aespa.benchmarking/graph-export` returns the compact upload format. `GET` and `PUT /extension/aespa.benchmarking/publishing` read or save the connection; the read response only says whether a token exists. `POST /extension/aespa.benchmarking/publishing/token` reveals the saved token on request with `Cache-Control: no-store`. `POST /extension/aespa.benchmarking/publish` sends saved results. The default address is `https://benchmarks.aespa.app`; existing tokens also work with the site's `https://aespa-benchmarks.maranthis.chatgpt.site` address. Other HTTPS `.chatgpt.site` URLs remain supported for separate Sites connections. Upload redirects are disabled. Extension writes stay in the extension database.

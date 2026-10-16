@@ -1,19 +1,20 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { expect, test, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, expect, test } from "vitest";
 
 import { ActivityView } from "./ActivityView.jsx";
 
 const baseProps = {
   logs: [],
   scanRunning: true,
-  tokenUsage: null,
-  tokenExpanded: false,
-  setTokenExpanded: vi.fn(),
   runId: 14,
   analysisMode: "deep",
 };
 
-test("shows the SAST agent roster by default and expands worker history", () => {
+beforeEach(() => {
+  window.location.hash = "#/sast-runs/14/activity";
+});
+
+test("shows the SAST agent roster by default and expands worker history", async () => {
   render(
     <ActivityView
       {...baseProps}
@@ -52,10 +53,11 @@ test("shows the SAST agent roster by default and expands worker history", () => 
 
   fireEvent.click(screen.getByRole("button", { name: "Injection ●" }));
   expect(screen.getByText("routes:injection")).toBeTruthy();
-  expect(screen.queryByText("Threat Modeller")).toBeNull();
+  await waitFor(() => expect(screen.queryByText("Threat Modeller")).toBeNull());
+  expect(window.location.hash).toBe("#/sast-runs/14/activity?subtab=injection");
 });
 
-test("keeps the phase log on a separate tab", () => {
+test("keeps the phase log on a separate tab", async () => {
   render(
     <ActivityView
       {...baseProps}
@@ -73,6 +75,7 @@ test("keeps the phase log on a separate tab", () => {
   );
 
   fireEvent.click(screen.getByRole("button", { name: "Log" }));
-  expect(screen.getByText("Source scope ready.")).toBeTruthy();
+  await waitFor(() => expect(screen.getByText("Source scope ready.")).toBeTruthy());
   expect(screen.getByText("1 entries")).toBeTruthy();
+  expect(window.location.hash).toBe("#/sast-runs/14/activity?subtab=log");
 });

@@ -54,6 +54,7 @@ test.each([
   ["#/scan-policy/global/features", { name: "scan-policy", tab: "global", subTab: "features" }],
   ["#/scan-policy/global/debug", { name: "scan-policy", tab: "global", subTab: "debug" }],
   ["#/scan-policy/global/proxy", { name: "scan-policy", tab: "global", subTab: "proxy" }],
+  ["#/scan-policy/global/libraries", { name: "scan-policy", tab: "global", subTab: "libraries" }],
   ["#/scan-policy/systems", { name: "scan-policy", tab: "systems" }],
   ["#/scan-policy/sast", { name: "scan-policy", tab: "sast" }],
   ["#/scan-policy/dast/headers", { name: "scan-policy", tab: "dast", subTab: "headers" }],
@@ -66,6 +67,7 @@ test.each([
   ["#/debug", { name: "scan-policy" }],
   ["#/reporting-debug", { name: "reporting-debug" }],
   ["#/benchmark-lab", { name: "benchmark-lab" }],
+  ["#/stats/chatgpt-plan", { name: "chatgpt-plan-usage" }],
   ["#/benchmark-lab/evaluations/new", { name: "benchmark-evaluation-new" }],
   ["#/benchmark-lab/evaluations/12", { name: "benchmark-evaluation-detail", id: 12 }],
   [
@@ -104,4 +106,26 @@ test("run links round-trip run kind and encoded references", async () => {
 
 test("opens saved benchmark results", () => {
   expect(parseRoute("#/benchmark-lab/results/42")).toEqual({ name: "benchmark-lab", id: 42 });
+  expect(parseRoute("#/benchmark-lab/scoring-guide")).toEqual({ name: "benchmark-scoring-guide" });
+});
+
+test("coverage finding links retain valid IDs and return context", async () => {
+  const { runHref } = await import("./links.ts");
+  const href = runHref({ runKind: "web", runId: 7 }, "findings", {
+    finding_ids: "31,32,31",
+    from: "workflows",
+  });
+  expect(parseRoute(href)).toMatchObject({
+    name: "run-detail",
+    tab: "findings",
+    findingIds: [31, 32],
+    coverageReturn: "workflows",
+  });
+  expect(
+    parseRoute("#/api-runs/9/findings?finding_ids=0,-1,3.5,nope,42&from=coverage"),
+  ).toMatchObject({
+    name: "api-run-detail",
+    findingIds: [42],
+    coverageReturn: "owasp",
+  });
 });

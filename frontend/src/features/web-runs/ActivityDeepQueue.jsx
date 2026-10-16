@@ -261,7 +261,7 @@ export function ActivityDeepQueue({ runId, thinkingStatus, agents = [] }) {
       ))}
       {queue.total === 0 && (
         <div className="subtle" style={{ padding: 24 }}>
-          The queue is built when the Deep scan starts.
+          The queue is built when the Deep Scan starts.
         </div>
       )}
     </div>

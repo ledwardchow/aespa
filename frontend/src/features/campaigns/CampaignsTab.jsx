@@ -7,6 +7,7 @@ import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { fmtDate } from "../../shared/lib/dates.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 // ── CampaignsTab ─────────────────────────────────────────────────────────────
 // Every campaign run for this system, newest first.
@@ -42,18 +43,11 @@ export function CampaignsTab({ systemId }) {
 
   return (
     <div>
-      {error && (
-        <div className="alert error" style={{ marginBottom: 16 }}>
-          {error}
-        </div>
-      )}
+      <PageError error={error} inline={!campaigns} onDismiss={() => setError(null)} />
       <div className="row spread" style={{ marginBottom: 14 }}>
         <div className="form-section-title" style={{ margin: 0, border: "none", padding: 0 }}>
           Campaigns
         </div>
-        <button className="btn" onClick={() => nav(`#/systems/${systemId}/campaigns/new`)}>
-          <IconPlus /> New campaign
-        </button>
       </div>
       {campaigns === null && <div className="subtle">Loading…</div>}
       {campaigns !== null && campaigns.length === 0 && (

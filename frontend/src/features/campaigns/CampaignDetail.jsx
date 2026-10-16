@@ -9,6 +9,7 @@ import { CampaignRunsTab } from "./CampaignRunsTab.jsx";
 import { CampaignFindingsTab } from "./CampaignFindingsTab.jsx";
 import { CampaignActivityTab } from "./CampaignActivityTab.jsx";
 import { campaignDisplayStatus } from "../../shared/runs/campaignPresentation.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const CAMPAIGN_TABS = [
   { key: "runs", label: "Runs" },
@@ -28,6 +29,7 @@ export function CampaignDetail({ systemId, campaignId, initialTab, initialFindin
   const {
     campaign,
     error,
+    setError,
     busy,
     load,
     start,
@@ -114,11 +116,7 @@ export function CampaignDetail({ systemId, campaignId, initialTab, initialFindin
         ))}
       </div>
       <div className="content scroll-content">
-        {tab !== "runs" && error && (
-          <div className="alert error" style={{ marginBottom: 16 }}>
-            {error}
-          </div>
-        )}
+        <PageError error={error} onDismiss={() => setError(null)} />
         {tab === "components" && <CampaignComponentsTab systemId={systemId} campaign={campaign} />}
         {tab === "connections" && (
           <CampaignConnectionsTab
@@ -144,7 +142,6 @@ export function CampaignDetail({ systemId, campaignId, initialTab, initialFindin
           <CampaignRunsTab
             systemId={systemId}
             campaign={campaign}
-            error={error}
             resumeSource={resumeSource}
             resumeTarget={resumeTarget}
             busy={busy}

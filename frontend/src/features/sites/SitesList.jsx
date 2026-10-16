@@ -5,6 +5,7 @@ import { nav } from "../../shared/navigation/router.js";
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 // ── Sites list ────────────────────────────────────────────────────────────────
 
@@ -52,10 +53,7 @@ export function SitesList() {
       let valA = a[sortField];
       let valB = b[sortField];
 
-      if (sortField === "requires_auth") {
-        valA = a.requires_auth ? 1 : 0;
-        valB = b.requires_auth ? 1 : 0;
-      } else if (sortField === "credential_count") {
+      if (sortField === "credential_count") {
         valA = a.credential_count || 0;
         valB = b.credential_count || 0;
       }
@@ -132,16 +130,7 @@ export function SitesList() {
         </div>
       </div>
       <div className="content scroll-content">
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 16,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <PageError error={error} inline={!sites} onDismiss={() => setError(null)} />
         {sites === null && <div className="subtle">Loading…</div>}
         {sites !== null && sites.length === 0 && (
           <EmptyState
@@ -160,27 +149,22 @@ export function SitesList() {
               <colgroup>
                 <col
                   style={{
+                    width: "38%",
+                  }}
+                />
+                <col
+                  style={{
+                    width: "32%",
+                  }}
+                />
+                <col
+                  style={{
+                    width: "12%",
+                  }}
+                />
+                <col
+                  style={{
                     width: "18%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "42%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "10%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "10%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "20%",
                   }}
                 />
               </colgroup>
@@ -197,12 +181,6 @@ export function SitesList() {
                     onClick={() => toggleSort("base_url")}
                   >
                     Base URL {sortArrow("base_url")}
-                  </th>
-                  <th
-                    style={{ cursor: "pointer", userSelect: "none" }}
-                    onClick={() => toggleSort("requires_auth")}
-                  >
-                    Auth {sortArrow("requires_auth")}
                   </th>
                   <th
                     style={{ cursor: "pointer", userSelect: "none" }}
@@ -227,13 +205,6 @@ export function SitesList() {
                       </a>
                     </td>
                     <td className="url">{s.base_url}</td>
-                    <td>
-                      {s.requires_auth ? (
-                        <span className="badge ok">required</span>
-                      ) : (
-                        <span className="badge neutral">none</span>
-                      )}
-                    </td>
                     <td>
                       {s.credential_count > 0 ? (
                         s.credential_count

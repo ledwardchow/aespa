@@ -458,7 +458,9 @@ async def fetch_openrouter_catalog(*, force: bool = False) -> list[dict[str, Any
             and now - _catalog_cache[0] < _CATALOG_TTL_S
         ):
             return _catalog_cache[1]
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        from aespa.services.llm_network import httpx_options
+
+        async with httpx.AsyncClient(timeout=10.0, **httpx_options()) as client:
             response = await client.get(
                 "https://openrouter.ai/api/v1/models",
                 headers={"Accept": "application/json"},
@@ -526,9 +528,43 @@ def validate_effort(
     value = effort.strip().lower()
     if value not in EFFORT_ORDER:
         raise ValueError(f"Unknown reasoning level: {effort}")
-    if capability is not None and capability.get("supported_efforts") is not None:
-        if value not in capability["supported_efforts"]:
-            raise ValueError(
-                f"Reasoning level '{effort}' is not supported by this model"
-            )
+    supported = capability.get("supported_efforts") if capability else None
+    if not isinstance(supported, list):
+        raise ValueError(
+            "This model does not list any thinking levels. "
+            "Set Thinking level to Default."
+        )
+    if value not in supported:
+        raise ValueError(f"Reasoning level '{effort}' is not supported by this model")
+    return value
+
+
+def has_effort_list(capability: dict[str, Any] | None) -> bool:
+    return isinstance(capability, dict) and isinstance(
+        capability.get("supported_efforts"), list
+    )
+
+
+SERVICE_TIER_PROVIDERS = {"openai_chatgpt_plan"}
+
+
+def validate_service_tier(
+    api_format: str, capability: dict[str, Any] | None, tier: str | None
+) -> str | None:
+    """Return a supported speed tier, or None for the provider's standard speed."""
+    if tier is None or not tier.strip():
+        return None
+    value = tier.strip().lower()
+    if api_format not in SERVICE_TIER_PROVIDERS:
+        raise ValueError("This provider does not support speed settings")
+    tiers = (capability or {}).get("service_tiers")
+    if not isinstance(tiers, list):
+        raise ValueError(
+            "Speed options for this model are unknown. "
+            "Load models for the provider again."
+        )
+    if value not in {
+        str(item.get("id", "")).lower() for item in tiers if isinstance(item, dict)
+    }:
+        raise ValueError(f"Speed '{tier}' is not supported by this model")
     return value

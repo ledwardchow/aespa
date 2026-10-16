@@ -12,7 +12,21 @@ export function parseDate(val) {
 }
 
 export function fmtDate(iso) {
-  return iso
-    ? parseDate(iso).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })
-    : "—";
+  if (!iso) return "—";
+  const date = parseDate(iso);
+  if (Number.isNaN(date.getTime())) return String(iso);
+  return date.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+}
+
+// 24-hour HH:MM:SS, used by activity feeds and agent logs.
+export function fmtTime(iso, fallback = "—") {
+  if (!iso) return fallback;
+  const date = parseDate(iso);
+  if (Number.isNaN(date.getTime())) return fallback;
+  return date.toLocaleTimeString("en-US", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }

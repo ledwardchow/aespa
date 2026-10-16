@@ -1,3 +1,4 @@
+import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { Tabs } from "../../shared/ui/Tabs.tsx";
 import { ProfilesList } from "./ProfilesList.jsx";
 import { ProvidersList } from "./ProvidersList.jsx";
@@ -8,6 +9,7 @@ import { nav } from "../../shared/navigation/router.js";
 import { LLMProviderForm } from "./LLMProviderForm.jsx";
 import { LLMModelForm } from "./LLMModelForm.jsx";
 import { ScanProfileForm } from "./ScanProfileForm.jsx";
+import { Notice, PageError } from "../../shared/ui/Notice.jsx";
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -32,6 +34,7 @@ export function SettingsPage({
   const [providers, setProviders] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(null);
+  const [message, setMessage] = useState(null);
   const [importing, setImporting] = useState(false);
   const importRef = useRef(null);
 
@@ -98,6 +101,9 @@ export function SettingsPage({
     },
     [load],
   );
+  const onProviderCreated = (savedProvider) => {
+    nav(settingsEditHref("providers", savedProvider.id));
+  };
   const onCancel = () => {
     if (section === "models") {
       const providerId = editing?.provider_id || initialProviderId;
@@ -185,7 +191,7 @@ export function SettingsPage({
       }
       const result = await settingsApi.importLLMConfig(parsed);
       await load();
-      alert(
+      setMessage(
         `Import complete: ${result.providers_created} provider(s) created, ${result.providers_updated} updated; ${result.profiles_created} model(s) created, ${result.profiles_updated} updated.`,
       );
     } catch (e) {
@@ -201,7 +207,11 @@ export function SettingsPage({
   };
   const noun = TAB_NOUN[section];
   const title =
-    screen === "new" ? `New LLM ${noun}` : screen === "edit" ? `Edit LLM ${noun}` : `LLM ${noun}s`;
+    screen === "new"
+      ? `New LLM ${noun}`
+      : screen === "edit"
+        ? `Edit LLM ${noun}`
+        : "LLM Configuration";
   const canCreateProfile = savedModels.length > 0;
   const newDisabled = section === "profiles" && !canCreateProfile;
   const visibleTab = section === "models" ? "providers" : section;
@@ -211,10 +221,10 @@ export function SettingsPage({
       <div className="topbar">
         <div className="topbar-title">{title}</div>
         <div className="topbar-actions">
-          <button className="btn secondary sm" disabled={importing} onClick={onExport}>
+          <button className="btn secondary" disabled={importing} onClick={onExport}>
             Export
           </button>
-          <button className="btn secondary sm" disabled={importing} onClick={onImportClick}>
+          <button className="btn secondary" disabled={importing} onClick={onImportClick}>
             {importing ? "Importing…" : "Import"}
           </button>
           <input
@@ -228,7 +238,7 @@ export function SettingsPage({
           />
           {screen === "list" && section !== "models" && (
             <button className="btn" disabled={newDisabled} onClick={onNew}>
-              New {noun.toLowerCase()}
+              <IconPlus /> New {noun.toLowerCase()}
             </button>
           )}
         </div>
@@ -242,7 +252,12 @@ export function SettingsPage({
           onChange={switchTab}
         />
         {!loaded && !error && <div className="subtle">Loading…</div>}
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!loaded} onDismiss={() => setError(null)} />
+        {message && (
+          <Notice variant="success" onDismiss={() => setMessage(null)}>
+            {message}
+          </Notice>
+        )}
         {missingItem && (
           <div className="alert error">The requested {noun.toLowerCase()} was not found.</div>
         )}
@@ -310,6 +325,8 @@ export function SettingsPage({
             mode="new"
             models={savedModels}
             profiles={profiles.filter((item) => !item.extension_id)}
+            onProviderCreated={onProviderCreated}
+            providerNames={providers.map((item) => item.name)}
             onSaved={onSaved}
             onCancel={providers.length ? onCancel : null}
           />

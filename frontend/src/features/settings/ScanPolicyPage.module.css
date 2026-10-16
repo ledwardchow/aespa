@@ -1,5 +1,5 @@
 .content {
-  padding: 0 0 0 16px;
+  padding: 0 0 0 28px;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -13,13 +13,17 @@
   padding-top: 16px;
   padding-bottom: 28px;
 }
-/* The page has 16px padding; the shared tab bar assumes 28px elsewhere. */
+/* Same 28px page gutter as other pages; tab bars stay full-bleed. */
 .content > :global(.tab-bar) {
-  margin: 0 0 0 -16px;
-  padding: 0 16px;
+  margin: 0 0 0 -28px;
+  padding: 0 28px;
 }
 .subTabs {
-  margin: 0 0 0 -16px;
+  margin: 0 0 0 -28px;
+  padding: 0 28px;
+}
+.subTabs :global(.activity-sub-tab-btn) {
+  padding-inline: 16px;
 }
 .systemSettingsPanels > :first-child {
   margin-top: 0 !important;

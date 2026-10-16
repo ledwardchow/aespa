@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, Table
+from sqlalchemy import Column, Integer, MetaData, Table, text
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
@@ -16,7 +16,7 @@ from aespa.extensions.runtime import (
     ProcessResult,
     ProviderAvailability,
 )
-from aespa.models import ExtensionSetting, SastRun, ScanLog
+from aespa.models import ApiCollection, ExtensionSetting, SastRun, ScanLog
 from aespa.services import sast_sources
 from extensions.builtin.github_repository.provider import (
     GitHubRepositoryProvider,
@@ -112,6 +112,7 @@ def create_extension():
         "aespa.burpsuite",
         "aespa.githubrepository",
         "aespa.benchmarking",
+        "aespa.chatgptplanusage",
         "example.source",
     }
     assert set(manager.source_providers) == {"aespa.githubrepository", "example.source"}
@@ -234,6 +235,127 @@ def test_benchmarking_rename_keeps_enabled_state_and_saved_data(
     assert len(client.get("/extension/aespa.benchmarking/datasets").json()) == 1
     assert old_path.is_file()
     assert (data_dir / "extensions" / "aespa.benchmarking.db").is_file()
+
+
+def test_benchmarking_imports_retired_core_tables_without_core_models(
+    client, db_engine, monkeypatch, tmp_path
+):
+    from aespa.extensions import get_extension_manager
+
+    with Session(db_engine) as session:
+        collection = ApiCollection(
+            name="Saved collection", base_url="https://example.test"
+        )
+        session.add(collection)
+        session.flush()
+        run = SastRun(
+            name="Saved scan", status="completed", collection_id=collection.id
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+        collection_id = collection.id
+
+    with db_engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE benchmark_dataset (id INTEGER PRIMARY KEY, "
+                "name TEXT NOT NULL, schema_version INTEGER NOT NULL, "
+                "source_digest TEXT, ground_truth_digest TEXT NOT NULL, "
+                "ground_truth_json TEXT NOT NULL, created_at DATETIME NOT NULL, "
+                "updated_at DATETIME NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE benchmark_evaluation (id INTEGER PRIMARY KEY, "
+                "name TEXT NOT NULL, sast_run_id INTEGER NOT NULL, "
+                "dataset_id INTEGER NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE benchmark_match (id INTEGER PRIMARY KEY, "
+                "evaluation_id INTEGER NOT NULL, ground_truth_external_id TEXT)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE benchmark_comparison (id INTEGER PRIMARY KEY, "
+                "name TEXT NOT NULL, dataset_id INTEGER NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE benchmark_comparison_evaluation ("
+                "id INTEGER PRIMARY KEY, comparison_id INTEGER NOT NULL, "
+                "evaluation_id INTEGER NOT NULL, ordinal INTEGER NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO benchmark_dataset VALUES "
+                "(7, 'Saved ground truth', 1, NULL, 'digest', "
+                "'{\"items\": []}', '2026-09-27 00:00:00', '2026-09-27 00:00:00')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO benchmark_evaluation "
+                "(id, name, sast_run_id, dataset_id) "
+                "VALUES (8, 'Saved evaluation', :run_id, 7)"
+            ),
+            {"run_id": run_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO benchmark_match "
+                "(id, evaluation_id, ground_truth_external_id) "
+                "VALUES (9, 8, 'CVE-legacy')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO benchmark_comparison (id, name, dataset_id) "
+                "VALUES (10, 'Saved comparison', 7)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO benchmark_comparison_evaluation "
+                "(id, comparison_id, evaluation_id, ordinal) VALUES (11, 10, 8, 0)"
+            )
+        )
+
+    manager = get_extension_manager()
+    monkeypatch.setattr(
+        "aespa.extensions.runtime.get_settings",
+        lambda: SimpleNamespace(
+            extensions_dir=tmp_path / "user-extensions",
+            data_dir=tmp_path / "data",
+        ),
+    )
+    manager.load_extensions()
+    enabled = client.put(
+        "/api/extensions/aespa.benchmarking/enabled", json={"enabled": True}
+    )
+    assert enabled.status_code == 200, enabled.text
+    assert client.get("/extension/aespa.benchmarking/datasets/7").status_code == 200
+    evaluation = client.get("/extension/aespa.benchmarking/evaluations/8")
+    assert evaluation.status_code == 200
+    assert evaluation.json()["sast_run_id"] == run_id
+    assert evaluation.json()["matches"][0]["ground_truth_external_id"] == "CVE-legacy"
+    comparison = client.get("/extension/aespa.benchmarking/comparisons/10")
+    assert comparison.status_code == 200
+    assert comparison.json()["evaluation_ids"] == [8]
+    direct_delete = client.delete(f"/api/sast-runs/{run_id}")
+    parent_delete = client.delete(f"/api/api-collections/{collection_id}")
+    assert direct_delete.status_code == parent_delete.status_code == 409
+    assert direct_delete.json() == parent_delete.json()
+    assert client.get(f"/api/api-collections/{collection_id}").status_code == 200
+    assert client.get("/api/benchmark-lab/datasets").status_code == 404
+    assert client.get("/api/settings/benchmark-lab").status_code == 404
 
 
 def test_extension_data_store_rejects_tables_outside_its_namespace(

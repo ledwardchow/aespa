@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import inspect
 import json
@@ -46,12 +47,14 @@ def _apply_upstream_proxy(session: Session) -> None:
     clients all read the proxy ContextVars set here; without this call they run in
     a fresh context with the vars unset and every request bypasses Burp/ZAP.
     """
-    from aespa.services.scanner import _scanner_proxy_var
+    from aespa.services.scanner import _scanner_ca_bundle_var, _scanner_proxy_var
     from aespa.services.settings import get_upstream_proxy_config
 
     cfg = get_upstream_proxy_config(session)
     _scanner_proxy_var.set(cfg.scanner_proxy_url if cfg.proxy_scanner else None)
+    _scanner_ca_bundle_var.set(cfg.scanner_ca_bundle_path)
     llm_svc.set_llm_proxy(cfg.llm_proxy_url if cfg.proxy_llm else None)
+    llm_svc.set_llm_ca_bundle(cfg.llm_ca_bundle_path)
     log.info(
         "ALICE upstream proxy: scanner_url=%s llm_url=%s scanner=%s llm=%s",
         cfg.scanner_proxy_url,
@@ -200,25 +203,36 @@ _FINDING_MANAGEMENT_TOOL_NAMES = {
 }
 
 
-# Live Playwright browsers for ALICE's interactive `browser` tool, keyed by run_id.
-# One headless browser per run, launched lazily on first browser action and closed
-# when the turn ends. ponytail: per-run global, no pooling/limits — fine for a
-# localhost single-user tool; revisit if ALICE ever runs many concurrent turns.
-_alice_browsers: dict[int, dict] = {}
+# Live Playwright browsers for ALICE's interactive `browser` tool. One headless
+# browser per chat tab, launched lazily on first browser action and closed when
+# that tab's turn ends. Several tabs on the same run can work at once, so the
+# key includes the chat tab (set by alice_tasks for each background turn) and
+# the run kind, because web and API run ids share the same integer space.
+alice_browser_scope: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "alice_browser_scope", default=""
+)
+_alice_browsers: dict[tuple[str, int, str], dict] = {}
+
+
+def _alice_browser_key(run_id: int, api_run_id: int | None) -> tuple[str, int, str]:
+    if api_run_id is not None:
+        return ("api", api_run_id, alice_browser_scope.get())
+    return ("web", run_id, alice_browser_scope.get())
 
 
 async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
-    """Return a live (page, context) for ``run_id``, launching one if needed.
+    """Return a live (page, context) for this run and chat tab, launching one if needed.
 
     Pass ``api_run_id`` for API-collection runs so browser traffic is keyed on
     the API owner column.
     """
-    entry = _alice_browsers.get(run_id)
+    key = _alice_browser_key(run_id, api_run_id)
+    entry = _alice_browsers.get(key)
     if entry:
         page = entry.get("page")
         if page is not None and not page.is_closed():
             return page, entry["ctx"]
-        await _close_alice_browser(run_id)
+        await _close_alice_browser(run_id, api_run_id=api_run_id)
 
     from playwright.async_api import async_playwright
 
@@ -248,13 +262,13 @@ async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
         api_run_id=api_run_id,
     )
     page = await ctx.new_page()
-    _alice_browsers[run_id] = {"pw": pw, "browser": browser, "ctx": ctx, "page": page}
+    _alice_browsers[key] = {"pw": pw, "browser": browser, "ctx": ctx, "page": page}
     return page, ctx
 
 
-async def _close_alice_browser(run_id: int) -> None:
-    """Tear down the live browser for ``run_id`` (best-effort)."""
-    entry = _alice_browsers.pop(run_id, None)
+async def _close_alice_browser(run_id: int, api_run_id: int | None = None) -> None:
+    """Tear down the live browser for this run and chat tab (best-effort)."""
+    entry = _alice_browsers.pop(_alice_browser_key(run_id, api_run_id), None)
     if not entry:
         return
     for key in ("ctx", "browser"):
@@ -266,6 +280,38 @@ async def _close_alice_browser(run_id: int) -> None:
         await entry["pw"].stop()
     except Exception:
         pass
+
+
+# Workprogram finding hooks installed by ALICE turns, keyed by web run id:
+# run_id -> [hook, number of turns using it]. Several chat tabs on one run can
+# run turns at once, so the hook is removed only when the last turn finishes.
+_alice_finding_hooks: dict[int, list[Any]] = {}
+
+
+def _acquire_alice_finding_hook(run_id: int) -> None:
+    from aespa.services.scanner import _finding_hooks
+    from aespa.services.web_workprogram import _make_web_post_finding_fn
+
+    entry = _alice_finding_hooks.get(run_id)
+    if entry is None:
+        entry = _alice_finding_hooks[run_id] = [_make_web_post_finding_fn(run_id), 0]
+    entry[1] += 1
+    _finding_hooks[run_id] = entry[0]
+
+
+def _release_alice_finding_hook(run_id: int) -> None:
+    from aespa.services.scanner import _finding_hooks
+
+    entry = _alice_finding_hooks.get(run_id)
+    if entry is None:
+        return
+    entry[1] -= 1
+    if entry[1] > 0:
+        return  # another chat tab's turn is still using it
+    del _alice_finding_hooks[run_id]
+    # Leave any hook another component installed after ALICE.
+    if _finding_hooks.get(run_id) is entry[0]:
+        _finding_hooks.pop(run_id, None)
 
 
 def _extract_user_directive(history: list[dict]) -> str:
@@ -1054,7 +1100,6 @@ async def _execute_alice_tool(
             headers=req_headers,
             timeout=timeout,
             follow_redirects=True,
-            verify=False,
         ) as hx:
             try:
                 if isinstance(hx, traffic_svc.LoggingAsyncClient):
@@ -1568,7 +1613,6 @@ async def _execute_alice_tool(
             headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
             timeout=timeout,
             follow_redirects=False,
-            verify=False,
             provenance={"agent_id": "alice"},
         ) as hx:
             for cand in candidates[:20]:
@@ -1691,7 +1735,6 @@ async def _execute_alice_tool(
             headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
             timeout=timeout,
             follow_redirects=True,
-            verify=False,
             provenance={
                 "agent_id": "alice",
                 "purpose": traffic_svc.request_purpose(
@@ -2428,18 +2471,6 @@ async def run_alice_turn_stream(
 
     _web_post_probe_fn = _wp_probe_fn(run_id)
 
-    # Register the workprogram finding hook so write_finding tool calls also
-    # flip Work Program cells.  This mirrors the pattern in scanner._do_thinking_scan
-    # (see scanner.py: _finding_hooks[run_id] = _web_post_finding_fn).  Cleared
-    # in the finally block below so the hook never leaks past this turn.
-    from aespa.services.scanner import _finding_hooks
-    from aespa.services.web_workprogram import (
-        _make_web_post_finding_fn as _wp_finding_fn,
-    )
-
-    _web_post_finding_fn = _wp_finding_fn(run_id)
-    _finding_hooks[run_id] = _web_post_finding_fn
-
     # Yield initial thinking chunk immediately (0ms time-to-first-event!)
     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. Initializing] Mapped target sitemap and active scan configuration...\n'})}\n\n"
     await asyncio.sleep(0.01)
@@ -2549,6 +2580,11 @@ async def run_alice_turn_stream(
         ((goal or {}).get("checkpoint") or {}).get("evidence") or []
     )
     goal_terminal = False
+
+    # Register the workprogram finding hook so write_finding tool calls also
+    # flip Work Program cells.  Registered directly before the try block so the
+    # finally below always releases it, even on early exit or cancellation.
+    _acquire_alice_finding_hook(run_id)
 
     # 4. Agentic loop
     try:
@@ -2965,10 +3001,10 @@ async def run_alice_turn_stream(
                 from aespa.services import antigravity_provider as provider_adapter
 
             await provider_adapter.close_conversation(messages)
-        # Always unregister the workprogram finding hook, even on early exit
-        # or exception — mirrors scanner._do_thinking_scan cleanup.
+        # Always release the workprogram finding hook, even on early exit or
+        # exception. It stays registered while another chat tab is still working.
         try:
-            _finding_hooks.pop(run_id, None)
+            _release_alice_finding_hook(run_id)
         except Exception:
             pass
         # Close the live browser opened for any `browser` tool calls this turn.

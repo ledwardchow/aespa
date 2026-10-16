@@ -13,8 +13,10 @@ import { IconChevronDown, IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { SavedCrawlsPanel } from "./SavedCrawlsPanel.jsx";
 
 import { workflowBadge } from "../../shared/runs/presentation.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function SiteDetail({ siteId }) {
   const benchmarkLinks = useBenchmarkLinks();
@@ -96,6 +98,7 @@ export function SiteDetail({ siteId }) {
       max_depth: run.max_depth,
       max_pages: run.max_pages,
       crawler_mode: run.crawler_mode || "url",
+      page_selection: run.page_selection || "each_url",
       llm_profile_id: run.llm_profile_id || "",
     });
     setEditingRun(run);
@@ -107,6 +110,7 @@ export function SiteDetail({ siteId }) {
         max_depth: Number(editForm.max_depth),
         max_pages: Number(editForm.max_pages),
         crawler_mode: editForm.crawler_mode,
+        page_selection: editForm.page_selection,
         llm_profile_id: editForm.llm_profile_id ? Number(editForm.llm_profile_id) : null,
       });
       setRuns((rs) => rs.map((r) => (r.id === updated.id ? updated : r)));
@@ -144,13 +148,13 @@ export function SiteDetail({ siteId }) {
               </button>
             )}
             <button className="btn" onClick={() => nav(`#/sites/${siteId}/runs/new`)}>
-              <IconPlus /> New run
+              <IconPlus /> New test run
             </button>
           </>
         }
       />
       <div className="content scroll-content stack site-detail-content">
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!site} onDismiss={() => setError(null)} />
 
         {editingRun && (
           <div
@@ -204,10 +208,29 @@ export function SiteDetail({ siteId }) {
                 <select
                   className="select"
                   value={editForm.crawler_mode}
-                  onChange={(e) => setEditForm((f) => ({ ...f, crawler_mode: e.target.value }))}
+                  disabled={editingRun.crawl_started_once}
+                  onChange={(e) =>
+                    setEditForm((f) => ({
+                      ...f,
+                      crawler_mode: e.target.value,
+                      page_selection: "each_url",
+                    }))
+                  }
                 >
                   <option value="url">URL</option>
                   <option value="interactive">Interactive SPA</option>
+                </select>
+              </div>
+              <div className="field" style={{ margin: 0 }}>
+                <label>Page selection</label>
+                <select
+                  className="select"
+                  value={editForm.page_selection}
+                  disabled={editingRun.crawl_started_once || editForm.crawler_mode !== "url"}
+                  onChange={(e) => setEditForm((f) => ({ ...f, page_selection: e.target.value }))}
+                >
+                  <option value="each_url">Visit each URL</option>
+                  <option value="group_similar">Group similar pages</option>
                 </select>
               </div>
               <div
@@ -394,7 +417,7 @@ export function SiteDetail({ siteId }) {
                         style={{
                           marginTop: 8,
                           padding: "8px 12px",
-                          background: "var(--surface-2,#2a2a2a)",
+                          background: "var(--panel-2)",
                           border: "1px solid var(--warn,#f59e0b)",
                           borderRadius: 5,
                           fontSize: 12,
@@ -413,6 +436,8 @@ export function SiteDetail({ siteId }) {
             )}
           </div>
         )}
+
+        {site && <SavedCrawlsPanel siteId={siteId} />}
 
         <div className="site-runs-section">
           <div
@@ -442,7 +467,7 @@ export function SiteDetail({ siteId }) {
               sub="Create a new run to start crawling this site."
               action={
                 <button className="btn" onClick={() => nav(`#/sites/${siteId}/runs/new`)}>
-                  <IconPlus /> New run
+                  <IconPlus /> New test run
                 </button>
               }
             />
@@ -511,7 +536,9 @@ export function SiteDetail({ siteId }) {
                     <NavigationRow key={r.id} href={`#/runs/${r.id}`} label={`Open ${r.name}`}>
                       <td>
                         <span className="run-name">
-                          <strong>{r.name}</strong>
+                          <a href={`#/runs/${r.id}`} style={{ fontWeight: 600 }}>
+                            {r.name}
+                          </a>
                           {r.coverage_mode === "deep" && <span className="badge deep">Deep</span>}
                           {r.coverage_mode === "team" && <span className="badge">Team</span>}
                         </span>

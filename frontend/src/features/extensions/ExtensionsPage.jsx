@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import * as extensionsApi from "../../shared/api/extensions.js";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 function extensionStatus(extension) {
   if (!extension.enabled) return { label: "Disabled", className: "neutral" };
@@ -44,11 +45,7 @@ export function ExtensionsPage({ onExtensionUpdated }) {
     <>
       <PageHeader title="Extensions" />
       <div className="content scroll-content">
-        {error ? (
-          <div className="alert error" role="alert">
-            {error}
-          </div>
-        ) : null}
+        <PageError error={error} inline={extensions === null} onDismiss={() => setError(null)} />
         {extensions === null && !error ? <div className="subtle">Loading…</div> : null}
         {extensions?.length === 0 ? <div className="subtle">No extensions installed.</div> : null}
         {extensions?.length ? (

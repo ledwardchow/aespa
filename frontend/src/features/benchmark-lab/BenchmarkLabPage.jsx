@@ -1,7 +1,10 @@
+import { fmtDate } from "../../shared/lib/dates.js";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import * as settingsApi from "../../shared/api/settings.js";
-import { PageHeader } from "../../shared/ui/PageHeader.jsx";
+import { nav } from "../../shared/navigation/router.js";
+import { useHashTab } from "../../shared/navigation/useHashTab.js";
+import { Crumb, PageHeader, Sep } from "../../shared/ui/PageHeader.jsx";
 import { parseGroundTruthText } from "./groundTruthImport.js";
 import { BenchmarkModelSettings } from "./BenchmarkModelSettings.jsx";
 import { BenchmarkPublishing } from "./BenchmarkPublishing.jsx";
@@ -9,9 +12,11 @@ import { BenchmarkTransfer } from "./BenchmarkTransfer.jsx";
 import { GroundTruthDatasets } from "./GroundTruthDatasets.jsx";
 import { CompletedScanBenchmarks } from "./CompletedScanBenchmarks.jsx";
 import { SiteSummary, modelName, money } from "./SiteSummary.jsx";
+import { BenchmarkResultComment } from "./BenchmarkResultComment.jsx";
 
 import styles from "./BenchmarkSettings.module.css";
 import { scanType } from "./scanPresentation.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const EMPTY = { sites: [], apis: [], sast_runs: [] };
 const modelLabel = (model) => {
@@ -20,10 +25,47 @@ const modelLabel = (model) => {
     return `${model.name} (${model.model})`;
   return model.model || model.name || "Unavailable";
 };
+const SEVERITY_ORDER = ["critical", "high", "medium", "low", "informational"];
+
+function groupGroundTruth(items, groupBy) {
+  if (groupBy === "none") return [{ label: null, items }];
+  const groups = new Map();
+  for (const item of items) {
+    const value = groupBy === "category" ? item.category : item.severity;
+    const key = typeof value === "string" && value.trim() ? value.trim() : "";
+    const normalized = groupBy === "severity" ? key.toLowerCase() : key;
+    const label = normalized
+      ? groupBy === "severity"
+        ? normalized.charAt(0).toUpperCase() + normalized.slice(1)
+        : normalized
+      : groupBy === "category"
+        ? "Uncategorized"
+        : "Unrated";
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(item);
+  }
+  const sorted = [...groups].sort(([left], [right]) => {
+    if (groupBy === "severity") {
+      const rank = (label) => {
+        const index = SEVERITY_ORDER.indexOf(label.toLowerCase());
+        return index < 0 ? SEVERITY_ORDER.length : index;
+      };
+      return rank(left) - rank(right) || left.localeCompare(right);
+    }
+    if (left === "Uncategorized") return 1;
+    if (right === "Uncategorized") return -1;
+    return left.localeCompare(right, undefined, { numeric: true });
+  });
+  return sorted.map(([label, groupItems]) => ({ label, items: groupItems }));
+}
 
 export function BenchmarkLabPage({ initialResultId }) {
-  const [tab, setTab] = useState("site");
-  const [siteTab, setSiteTab] = useState("summary");
+  const [routeTab] = useHashTab("tab", ["site", "dast", "api", "sast", "datasets"], "site");
+  const [routeSiteTab, setSiteTab] = useHashTab(
+    "subtab",
+    ["summary", "analyses", "new"],
+    initialResultId ? "analyses" : "summary",
+  );
   const [targets, setTargets] = useState(EMPTY);
   const [datasets, setDatasets] = useState([]);
   const [results, setResults] = useState([]);
@@ -37,6 +79,11 @@ export function BenchmarkLabPage({ initialResultId }) {
   const [edit, setEdit] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+  const [groupBy, setGroupBy] = useState("none");
+  const selectedResult = results.find((item) => item.id === selectedResultId);
+  const tab = initialResultId && selectedResult ? selectedResult.run_kind : routeTab;
+  const siteTab = initialResultId && selectedResult ? "analyses" : routeSiteTab;
 
   const load = useCallback(async () => {
     try {
@@ -54,8 +101,6 @@ export function BenchmarkLabPage({ initialResultId }) {
       setResults(resultData);
       const linkedResult = resultData.find((item) => item.id === initialResultId);
       if (linkedResult) {
-        setTab(linkedResult.run_kind);
-        setSiteTab("analyses");
         setTargetId(String(linkedResult.target_id || ""));
         setSelectedResultId(linkedResult.id);
       }
@@ -65,6 +110,8 @@ export function BenchmarkLabPage({ initialResultId }) {
       setError(null);
     } catch (err) {
       setError(err.message);
+    } finally {
+      setLoaded(true);
     }
   }, [initialResultId]);
   useEffect(() => {
@@ -74,7 +121,10 @@ export function BenchmarkLabPage({ initialResultId }) {
   const category = tab === "dast" ? "site" : tab;
   const target = targets.sites.find((item) => String(item.id) === String(targetId));
   const defaultModel = models.find((item) => item.id === benchmarkSettings?.default_model_id);
-  const selectedResult = results.find((item) => item.id === selectedResultId);
+  const groupedGroundTruth = useMemo(
+    () => groupGroundTruth(selectedResult?.ground_truth.items || [], groupBy),
+    [selectedResult, groupBy],
+  );
   const relevantResults = useMemo(
     () =>
       results.filter((item) =>
@@ -94,8 +144,12 @@ export function BenchmarkLabPage({ initialResultId }) {
     [results, tab, category, targetId, target, targets],
   );
   const findingsById = new Map((selectedResult?.findings || []).map((item) => [item.id, item]));
+  const openResult = (id) =>
+    nav(
+      `#/benchmark-lab/results/${id}${routeSiteTab === "summary" ? "" : `?subtab=${routeSiteTab}`}`,
+    );
   const changeTab = (next) => {
-    setTab(next);
+    nav(`#/benchmark-lab?tab=${next}&subtab=${routeSiteTab}`);
     setTargetId("");
     setRunId("");
     setSelectedResultId(null);
@@ -149,6 +203,7 @@ export function BenchmarkLabPage({ initialResultId }) {
       setResults((current) => current.filter((result) => result.id !== selectedResult.id));
       setSelectedResultId(null);
       setEdit(null);
+      if (initialResultId != null) nav("#/benchmark-lab");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -193,7 +248,7 @@ export function BenchmarkLabPage({ initialResultId }) {
         }}
       >
         <option value="">
-          {siteTab === "new" ? "Select an application..." : "All applications"}
+          {siteTab === "new" ? "Select an application…" : "All applications"}
         </option>
         {siteTab !== "new" &&
           datasets.map((item) => (
@@ -210,9 +265,257 @@ export function BenchmarkLabPage({ initialResultId }) {
     </label>
   );
 
+  const resultDetails = selectedResult ? (
+    <section className="benchmark-results">
+      <div className="benchmark-result-heading">
+        <h2>{selectedResult.run_name}</h2>
+        <button className="btn secondary" type="button" onClick={deleteResult} disabled={busy}>
+          Delete result
+        </button>
+      </div>
+      <p className="subtle">
+        Compared with {selectedResult.ground_truth.name || "ground truth"} on{" "}
+        {fmtDate(selectedResult.created_at)}
+      </p>
+      <p className="subtle">
+        {selectedResult.comparison?.method === "model"
+          ? `Compared by ${selectedResult.comparison.model?.name}`
+          : selectedResult.comparison?.fallback_reason
+            ? `Rules-only fallback${selectedResult.comparison.model?.name ? ` after ${selectedResult.comparison.model.name}` : ""}: ${selectedResult.comparison.fallback_reason}`
+            : selectedResult.comparison?.method === "rules"
+              ? "Rules-only comparison"
+              : "Comparison method was not recorded for this older result"}
+      </p>
+      {selectedResult.scan_models ? (
+        <div className="benchmark-scan-models">
+          {selectedResult.run_kind !== "sast" && (
+            <p className="subtle">Scan model: {modelLabel(selectedResult.scan_models.primary)}</p>
+          )}
+          {(selectedResult.scan_models.sast || []).map((source) => (
+            <p className="subtle" key={source.run_id}>
+              SAST model
+              {selectedResult.run_kind !== "sast" && source.run_name ? ` (${source.run_name})` : ""}
+              : {modelLabel(source.model)}
+            </p>
+          ))}
+        </div>
+      ) : (
+        <p className="subtle">Scan model details were not saved for this older result.</p>
+      )}
+      <BenchmarkResultComment
+        key={selectedResult.id}
+        result={selectedResult}
+        onSaved={(updated) =>
+          setResults((current) =>
+            current.map((result) => (result.id === updated.id ? updated : result)),
+          )
+        }
+      />
+      <div className="benchmark-summary-grid benchmark-counts">
+        {["full", "partial", "missing"].map((status) => (
+          <div className="benchmark-stat" key={status}>
+            <span>{status}</span>
+            <strong>{selectedResult.summary[status]}</strong>
+          </div>
+        ))}
+      </div>
+      {initialResultId != null && (
+        <label className="benchmark-group-control">
+          Group findings by
+          <select
+            className="select"
+            value={groupBy}
+            onChange={(event) => setGroupBy(event.target.value)}
+          >
+            <option value="none">Original order</option>
+            <option value="category">OWASP category</option>
+            <option value="severity">Severity</option>
+          </select>
+        </label>
+      )}
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Ground truth finding</th>
+              <th>Result</th>
+              <th>Matching scan finding</th>
+            </tr>
+          </thead>
+          {groupedGroundTruth.map((group) => (
+            <tbody key={group.label || "all"}>
+              {group.label && (
+                <tr className="benchmark-group-row">
+                  <th scope="rowgroup" colSpan={3}>
+                    {group.label} ({group.items.length})
+                  </th>
+                </tr>
+              )}
+              {group.items.map((item) => {
+                const row = selectedResult.rows.find(
+                  (candidate) => candidate.external_id === item.external_id,
+                );
+                const open = expanded === item.external_id;
+                return (
+                  <tr key={item.external_id}>
+                    <td>
+                      <button
+                        className="benchmark-row-toggle"
+                        type="button"
+                        onClick={() => setExpanded(open ? null : item.external_id)}
+                      >
+                        {open ? "▾" : "▸"} {item.external_id} -{" "}
+                        {item.title || item.description || "Untitled finding"}
+                      </button>
+                      {open && (
+                        <div className="benchmark-expanded-row">
+                          <p>{item.description || item.root_cause || "No description supplied."}</p>
+                          <p>{row?.reason}</p>
+                          {edit?.external_id === item.external_id ? (
+                            <div className="benchmark-review-form">
+                              <label>
+                                Result{" "}
+                                <select
+                                  className="select"
+                                  value={edit.disposition}
+                                  onChange={(event) =>
+                                    setEdit({ ...edit, disposition: event.target.value })
+                                  }
+                                >
+                                  <option value="full">Full</option>
+                                  <option value="partial">Partial</option>
+                                  <option value="missing">Missing</option>
+                                </select>
+                              </label>
+                              {edit.disposition !== "missing" && (
+                                <fieldset>
+                                  <legend>Matching findings</legend>
+                                  {selectedResult.findings.map((finding) => (
+                                    <label key={finding.id}>
+                                      <input
+                                        type="checkbox"
+                                        checked={edit.finding_ids.includes(finding.id)}
+                                        onChange={(event) =>
+                                          setEdit({
+                                            ...edit,
+                                            finding_ids: event.target.checked
+                                              ? [...edit.finding_ids, finding.id]
+                                              : edit.finding_ids.filter((id) => id !== finding.id),
+                                          })
+                                        }
+                                      />{" "}
+                                      {finding.reference} - {finding.title}
+                                    </label>
+                                  ))}
+                                </fieldset>
+                              )}
+                              <label>
+                                Reason{" "}
+                                <textarea
+                                  value={edit.note}
+                                  onChange={(event) =>
+                                    setEdit({ ...edit, note: event.target.value })
+                                  }
+                                />
+                              </label>
+                              <button
+                                className="btn primary sm"
+                                type="button"
+                                disabled={busy}
+                                onClick={() => saveReview(item)}
+                              >
+                                Save
+                              </button>
+                              <button
+                                className="btn ghost sm"
+                                type="button"
+                                onClick={() => setEdit(null)}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              className="btn ghost sm"
+                              type="button"
+                              onClick={() =>
+                                setEdit({
+                                  external_id: item.external_id,
+                                  disposition: row.disposition,
+                                  finding_ids: row.finding_ids,
+                                  note: row.review_note || "",
+                                })
+                              }
+                            >
+                              Review result
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <span className={`benchmark-disposition ${row?.disposition || "missing"}`}>
+                        {row?.disposition || "missing"}
+                        {row?.reviewed ? " (reviewed)" : ""}
+                      </span>
+                    </td>
+                    <td>
+                      {row?.finding_ids
+                        .map((id) => findingsById.get(id)?.reference || `#${id}`)
+                        .join(", ") || "-"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          ))}
+        </table>
+      </div>
+    </section>
+  ) : null;
+
+  if (initialResultId != null) {
+    return (
+      <>
+        <PageHeader
+          title={
+            <>
+              <Crumb href="#/benchmark-lab">Benchmark Lab</Crumb>
+              <Sep />
+              Analysis
+            </>
+          }
+          actions={
+            <>
+              <a className="btn ghost" href="#/benchmark-lab/scoring-guide">
+                How scoring and matching work
+              </a>
+              <a className="btn secondary" href="#/benchmark-lab">
+                Back to results
+              </a>
+            </>
+          }
+        />
+        <div className="content scroll-content benchmark-page benchmark-simple">
+          <PageError error={error} inline={!loaded} onDismiss={() => setError(null)} />
+          {loaded && !error && !selectedResult && <p className="subtle">Analysis not found.</p>}
+          {!loaded && <p className="subtle">Loading analysis…</p>}
+          {resultDetails}
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
-      <PageHeader title="Benchmark Lab" />
+      <PageHeader
+        title="Benchmark Lab"
+        actions={
+          <a className="btn ghost" href="#/benchmark-lab/scoring-guide">
+            How scoring and matching work
+          </a>
+        }
+      />
       <div className="tab-bar benchmark-top-tabs" role="tablist" aria-label="Scan type">
         {[
           ["site", "Results"],
@@ -274,42 +577,25 @@ export function BenchmarkLabPage({ initialResultId }) {
             datasets={datasets}
             defaultModel={defaultModel}
             onChange={load}
-            onOpen={(id) => {
-              const result = results.find((item) => item.id === id);
-              if (result)
-                setTargetId(
-                  result.target_id ? String(result.target_id) : `dataset:${result.dataset_id}`,
-                );
-              setSelectedResultId(id);
-              setExpanded(null);
-              setEdit(null);
-            }}
+            onOpen={openResult}
           />
         )}
         {tab === "datasets" && (
           <div className={styles.settings}>
-            <BenchmarkPublishing />
+            <BenchmarkPublishing datasets={datasets} results={results} />
             <BenchmarkTransfer onChange={load} />
             <BenchmarkModelSettings models={models} settings={benchmarkSettings} onChange={load} />
             <GroundTruthDatasets datasets={datasets} targets={targets} onChange={load} />
           </div>
         )}
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!loaded} onDismiss={() => setError(null)} />
         {tab === "site" && siteTab !== "summary" && siteSelector}
         {tab === "site" && siteTab === "summary" && (
           <SiteSummary
             siteSelector={siteSelector}
             showChart={relevantResults.length > 0}
             results={relevantResults}
-            onOpen={(id) => {
-              const result = results.find((item) => item.id === id);
-              if (result)
-                setTargetId(
-                  result.target_id ? String(result.target_id) : `dataset:${result.dataset_id}`,
-                );
-              setSelectedResultId(id);
-              setSiteTab("analyses");
-            }}
+            onOpen={openResult}
           />
         )}
         {tab === "site" && siteTab === "analyses" && (
@@ -340,19 +626,11 @@ export function BenchmarkLabPage({ initialResultId }) {
                         <td>{modelName(result)}</td>
                         <td>{money(result.scan_cost_usd)}</td>
                         <td>{result.summary.full + result.summary.partial}</td>
-                        <td>{new Date(result.created_at).toLocaleString()}</td>
+                        <td>{fmtDate(result.created_at)}</td>
                         <td>
-                          <button
-                            type="button"
-                            className="btn ghost sm"
-                            onClick={() => {
-                              setSelectedResultId(result.id);
-                              setExpanded(null);
-                              setEdit(null);
-                            }}
-                          >
+                          <a className="btn ghost sm" href={`#/benchmark-lab/results/${result.id}`}>
                             Open {result.run_name}
-                          </button>
+                          </a>
                         </td>
                       </tr>
                     ))}
@@ -400,7 +678,7 @@ export function BenchmarkLabPage({ initialResultId }) {
                         setRunId(event.target.value);
                       }}
                     >
-                      <option value="">Select a scan...</option>
+                      <option value="">Select a scan…</option>
                       {target.runs.map((run) => (
                         <option key={run.id} value={run.id}>
                           {run.name} ({run.status})
@@ -420,7 +698,7 @@ export function BenchmarkLabPage({ initialResultId }) {
                   onClick={compare}
                   disabled={busy || !runId || !defaultModel || !target.dataset}
                 >
-                  {busy ? "Working..." : "Compare scan"}
+                  {busy ? "Working…" : "Compare scan"}
                 </button>
               </>
             )}
@@ -434,206 +712,16 @@ export function BenchmarkLabPage({ initialResultId }) {
               value={selectedResultId || ""}
               onChange={(event) => setSelectedResultId(Number(event.target.value) || null)}
             >
-              <option value="">Select a result...</option>
+              <option value="">Select a result…</option>
               {relevantResults.map((result) => (
                 <option key={result.id} value={result.id}>
-                  {result.run_name} - {new Date(result.created_at).toLocaleString()}
+                  {result.run_name} - {fmtDate(result.created_at)}
                 </option>
               ))}
             </select>
           </label>
         )}
-        {selectedResult && (tab !== "site" || siteTab === "analyses") && (
-          <section className="benchmark-results">
-            <div className="benchmark-result-heading">
-              <h2>{selectedResult.run_name}</h2>
-              <button
-                className="btn secondary"
-                type="button"
-                onClick={deleteResult}
-                disabled={busy}
-              >
-                Delete result
-              </button>
-            </div>
-            <p className="subtle">
-              Compared with {selectedResult.ground_truth.name || "ground truth"} on{" "}
-              {new Date(selectedResult.created_at).toLocaleString()}
-            </p>
-            <p className="subtle">
-              {selectedResult.comparison?.method === "model"
-                ? `Compared by ${selectedResult.comparison.model?.name}`
-                : selectedResult.comparison?.fallback_reason
-                  ? `Rules-only fallback${selectedResult.comparison.model?.name ? ` after ${selectedResult.comparison.model.name}` : ""}: ${selectedResult.comparison.fallback_reason}`
-                  : selectedResult.comparison?.method === "rules"
-                    ? "Rules-only comparison"
-                    : "Comparison method was not recorded for this older result"}
-            </p>
-            {selectedResult.scan_models ? (
-              <div className="benchmark-scan-models">
-                {selectedResult.run_kind !== "sast" && (
-                  <p className="subtle">
-                    Scan model: {modelLabel(selectedResult.scan_models.primary)}
-                  </p>
-                )}
-                {(selectedResult.scan_models.sast || []).map((source) => (
-                  <p className="subtle" key={source.run_id}>
-                    SAST model
-                    {selectedResult.run_kind !== "sast" && source.run_name
-                      ? ` (${source.run_name})`
-                      : ""}
-                    : {modelLabel(source.model)}
-                  </p>
-                ))}
-              </div>
-            ) : (
-              <p className="subtle">Scan model details were not saved for this older result.</p>
-            )}
-            <div className="benchmark-summary-grid benchmark-counts">
-              {["full", "partial", "missing"].map((status) => (
-                <div className="benchmark-stat" key={status}>
-                  <span>{status}</span>
-                  <strong>{selectedResult.summary[status]}</strong>
-                </div>
-              ))}
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ground truth finding</th>
-                    <th>Result</th>
-                    <th>Matching scan finding</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {selectedResult.ground_truth.items.map((item) => {
-                    const row = selectedResult.rows.find(
-                      (candidate) => candidate.external_id === item.external_id,
-                    );
-                    const open = expanded === item.external_id;
-                    return (
-                      <tr key={item.external_id}>
-                        <td>
-                          <button
-                            className="benchmark-row-toggle"
-                            type="button"
-                            onClick={() => setExpanded(open ? null : item.external_id)}
-                          >
-                            {open ? "▾" : "▸"} {item.external_id} -{" "}
-                            {item.title || item.description || "Untitled finding"}
-                          </button>
-                          {open && (
-                            <div className="benchmark-expanded-row">
-                              <p>
-                                {item.description || item.root_cause || "No description supplied."}
-                              </p>
-                              <p>{row?.reason}</p>
-                              {edit?.external_id === item.external_id ? (
-                                <div className="benchmark-review-form">
-                                  <label>
-                                    Result{" "}
-                                    <select
-                                      className="select"
-                                      value={edit.disposition}
-                                      onChange={(event) =>
-                                        setEdit({ ...edit, disposition: event.target.value })
-                                      }
-                                    >
-                                      <option value="full">Full</option>
-                                      <option value="partial">Partial</option>
-                                      <option value="missing">Missing</option>
-                                    </select>
-                                  </label>
-                                  {edit.disposition !== "missing" && (
-                                    <fieldset>
-                                      <legend>Matching findings</legend>
-                                      {selectedResult.findings.map((finding) => (
-                                        <label key={finding.id}>
-                                          <input
-                                            type="checkbox"
-                                            checked={edit.finding_ids.includes(finding.id)}
-                                            onChange={(event) =>
-                                              setEdit({
-                                                ...edit,
-                                                finding_ids: event.target.checked
-                                                  ? [...edit.finding_ids, finding.id]
-                                                  : edit.finding_ids.filter(
-                                                      (id) => id !== finding.id,
-                                                    ),
-                                              })
-                                            }
-                                          />{" "}
-                                          {finding.reference} - {finding.title}
-                                        </label>
-                                      ))}
-                                    </fieldset>
-                                  )}
-                                  <label>
-                                    Reason{" "}
-                                    <textarea
-                                      value={edit.note}
-                                      onChange={(event) =>
-                                        setEdit({ ...edit, note: event.target.value })
-                                      }
-                                    />
-                                  </label>
-                                  <button
-                                    className="btn primary sm"
-                                    type="button"
-                                    disabled={busy}
-                                    onClick={() => saveReview(item)}
-                                  >
-                                    Save
-                                  </button>
-                                  <button
-                                    className="btn ghost sm"
-                                    type="button"
-                                    onClick={() => setEdit(null)}
-                                  >
-                                    Cancel
-                                  </button>
-                                </div>
-                              ) : (
-                                <button
-                                  className="btn ghost sm"
-                                  type="button"
-                                  onClick={() =>
-                                    setEdit({
-                                      external_id: item.external_id,
-                                      disposition: row.disposition,
-                                      finding_ids: row.finding_ids,
-                                      note: row.review_note || "",
-                                    })
-                                  }
-                                >
-                                  Review result
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </td>
-                        <td>
-                          <span
-                            className={`benchmark-disposition ${row?.disposition || "missing"}`}
-                          >
-                            {row?.disposition || "missing"}
-                            {row?.reviewed ? " (reviewed)" : ""}
-                          </span>
-                        </td>
-                        <td>
-                          {row?.finding_ids
-                            .map((id) => findingsById.get(id)?.reference || `#${id}`)
-                            .join(", ") || "-"}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
+        {selectedResult && (tab !== "site" || siteTab === "analyses") && resultDetails}
         {tab === "sast" && legacy.length > 0 && (
           <details className="card">
             <summary>Earlier SAST evaluations ({legacy.length})</summary>

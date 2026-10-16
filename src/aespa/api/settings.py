@@ -10,8 +10,6 @@ from aespa.db import get_session
 from aespa.models import CodexIntegrationConfig, LLMProviderConfig
 from aespa.schemas import (
     PROVIDER_DEFAULT_MODELS,
-    BenchmarkLabConfigIn,
-    BenchmarkLabConfigOut,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
     CloudflareAccessConfigIn,
@@ -289,21 +287,27 @@ def list_llm_models(session: Session = Depends(get_session)) -> list[LLMConfigOu
 
 
 @router.post("/llm/model-configs", response_model=LLMConfigOut)
-def create_llm_model(
+async def create_llm_model(
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = profile_settings.create_llm_profile(session, payload)
+    discovered = await settings_service.discover_effort_capability(
+        session, payload.provider_id, payload.model, payload.reasoning_effort
+    )
+    cfg = profile_settings.create_llm_profile(session, payload, discovered)
     return settings_service.llm_profile_out_model(session, cfg)
 
 
 @router.put("/llm/model-configs/{model_id}", response_model=LLMConfigOut)
-def update_llm_model(
+async def update_llm_model(
     model_id: int,
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = profile_settings.update_llm_profile(session, model_id, payload)
+    discovered = await settings_service.discover_effort_capability(
+        session, payload.provider_id, payload.model, payload.reasoning_effort
+    )
+    cfg = profile_settings.update_llm_profile(session, model_id, payload, discovered)
     return settings_service.llm_profile_out_model(session, cfg)
 
 
@@ -626,6 +630,28 @@ def upsert_scanner_policy(
     return integration_settings.upsert_scanner_policy(session, payload)
 
 
+@router.get("/retire-list")
+def get_retire_list_status() -> dict:
+    from aespa.services import js_libraries
+
+    return js_libraries.list_status()
+
+
+@router.post("/retire-list/refresh")
+async def refresh_retire_list() -> dict:
+    """Download the latest Retire.js list now, even when automatic updates are off."""
+    from datetime import timedelta
+
+    from aespa.services import js_libraries, retire_repository
+
+    result = await retire_repository.ensure_fresh(enabled=True, max_age=timedelta(0))
+    return {
+        **js_libraries.list_status(),
+        "status": result.get("status"),
+        "error": result.get("error"),
+    }
+
+
 @router.get("/code-execution", response_model=CodeExecutionConfigOut)
 def get_code_execution_config(
     session: Session = Depends(get_session),
@@ -773,21 +799,6 @@ def upsert_reporting_debug_config(
     session: Session = Depends(get_session),
 ) -> ReportingDebugConfigOut:
     return integration_settings.upsert_reporting_debug_config(session, payload)
-
-
-@router.get("/benchmark-lab", response_model=BenchmarkLabConfigOut)
-def get_benchmark_lab_config(
-    session: Session = Depends(get_session),
-) -> BenchmarkLabConfigOut:
-    return integration_settings.get_benchmark_lab_config(session)
-
-
-@router.put("/benchmark-lab", response_model=BenchmarkLabConfigOut)
-def upsert_benchmark_lab_config(
-    payload: BenchmarkLabConfigIn,
-    session: Session = Depends(get_session),
-) -> BenchmarkLabConfigOut:
-    return integration_settings.upsert_benchmark_lab_config(session, payload)
 
 
 @router.get("/browser-debug", response_model=BrowserDebugConfigOut)

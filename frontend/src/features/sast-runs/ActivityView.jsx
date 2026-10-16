@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { fmtTime } from "../../shared/lib/dates.js";
+import { useHashTab } from "../../shared/navigation/useHashTab.js";
 
-import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { SastAgentGroupView, SastAgentRoster } from "./SastAgentRoster.jsx";
 import { sastGroupHasActiveAgent, sastGroupHasAgents } from "./sastAgentPresentation.js";
 
@@ -13,37 +13,18 @@ const GROUP_TABS = [
   { key: "validator", label: "Validators", groupId: "sast-validators" },
 ];
 
-export function formatTime(value) {
-  if (!value) return "—";
-  return new Date(value).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
-export function ActivityView({
-  logs,
-  agentLog,
-  scanRunning,
-  tokenUsage,
-  tokenExpanded,
-  setTokenExpanded,
-  runId,
-  analysisMode,
-}) {
-  const [subTab, setSubTab] = useState("agents");
+export function ActivityView({ logs, agentLog, scanRunning, runId, analysisMode }) {
   const groupTabs = GROUP_TABS.filter(
     (item) => !item.legacy || sastGroupHasAgents(agentLog, item.key),
+  );
+  const [subTab, setSubTab] = useHashTab(
+    "subtab",
+    ["agents", ...groupTabs.map((item) => item.key), "log"],
+    "agents",
   );
   const selectedGroup = groupTabs.find((item) => item.key === subTab);
   return (
     <div className="sast-activity-panel">
-      <TokenUsageBar
-        tokenUsage={tokenUsage}
-        tokenExpanded={tokenExpanded}
-        setTokenExpanded={setTokenExpanded}
-      />
       <div className="sast-activity-toolbar">
         <div className="sast-activity-tabs">
           <button
@@ -92,7 +73,7 @@ export function ActivityView({
         <div className="sast-activity-feed">
           {logs.map((item) => (
             <div className="sast-activity-entry" key={item.id}>
-              <time>{formatTime(item.created_at)}</time>
+              <time>{fmtTime(item.created_at)}</time>
               <span className="sast-activity-phase">{item.phase || "event"}</span>
               <span className="sast-activity-message">{item.message}</span>
             </div>

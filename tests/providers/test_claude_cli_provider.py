@@ -98,6 +98,7 @@ def test_claude_cli_process_disables_own_tools_and_records_usage(
     monkeypatch.setattr(claude_cli_provider, "_executable", lambda: "/usr/bin/claude")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
     monkeypatch.setenv("AESPA_PRIVATE_SECRET", "secret")
+    monkeypatch.setenv("USER", "tester")
     usage = []
     result = asyncio.run(
         claude_cli_provider.plain_completion(
@@ -112,7 +113,36 @@ def test_claude_cli_process_disables_own_tools_and_records_usage(
     assert seen["cmd"][seen["cmd"].index("--model") + 1] == cli_model
     assert "--safe-mode" in seen["cmd"]
     assert "AESPA_PRIVATE_SECRET" not in seen["env"]
+    assert seen["env"]["USER"] == "tester"
     assert usage == [(cli_model, 9, 2, 0, 0)]
+
+
+def test_claude_cli_failure_reports_stdout_error(monkeypatch):
+    class FakeProcess:
+        returncode = 1
+
+        async def communicate(self, payload):
+            return json.dumps(
+                {
+                    "is_error": True,
+                    "api_error_status": 404,
+                    "result": "There's an issue with the selected model.",
+                }
+            ).encode(), b"[claude-code:unrecognized_model]"
+
+    async def fake_subprocess(*cmd, **kwargs):
+        return FakeProcess()
+
+    monkeypatch.setattr(claude_cli_provider, "_executable", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(
+            claude_cli_provider.plain_completion(
+                LLMConfig(provider="claude_cli", model="sonnet"), "say hi"
+            )
+        )
+    assert "issue with the selected model" in str(exc.value)
+    assert "404" in str(exc.value)
 
 
 def test_llm_dispatches_claude_cli(monkeypatch):

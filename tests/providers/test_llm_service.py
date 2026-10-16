@@ -14,6 +14,43 @@ from aespa.services import llm
 from aespa.services.resolved_llm_config import ResolvedLLMConfig
 
 
+def test_bedrock_reasoning_uses_supported_output_config_field():
+    config = LLMConfig(
+        provider="bedrock",
+        model="anthropic.claude-sonnet-5",
+        reasoning_effort="high",
+    )
+    expected = {
+        "additionalModelRequestFields": {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "high"},
+        }
+    }
+
+    payload = {}
+    llm._add_bedrock_reasoning_fields(config, payload)
+    assert payload == expected
+    assert llm._bedrock_sdk_reasoning_kwargs(config) == expected
+
+
+@pytest.mark.parametrize("sdk", ["anthropic", "openai"])
+def test_sdk_clients_accept_shared_http_client(sdk):
+    import httpx2
+
+    kwargs = llm._llm_client_kwargs()
+    client_class = (
+        __import__(sdk).AsyncAnthropic
+        if sdk == "anthropic"
+        else __import__(sdk).AsyncOpenAI
+    )
+    try:
+        assert isinstance(kwargs["http_client"], httpx2.AsyncClient)
+        sdk_client = client_class(api_key="test-key", **kwargs)
+        asyncio.run(sdk_client.close())
+    finally:
+        asyncio.run(kwargs["http_client"].aclose())
+
+
 def test_run_concurrency_gate_limits_provider_calls(monkeypatch):
     monkeypatch.setattr(llm, "_read_run_concurrency_limit", lambda _kind: 2)
     llm._run_concurrency_gates.clear()
@@ -1521,6 +1558,38 @@ def test_agentic_loop_propagates_generic_api_error_instead_of_completing(monkeyp
     assert "LLM API error" in error_events[0]["message"]
 
 
+def test_agentic_loop_names_api_errors_with_no_message(monkeypatch):
+    config = LLMConfig(
+        provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048
+    )
+    emitted: list[dict] = []
+
+    async def fake_call_with_tools(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                config,
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=lambda *args: None,
+                emit_fn=emitted.append,
+            )
+        )
+
+    error_events = [
+        event
+        for event in emitted
+        if event.get("phase") == "llm_response" and event.get("status") == "error"
+    ]
+    assert error_events[0]["message"].endswith("LLM API error — TimeoutError")
+    assert error_events[0]["data"]["error"] == "TimeoutError"
+    assert error_events[0]["data"]["error_type"] == "TimeoutError"
+
+
 def test_agentic_loop_reports_quota_pause_as_warning(monkeypatch):
     config = LLMConfig(provider="openai_codex", model="auto", max_tokens=2048)
     emitted: list[dict] = []
@@ -3017,7 +3086,7 @@ def test_bedrock_mantle_uses_selected_aws_profile_for_signing(monkeypatch):
 
 
 def test_bedrock_mantle_claude_uses_messages_for_plain_and_tool_calls(monkeypatch):
-    import httpx
+    import httpx2
 
     requests = []
 
@@ -3078,7 +3147,7 @@ def test_bedrock_mantle_claude_uses_messages_for_plain_and_tool_calls(monkeypatc
                 event("message_stop", {"type": "message_stop"}),
             ]
         )
-        return httpx.Response(
+        return httpx2.Response(
             200, text=body, headers={"content-type": "text/event-stream"}
         )
 
@@ -3086,7 +3155,7 @@ def test_bedrock_mantle_claude_uses_messages_for_plain_and_tool_calls(monkeypatc
         llm,
         "_llm_client_kwargs",
         lambda: {
-            "http_client": httpx.AsyncClient(transport=httpx.MockTransport(respond))
+            "http_client": httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
         },
     )
     config = LLMConfig(
@@ -4038,7 +4107,7 @@ def test_mantle_create_response_retries_dropping_temperature():
 
 def test_bedrock_mantle_sigv4_signs_with_bedrock_service(monkeypatch):
     """With no API key, Mantle requests are SigV4-signed under the 'bedrock' service."""
-    import httpx
+    import httpx2
     from botocore.credentials import Credentials
 
     fake_creds = Credentials("AKIAEXAMPLE", "secret-key", token="session-token")
@@ -4054,7 +4123,7 @@ def test_bedrock_mantle_sigv4_signs_with_bedrock_service(monkeypatch):
     monkeypatch.delenv("AWS_PROFILE", raising=False)
 
     signer = llm._BedrockMantleSigV4Auth(region="us-east-2")
-    request = httpx.Request(
+    request = httpx2.Request(
         "POST",
         "https://bedrock-mantle.us-east-2.api.aws/v1/chat/completions",
         headers={"x-api-key": "not-needed"},
@@ -4075,7 +4144,7 @@ def test_bedrock_mantle_sigv4_signs_with_bedrock_service(monkeypatch):
 
 def test_bedrock_mantle_sigv4_errors_without_credentials(monkeypatch):
     """A clear error is raised when neither an API key nor AWS credentials exist."""
-    import httpx
+    import httpx2
 
     class FakeSession:
         def __init__(self, **kwargs):
@@ -4088,7 +4157,7 @@ def test_bedrock_mantle_sigv4_errors_without_credentials(monkeypatch):
     monkeypatch.delenv("AWS_PROFILE", raising=False)
 
     signer = llm._BedrockMantleSigV4Auth(region="us-east-2")
-    request = httpx.Request(
+    request = httpx2.Request(
         "POST", "https://bedrock-mantle.us-east-2.api.aws/v1/chat/completions", json={}
     )
     with pytest.raises(RuntimeError, match="No AWS credentials"):

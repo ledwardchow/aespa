@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from sqlmodel import Session, select
 
 from aespa.models import Credential, Site
-from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate
+from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate, SiteWorkflowInput
 
 
 def _parse_datetimes(data: dict, *fields: str) -> dict:
@@ -73,6 +73,44 @@ def _credential_values(payload: CredentialIn) -> dict:
     }
 
 
+def workflow_data_for_site(site: Site) -> list[dict]:
+    try:
+        data = json.loads(site.workflow_data_json or "[]")
+    except (TypeError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_site_workflow_data(
+    session: Session, site_id: int, workflow: dict, instructions: str
+) -> None:
+    site = get_site(session, site_id)
+    item = SiteWorkflowInput(
+        name=workflow["name"],
+        goal=workflow.get("goal") or workflow["name"],
+        start_url=workflow.get("start_url") or workflow.get("url"),
+        instructions=instructions,
+    ).model_dump(mode="json")
+    items = workflow_data_for_site(site)
+    key = (item["name"].casefold(), item["start_url"].rstrip("/").casefold())
+    for index, existing in enumerate(items):
+        existing_key = (
+            str(existing.get("name") or "").casefold(),
+            str(existing.get("start_url") or "").rstrip("/").casefold(),
+        )
+        if existing_key == key:
+            items[index] = item
+            break
+    else:
+        if len(items) >= 20:
+            raise ValueError("A site can save up to 20 workflows.")
+        items.append(item)
+    site.workflow_data_json = json.dumps(items)
+    site.updated_at = _utcnow()
+    session.add(site)
+    session.commit()
+
+
 def list_sites(session: Session) -> list[Site]:
     return list(session.exec(select(Site).order_by(Site.name)).all())
 
@@ -114,6 +152,9 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
         login_url=str(payload.login_url) if payload.login_url else None,
         notes=payload.notes,
         scan_guidance=payload.scan_guidance,
+        workflow_data_json=json.dumps(
+            [item.model_dump(mode="json") for item in payload.workflow_data or []]
+        ),
         scope_hosts=json.dumps(
             normalize_scope_entries(payload.scope_hosts, default_url=base_url)
         ),
@@ -140,16 +181,45 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     site.login_url = str(payload.login_url) if payload.login_url else None
     site.notes = payload.notes
     site.scan_guidance = payload.scan_guidance
+    if payload.workflow_data is not None:
+        site.workflow_data_json = json.dumps(
+            [item.model_dump(mode="json") for item in payload.workflow_data]
+        )
     site.scope_hosts = json.dumps(
         normalize_scope_entries(payload.scope_hosts, default_url=site.base_url)
     )
     site.updated_at = _utcnow()
 
-    # Replace credentials list wholesale.
-    site.credentials.clear()
-    session.flush()
-    for cred in payload.credentials:
-        site.credentials.append(Credential(**_credential_values(cred)))
+    existing_by_id = {cred.id: cred for cred in site.credentials}
+    existing_by_username: dict[str, list[Credential]] = {}
+    for cred in site.credentials:
+        existing_by_username.setdefault(cred.username, []).append(cred)
+    requested_usernames = [cred.username for cred in payload.credentials]
+    retained_ids: set[int] = set()
+    updated_credentials: list[Credential] = []
+    for incoming in payload.credentials:
+        current = None
+        if incoming.id is not None:
+            current = existing_by_id.get(incoming.id)
+            if current is None or current.id in retained_ids:
+                raise SiteServiceError(
+                    "A credential does not belong to this site or appears twice."
+                )
+        elif requested_usernames.count(incoming.username) == 1:
+            matches = existing_by_username.get(incoming.username or "", [])
+            if len(matches) == 1 and matches[0].id not in retained_ids:
+                current = matches[0]
+        values = _credential_values(incoming)
+        if current is None:
+            current = Credential(**values)
+        else:
+            retained_ids.add(current.id)
+            for key, value in values.items():
+                if key == "totp_seed" and value is None:
+                    continue
+                setattr(current, key, value)
+        updated_credentials.append(current)
+    site.credentials = updated_credentials
 
     session.add(site)
     session.commit()

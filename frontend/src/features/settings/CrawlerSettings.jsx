@@ -2,6 +2,7 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { useEffect, useState } from "react";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function CrawlerSettings() {
   const [form, setForm] = useState(null);
@@ -48,7 +49,7 @@ export function CrawlerSettings() {
   return (
     <>
       {!form && !error && <div className="subtle">Loading…</div>}
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={!form} onDismiss={() => setError(null)} />
       {form && (
         <form className="card" onSubmit={onSubmit}>
           <div className="form-section-title">Crawler</div>
@@ -162,7 +163,7 @@ export function CrawlerSettings() {
               )}
             </div>
             <button type="submit" className="btn" disabled={saving}>
-              {saving ? "Saving…" : "Save Crawler Settings"}
+              {saving ? "Saving…" : "Save crawler settings"}
             </button>
           </div>
         </form>

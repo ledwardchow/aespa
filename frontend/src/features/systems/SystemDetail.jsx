@@ -3,9 +3,11 @@ import { useState, useEffect, useCallback } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { ComponentsTab } from "./ComponentsTab.jsx";
 import { TargetsTab } from "./TargetsTab.jsx";
 import { CampaignsTab } from "../campaigns/public.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const APP_TABS = [
   { key: "campaigns", label: "Campaigns" },
@@ -95,7 +97,7 @@ export function SystemDetail({ systemId, initialTab }) {
               Edit
             </button>
             <button className="btn" onClick={() => nav(`#/systems/${systemId}/campaigns/new`)}>
-              Start campaign
+              <IconPlus /> New campaign
             </button>
             <button className="btn danger-outline" onClick={onDelete}>
               Delete
@@ -115,11 +117,7 @@ export function SystemDetail({ systemId, initialTab }) {
         ))}
       </div>
       <div className="content scroll-content">
-        {error && (
-          <div className="alert error" style={{ marginBottom: 16 }}>
-            {error}
-          </div>
-        )}
+        <PageError error={error} onDismiss={() => setError(null)} />
         {tab === "components" && <ComponentsTab systemId={systemId} onChanged={bumpComposition} />}
         {tab === "targets" && (
           <TargetsTab systemId={systemId} components={components} onChanged={bumpComposition} />

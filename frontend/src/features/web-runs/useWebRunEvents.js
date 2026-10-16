@@ -38,6 +38,7 @@ export function useWebRunEvents(options) {
     setGuidedLoginErrors,
     setEntraPrompts,
     setCheckpointStatus,
+    onRunError,
   } = options;
 
   const pageAnalysisStatusMapRef = useRef(new Map());
@@ -149,12 +150,15 @@ export function useWebRunEvents(options) {
             };
           });
         }
+      } else if (evt.type === "llm_sign_in_required") {
+        onRunError?.(evt.message);
       } else if (evt.type === "run_update") {
         setRun((prev) =>
           prev
             ? {
                 ...prev,
                 status: evt.status ?? prev.status,
+                error_message: evt.error_message ?? prev.error_message,
                 phase: evt.phase ?? prev.phase,
                 pages_discovered: evt.pages_discovered ?? prev.pages_discovered,
                 llm_pending: evt.status && evt.status !== "running" ? 0 : prev.llm_pending,

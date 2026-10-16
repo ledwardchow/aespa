@@ -7,10 +7,12 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import httpx2
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from openai import APITimeoutError
 
 from aespa.models import LLMConfig
 from aespa.services import chatgpt_plan, llm
@@ -64,7 +66,7 @@ def test_plan_model_discovery_reports_signed_out_account(
     async def unavailable(_client_id):
         raise RuntimeError("Sign in with ChatGPT")
 
-    monkeypatch.setattr(chatgpt_plan, "discover_models", unavailable)
+    monkeypatch.setattr(chatgpt_plan, "discover_model_options", unavailable)
     response = client.post(
         "/api/settings/llm/discover-model-options",
         json={"api_format": "openai_chatgpt_plan", "username": "oaiapp_test"},
@@ -77,7 +79,15 @@ def test_plan_discovery_adds_verified_models_and_documented_limits(
     client: TestClient, monkeypatch
 ):
     async def catalog(_client_id):
-        return ["gpt-6-astra", "gpt-5.6-sol"]
+        return [
+            {
+                "id": "gpt-6-astra",
+                "service_tiers": [
+                    {"id": "priority", "name": "Fast", "description": "2x speed"}
+                ],
+            },
+            {"id": "gpt-5.6-sol", "service_tiers": []},
+        ]
 
     async def access(_client_id, *, force=False):
         return {
@@ -85,7 +95,7 @@ def test_plan_discovery_adds_verified_models_and_documented_limits(
             "daybreak": {"blue": True, "red": True},
         }
 
-    monkeypatch.setattr(chatgpt_plan, "discover_models", catalog)
+    monkeypatch.setattr(chatgpt_plan, "discover_model_options", catalog)
     monkeypatch.setattr(chatgpt_plan, "check_access", access)
     response = client.post(
         "/api/settings/llm/discover-model-options",
@@ -101,6 +111,10 @@ def test_plan_discovery_adds_verified_models_and_documented_limits(
         "gpt-daybreak-red-latest",
     ]
     assert result["catalog_complete"] is True
+    assert result["capabilities"]["gpt-6-astra"]["service_tiers"] == [
+        {"id": "priority", "name": "Fast", "description": "2x speed"}
+    ]
+    assert "service_tiers" not in result["capabilities"]["gpt-5.6-sol"]
     assert result["capabilities"]["gpt-6-sol"]["context_window_tokens"] == 1_050_000
     assert result["capabilities"]["gpt-6-sol"]["max_output_tokens"] == 128_000
     assert result["capabilities"]["gpt-6-sol"]["default_effort"] == "medium"
@@ -113,7 +127,7 @@ def test_plan_discovery_adds_verified_models_and_documented_limits(
     async def catalog_unavailable(_client_id):
         raise RuntimeError("catalog unavailable")
 
-    monkeypatch.setattr(chatgpt_plan, "discover_models", catalog_unavailable)
+    monkeypatch.setattr(chatgpt_plan, "discover_model_options", catalog_unavailable)
     partial = client.post(
         "/api/settings/llm/discover-model-options",
         json={"api_format": "openai_chatgpt_plan", "username": "oaiapp_test"},
@@ -259,6 +273,102 @@ def test_plan_request_uses_supported_streaming_shape():
     assert result["include"] == ["reasoning.encrypted_content"]
     assert "temperature" not in result
     assert "max_output_tokens" not in result
+    assert "service_tier" not in result
+
+    fast = llm._responses_request_kwargs(
+        SimpleNamespace(**{**vars(config), "service_tier": "priority"}),
+        input="hello",
+    )
+    assert fast["service_tier"] == "priority"
+
+
+def test_plan_catalog_keeps_model_speed_tiers(monkeypatch):
+    async def token(_client_id=None):
+        return "token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "slug": "gpt-6-astra",
+                        "visibility": "list",
+                        "service_tiers": [
+                            {"id": "priority", "name": "Fast", "description": "2x"},
+                            "ultrafast",
+                            {"name": "missing id"},
+                        ],
+                    },
+                    {"slug": "gpt-hidden", "visibility": "hide"},
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(chatgpt_plan, "access_token", token)
+    monkeypatch.setattr(
+        chatgpt_plan.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=transport),
+    )
+    options = asyncio.run(chatgpt_plan.discover_model_options("oaiapp_test"))
+    assert options == [
+        {
+            "id": "gpt-6-astra",
+            "service_tiers": [
+                {"id": "priority", "name": "Fast", "description": "2x"},
+                {"id": "ultrafast", "name": "ultrafast"},
+            ],
+        }
+    ]
+
+
+def test_plan_model_speed_is_saved_per_model(client: TestClient):
+    provider = client.post(
+        "/api/settings/llm/providers",
+        json={
+            "name": "ChatGPT speed test",
+            "api_format": "openai_chatgpt_plan",
+            "username": "oaiapp_test",
+            "models": ["gpt-6-astra", "gpt-5.6-sol"],
+            "model_capabilities": {
+                "gpt-6-astra": {"service_tiers": [{"id": "priority", "name": "Fast"}]}
+            },
+        },
+    ).json()
+    models = client.get("/api/settings/llm/model-configs").json()
+    astra = next(item for item in models if item["model"] == "gpt-6-astra")
+    sol = next(item for item in models if item["model"] == "gpt-5.6-sol")
+    assert astra["service_tier"] is None
+
+    def save(model, tier):
+        return client.put(
+            f"/api/settings/llm/model-configs/{model['id']}",
+            json={
+                "name": model["name"],
+                "provider_id": provider["id"],
+                "model": model["model"],
+                "service_tier": tier,
+            },
+        )
+
+    fast = save(astra, "priority")
+    assert fast.status_code == 200
+    assert fast.json()["service_tier"] == "priority"
+    refreshed = client.get("/api/settings/llm/model-configs").json()
+    assert next(i for i in refreshed if i["id"] == sol["id"])["service_tier"] is None
+
+    unsupported = save(sol, "priority")
+    assert unsupported.status_code == 422
+    assert "Load models" in unsupported.json()["detail"]
+    assert save(astra, "ultrafast").status_code == 422
+
+    exported = client.get("/api/settings/llm/export").json()
+    tiers = {item["model"]: item["service_tier"] for item in exported["profiles"]}
+    assert tiers == {"gpt-6-astra": "priority", "gpt-5.6-sol": None}
+    assert save(astra, None).json()["service_tier"] is None
 
 
 def test_plan_response_counts_one_request(monkeypatch):
@@ -337,6 +447,24 @@ def test_plan_access_check_verifies_unlisted_models_and_daybreak(monkeypatch):
     access = asyncio.run(chatgpt_plan.check_access("oaiapp_test", force=True))
     assert {"gpt-6-sol", "gpt-6-luna"}.issubset(access["models"])
     assert access["daybreak"] == {"blue": True, "red": False}
+
+
+def test_plan_access_check_names_model_when_probe_times_out(monkeypatch):
+    async def token(_client_id):
+        return "test-token"
+
+    async def timed_out(_http, _token, _model):
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(chatgpt_plan, "access_token", token)
+    monkeypatch.setattr(chatgpt_plan, "_probe_model", timed_out)
+    chatgpt_plan._access_checks.clear()
+
+    with pytest.raises(
+        RuntimeError, match="ChatGPT access check timed out while checking gpt-6-sol"
+    ) as error:
+        asyncio.run(chatgpt_plan.check_access("oaiapp_test", force=True))
+    assert isinstance(error.value.__cause__, httpx.ReadTimeout)
 
 
 def test_plan_sends_daybreak_program_for_supported_scan_models(monkeypatch):
@@ -477,6 +605,98 @@ def test_plan_stream_retries_missing_completion_without_reusing_partial_output(
     assert responses.calls == 2
     assert delays == [1]
     assert result.output == ["keep"]
+
+
+def test_plan_retries_connect_timeout_before_stream_starts(monkeypatch):
+    delays = []
+
+    async def record_delay(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr(llm.asyncio, "sleep", record_delay)
+    request = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+
+    class Responses:
+        calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                raise APITimeoutError(request) from httpx2.ConnectTimeout("")
+
+            async def stream():
+                yield SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(output=["ok"]),
+                )
+
+            return stream()
+
+    responses = Responses()
+    result = asyncio.run(
+        llm._chatgpt_plan_response(
+            SimpleNamespace(responses=responses),
+            {"stream": True},
+            on_text_delta=lambda _text: None,
+        )
+    )
+    assert result.output == ["ok"]
+    assert responses.calls == 3
+    assert delays == [1, 2]
+
+
+def test_plan_does_not_retry_read_timeout(monkeypatch):
+    delays = []
+
+    async def record_delay(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr(llm.asyncio, "sleep", record_delay)
+    request = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+
+    class Responses:
+        calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            raise APITimeoutError(request) from httpx2.ReadTimeout("")
+
+    responses = Responses()
+    with pytest.raises(APITimeoutError):
+        asyncio.run(
+            llm._chatgpt_plan_response(
+                SimpleNamespace(responses=responses), {"stream": True}
+            )
+        )
+    assert responses.calls == 1
+    assert delays == []
+
+
+def test_plan_stops_after_three_connect_timeouts(monkeypatch):
+    delays = []
+
+    async def record_delay(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr(llm.asyncio, "sleep", record_delay)
+    request = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+
+    class Responses:
+        calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            raise APITimeoutError(request) from httpx2.ConnectTimeout("")
+
+    responses = Responses()
+    with pytest.raises(APITimeoutError):
+        asyncio.run(
+            llm._chatgpt_plan_response(
+                SimpleNamespace(responses=responses), {"stream": True}
+            )
+        )
+    assert responses.calls == 3
+    assert delays == [1, 2]
 
 
 def test_id_token_checks_signature_audience_and_nonce():
@@ -650,6 +870,7 @@ def test_expired_token_refreshes_once_for_concurrent_calls(monkeypatch, tmp_path
         async def post(self, url, data):
             calls.append((url, data))
             return SimpleNamespace(
+                status_code=200,
                 raise_for_status=lambda: None,
                 json=lambda: {
                     "access_token": "new-access",
@@ -762,3 +983,92 @@ def test_login_callback_saves_validated_tokens_without_exposing_them(
         chatgpt_plan._read()["accounts"]["oaiapp_test"]["refresh_token"]
         == "secret-refresh"
     )
+
+
+def _saved_expired_account(tmp_path, monkeypatch):
+    monkeypatch.setattr(chatgpt_plan, "_storage_path", lambda: tmp_path / "plan.json")
+    chatgpt_plan._write(
+        {
+            "host_id": "urn:uuid:12345678-1234-4123-8123-123456789abc",
+            "active": "oaiapp_test",
+            "accounts": {
+                "oaiapp_test": {
+                    "email": "user@example.com",
+                    "access_token": "expired",
+                    "refresh_token": "old-refresh",
+                    "expires_at": 0,
+                    "scopes": ["chatgpt.tokens.use.direct"],
+                }
+            },
+        }
+    )
+
+
+def _token_endpoint(monkeypatch, status_code, body):
+    calls = []
+
+    class Http:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def post(self, url, data):
+            calls.append(url)
+            return httpx.Response(
+                status_code, json=body, request=httpx.Request("POST", url)
+            )
+
+    monkeypatch.setattr(chatgpt_plan.httpx, "AsyncClient", lambda **_kwargs: Http())
+    return calls
+
+
+def test_rejected_refresh_signs_account_out_and_stops_retrying(monkeypatch, tmp_path):
+    _saved_expired_account(tmp_path, monkeypatch)
+    calls = _token_endpoint(monkeypatch, 400, {"error": "invalid_grant"})
+
+    for _ in range(2):
+        with pytest.raises(chatgpt_plan.ChatGPTSignInRequired, match="Sign in"):
+            asyncio.run(chatgpt_plan.access_token("oaiapp_test"))
+
+    assert len(calls) == 1
+    account = chatgpt_plan._read()["accounts"]["oaiapp_test"]
+    assert "refresh_token" not in account and "access_token" not in account
+    assert account["email"] == "user@example.com"
+    assert chatgpt_plan.status()["accounts"][0]["signed_in"] is False
+
+
+def test_refresh_server_error_keeps_sign_in(monkeypatch, tmp_path):
+    _saved_expired_account(tmp_path, monkeypatch)
+    _token_endpoint(monkeypatch, 503, {"error": "temporarily_unavailable"})
+
+    with pytest.raises(RuntimeError, match="HTTP 503") as raised:
+        asyncio.run(chatgpt_plan.access_token("oaiapp_test"))
+
+    assert not isinstance(raised.value, chatgpt_plan.ChatGPTSignInRequired)
+    account = chatgpt_plan._read()["accounts"]["oaiapp_test"]
+    assert account["refresh_token"] == "old-refresh"
+
+
+def test_sign_in_error_stops_the_run_using_the_provider(monkeypatch):
+    stops = []
+    monkeypatch.setattr(
+        "aespa.services.llm_sign_in_stop.schedule_stop",
+        lambda kind, run_id, message: stops.append((kind, run_id, message)),
+    )
+
+    async def rejected(_client_id=None):
+        raise chatgpt_plan.ChatGPTSignInRequired("Sign in again")
+
+    monkeypatch.setattr(chatgpt_plan, "access_token", rejected)
+    config = LLMConfig(provider="openai_chatgpt_plan", model="gpt-6-luna")
+
+    async def call():
+        llm._run_id_var.set(42)
+        llm._run_kind_var.set("api")
+        await llm._make_chatgpt_plan_client(config)
+
+    with pytest.raises(chatgpt_plan.ChatGPTSignInRequired):
+        asyncio.run(call())
+    assert stops == [("api", 42, "Sign in again")]

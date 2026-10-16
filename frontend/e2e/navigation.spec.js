@@ -1,13 +1,13 @@
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
-import { installFixtures, model, profile, provider, run } from "./fixtures.js";
+import { installFixtures, model, profile, provider, run, site } from "./fixtures.js";
 
 const screens = [
   ["#/", "Fixture site"],
   ["#/sites/1", "Fixture site"],
   ["#/sites/new", "New Site"],
-  ["#/settings", "LLM Profiles"],
+  ["#/settings", "LLM Configuration"],
   ["#/scan-policy", "Settings"],
   ["#/external-integrations", "Upstream Proxy"],
   ["#/apis", "Fixture API"],
@@ -57,15 +57,15 @@ for (const [route, text] of screens) {
   });
 }
 
-test("upstream proxy settings are under Global", async ({ page }) => {
+test("connectivity settings are under Global", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/scan-policy");
   await expect(page.getByRole("link", { name: "External Integrations" })).toHaveCount(0);
-  await page.getByRole("tab", { name: "Upstream Proxy" }).click();
+  await page.getByRole("tab", { name: "Connectivity" }).click();
   await expect(page).toHaveURL(/#\/scan-policy\/global\/proxy$/);
   await expect(page.getByText("Send target requests through an upstream proxy")).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("tab", { name: "Upstream Proxy" })).toHaveAttribute(
+  await expect(page.getByRole("tab", { name: "Connectivity" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -116,10 +116,6 @@ test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
   await page.getByRole("combobox", { name: "Completed scan" }).selectOption("1");
   await expect(page.getByText("Benchmark model: Fixture model")).toBeVisible();
   await page.getByRole("tab", { name: "Analyses" }).click();
-  await page.getByRole("button", { name: "Open Fixture scan" }).click();
-  await expect(page.getByText("Compared by Fixture model")).toBeVisible();
-  await expect(page.getByText("Scan model: Fixture Test Lead (fixture-model)")).toBeVisible();
-  await expect(page.getByText("GT-2 - Missing audit logs")).toBeVisible();
   const panel = await page.locator("main").boundingBox();
   const tabs = await page.getByRole("tablist", { name: "Scan type" }).boundingBox();
   expect(tabs.x).toBe(panel.x);
@@ -128,18 +124,31 @@ test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
   expect(siteTabs.x).toBe(panel.x);
   expect(siteTabs.width).toBe(panel.width);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-benchmark-lab.png") });
+  // An analysis opens on its own page.
+  await page.getByRole("link", { name: "Open Fixture scan" }).click();
+  await expect(page.getByText("Compared by Fixture model")).toBeVisible();
+  await expect(page.getByText("Scan model: Fixture Test Lead (fixture-model)")).toBeVisible();
+  await expect(page.getByText("GT-2 - Missing audit logs")).toBeVisible();
+  await page.goBack();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("tab", { name: "SAST" })).toBeVisible();
   await page.getByRole("tab", { name: "New" }).click();
+  await page.getByRole("combobox", { name: "Site" }).selectOption("1");
   const card = await page.locator(".benchmark-setup").boundingBox();
   const replace = await page.getByText("Replace file").boundingBox();
   expect(replace.x + replace.width).toBeLessThanOrEqual(card.x + card.width);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-benchmark-lab-mobile.png") });
   await page.getByRole("tab", { name: "Analyses" }).click();
-  await page.getByRole("button", { name: "Open Fixture scan" }).click();
+  await page.getByRole("link", { name: "Open Fixture scan" }).click();
   page.once("dialog", (dialog) => dialog.accept());
+  const deleted = page.waitForRequest(
+    (request) =>
+      request.method() === "DELETE" && /\/aespa\.benchmarking\/results\/\d+$/.test(request.url()),
+  );
   await page.getByRole("button", { name: "Delete result" }).click();
-  await expect(page.getByText("No saved analyses match this selection.")).toBeVisible();
+  await deleted;
+  // Deleting returns to Benchmark Lab.
+  await expect(page).toHaveURL(/#\/benchmark-lab$/);
   expect(errors).toEqual([]);
 });
 
@@ -184,11 +193,17 @@ test("settings tabs, edit cancellation, and sidebar history work", async ({ page
   await expect(page.getByText("Edit LLM Provider", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page).toHaveURL(/#\/settings\/providers$/);
-  await expect(page.getByText("LLM Providers", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Providers", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await page.getByRole("link", { name: "Sites", exact: true }).click();
   await expect(page.getByText("Fixture site", { exact: true }).first()).toBeVisible();
   await page.goBack();
-  await expect(page.getByText("LLM Providers", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Providers", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
 });
 
 test("provider list shows and sorts configured model counts", async ({ page }) => {
@@ -239,10 +254,10 @@ test("provider list shows and sorts configured model counts", async ({ page }) =
 test("each LLM settings page loads from its URL without a Models tab", async ({ page }) => {
   await installFixtures(page);
   const pages = [
-    ["/#/settings/profiles", "LLM Profiles"],
+    ["/#/settings/profiles", "LLM Configuration"],
     ["/#/settings/profiles/new", "New LLM Profile"],
     ["/#/settings/profiles/1/edit", "Edit LLM Profile"],
-    ["/#/settings/providers", "LLM Providers"],
+    ["/#/settings/providers", "LLM Configuration"],
     ["/#/settings/providers/new", "New LLM Provider"],
     ["/#/settings/providers/1/edit", "Edit LLM Provider"],
     ["/#/settings/models/1/edit", "Edit LLM Model"],
@@ -250,7 +265,7 @@ test("each LLM settings page loads from its URL without a Models tab", async ({ 
   ];
   for (const [url, title] of pages) {
     await page.goto(url);
-    await expect(page.getByText(title, { exact: true })).toBeVisible();
+    await expect(page.locator(".topbar-title").getByText(title, { exact: true })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Models", exact: true })).toHaveCount(0);
     await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   }
@@ -393,7 +408,7 @@ test("site and SAST navigation rows open from their non-interactive cells", asyn
   await expect(page.getByText("Test Runs", { exact: true })).toBeVisible();
 
   await page.goto("/#/sast-runs");
-  const sastRow = page.getByRole("row", { name: /View Fixture SAST/ });
+  const sastRow = page.getByRole("row", { name: /Open Fixture SAST/ });
   await expect(sastRow).toBeVisible();
   await sastRow.locator("td").nth(1).click();
   await expect(page).toHaveURL(/#\/sast-runs\/1\/progress$/);
@@ -471,8 +486,9 @@ test("site map groups page and API variants with individual modes", async ({ pag
   const pageDisplay = page.getByLabel("Page display");
   const apiDisplay = page.getByLabel("API display");
   const displayApis = page.getByRole("checkbox", { name: "Display APIs" });
-  const displaySettings = page.getByRole("button", { name: "Display settings" });
-  const displayControls = page.locator("#sitemap-display-settings");
+  // Display settings live in a collapsed section of the Crawl details side panel.
+  const displaySettings = page.getByRole("button", { name: /^Display \d+ shown$/ });
+  const displayControls = page.locator("#sitemap-side-display");
   await expect(displaySettings).toHaveAttribute("aria-expanded", "false");
   await expect(displayControls).toBeHidden();
   await expect(extensionFilter).toBeHidden();
@@ -481,6 +497,12 @@ test("site map groups page and API variants with individual modes", async ({ pag
   await expect(apiDisplay).toHaveValue("grouped");
   await expect(displayApis).not.toBeChecked();
   await expect(apiDisplay).toBeDisabled();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-collapsed.png") });
+  await displaySettings.click();
+  await expect(displaySettings).toHaveAttribute("aria-expanded", "true");
+  await expect(displayControls).toBeVisible();
+  await expect(extensionFilter).toBeVisible();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-expanded.png") });
   const searchBounds = await page.locator(".sitemap-search").boundingBox();
   const apiToggleBounds = await page.locator(".sitemap-api-toggle").boundingBox();
   expect(apiToggleBounds.y).toBeGreaterThanOrEqual(searchBounds.y + searchBounds.height + 4);
@@ -517,16 +539,6 @@ test("site map groups page and API variants with individual modes", async ({ pag
   await page.getByRole("button", { name: "Clear node search" }).click();
   await expect(page.locator(".sitemap-search-match")).toHaveCount(0);
 
-  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-collapsed.png") });
-
-  await displaySettings.click();
-  await expect(displaySettings).toHaveAttribute("aria-expanded", "true");
-  await expect(displayControls).toBeVisible();
-  await expect(extensionFilter).toBeVisible();
-  await page.screenshot({ path: path.join(tmpdir(), "aespa-sitemap-settings-expanded.png") });
-  await displaySettings.click();
-  await expect(displayControls).toBeHidden();
-
   const pageRouteNode = page.locator("g.node-group", { hasText: "/orders/{id}" });
   await expect(pageRouteNode).toBeVisible();
   await pageRouteNode.dispatchEvent("click");
@@ -542,10 +554,8 @@ test("site map groups page and API variants with individual modes", async ({ pag
   await expect(
     page.getByText("5 shown · 2 API requests in 1 endpoints · 2 files hidden", { exact: true }),
   ).toBeVisible();
-  await displaySettings.click();
   await pageDisplay.selectOption("grouped");
   await expect(page.locator("g.node-group")).toHaveCount(4);
-  await displaySettings.click();
 
   const apiNode = page.locator("g.node-group", { hasText: "GET /api/account" });
   await expect(apiNode).toBeVisible();
@@ -567,7 +577,6 @@ test("site map groups page and API variants with individual modes", async ({ pag
   ).toBeVisible();
   await expect(page.locator("g.node-group")).toHaveCount(5);
 
-  await displaySettings.click();
   await displayApis.uncheck();
   await expect(apiDisplay).toBeDisabled();
   await expect(apiDisplay).toHaveValue("individual");
@@ -626,37 +635,29 @@ test("multi-user crawl progress expands and collapses", async ({ page }) => {
   await expect(page).toHaveTitle("AESPA");
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 
-  const toggle = page.getByRole("button", { name: "User crawl progress" });
-  const details = page.locator("#crawl-user-progress-details");
-  await expect(toggle).toHaveAttribute("aria-expanded", "false");
-  await expect(details).toBeHidden();
-  await expect(page.getByText("2 users · 5 pages · 1 done", { exact: true })).toBeVisible();
-  const displayToggle = page.getByRole("button", { name: "Display settings" });
-  const progressBounds = await toggle.boundingBox();
-  const displayBounds = await displayToggle.boundingBox();
-  expect(Math.abs(progressBounds.y - displayBounds.y)).toBeLessThan(2);
-  const barBounds = await page.locator(".sitemap-filter-panel").boundingBox();
-  expect(barBounds.height).toBeLessThan(70);
-  await page.screenshot({ path: path.join(tmpdir(), "aespa-user-progress-collapsed.png") });
-
-  await toggle.click();
+  // Per-user progress is the Users section of the Crawl details side panel, open by default.
+  const toggle = page.getByRole("button", { name: "Users 2 users · 5 pages · 1 done" });
+  const details = page.locator("#sitemap-side-users");
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(details).toBeVisible();
   await expect(details.getByText("Alice", { exact: true })).toBeVisible();
   await expect(details.getByText("Bob", { exact: true })).toBeVisible();
-  await expect(details.getByText("3 pg", { exact: true })).toBeVisible();
   await expect(details.getByText("done", { exact: true })).toBeVisible();
   await page.screenshot({ path: path.join(tmpdir(), "aespa-user-progress-expanded.png") });
 
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(details).toBeHidden();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-user-progress-collapsed.png") });
+
+  const displayToggle = page.getByRole("button", { name: /^Display \d+ shown$/ });
   await displayToggle.click();
   await expect(page.getByLabel("Page display")).toBeVisible();
+  await toggle.click();
   await expect(details).toBeVisible();
   const detailsBounds = await details.boundingBox();
-  const settingsBounds = await page.locator("#sitemap-display-settings").boundingBox();
+  const settingsBounds = await page.locator("#sitemap-side-display").boundingBox();
   expect(settingsBounds.y).toBeGreaterThanOrEqual(detailsBounds.y + detailsBounds.height);
-  await toggle.click();
-  await expect(details).toBeHidden();
-  await expect(page.getByLabel("Page display")).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(displayToggle).toBeVisible();
   await expect(page.getByLabel("Page display")).toBeVisible();
@@ -1008,6 +1009,381 @@ test("OWASP coverage cells filter the rendered traffic rows", async ({ page }) =
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   expect(errors).toEqual([]);
   await page.screenshot({ path: path.join(tmpdir(), "aespa-coverage-traffic-filter.png") });
+});
+
+test("Workflows shows crawl notes outside Attack Surface", async ({ page }) => {
+  await installFixtures(page);
+  await page.route("**/api/test-runs/1/recon-summary", (route) =>
+    route.fulfill({
+      json: {
+        route_groups: [
+          {
+            label: "Products",
+            route_pattern: "/products/:id",
+            links_seen: 2,
+            pages_sampled: 1,
+            example_urls: ["http://example.test/products/1"],
+          },
+        ],
+        technologies: [{ name: "React", source: "page", category: "framework" }],
+        crawl_notes_checked: true,
+        crawl_notes: [
+          {
+            name: "Checkout",
+            reason: "The product page has an Add to cart button.",
+            status: "crawled",
+            steps: ["click Add to cart", "click Secure Checkout"],
+            detail: "Reached the checkout page.",
+            url: "http://example.test/checkout",
+          },
+        ],
+      },
+    }),
+  );
+  await page.goto("/#/runs/1/attack");
+  await page.getByRole("button", { name: "Attack Surface", exact: true }).click();
+  await expect(page.locator(".attack-surface-section-title")).toContainText([
+    "Grouped pages",
+    "Tech Stack",
+    "Route & Input Inventory",
+  ]);
+  await expect(page.locator(".surface-crawl-note")).toHaveCount(0);
+  await page.getByRole("button", { name: /Workflows/ }).click();
+  await expect(page.getByRole("button", { name: /Workflows/ })).toHaveClass(/active/);
+  await expect(page.getByRole("button", { name: "Attack Surface", exact: true })).not.toHaveClass(
+    /active/,
+  );
+  await expect(page.locator(".surface-crawl-note")).toContainText("click Add to cart");
+  await expect(page.locator(".surface-crawl-note")).toContainText("Reached the checkout page.");
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflows-desktop.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflows-narrow.png") });
+});
+
+test("a workflow needing input opens its matching notification", async ({ page }) => {
+  await installFixtures(page);
+  await page.route("**/api/test-runs/1/crawl/workflows", (route) =>
+    route.fulfill({
+      json: {
+        notes: [
+          {
+            id: 23,
+            name: "Address",
+            status: "needs_input",
+            needs_input: true,
+            request: "Provide a test address.",
+          },
+          {
+            id: 24,
+            name: "Checkout",
+            status: "needs_input",
+            needs_input: true,
+            request: "Provide a delivery method.",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/test-runs/1/crawl/workflows/retry/status", (route) =>
+    route.fulfill({ json: { status: "idle" } }),
+  );
+  await page.goto("/#/runs/1/attack");
+  await page.getByRole("button", { name: /Workflows/ }).click();
+  const checkout = page.locator(".surface-crawl-note").filter({ hasText: "Checkout" });
+  await checkout.getByRole("button", { name: "Provide input" }).click();
+  await expect(page.getByRole("dialog", { name: "Needs input" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Workflows/ })).toHaveClass(/active/);
+  await expect(page.locator("#workflow-input-24")).toBeFocused();
+});
+
+// The status endpoint lists every workflow retry; these tests track one at a time.
+function retryStatusResponse(state) {
+  return {
+    status: state.status === "running" ? "running" : "idle",
+    retries: state.note_id ? [state] : [],
+  };
+}
+
+test("Status collects sample data for a stopped workflow", async ({ page }) => {
+  await installFixtures(page);
+  let completed = false;
+  let needsName = false;
+  let retryState = { status: "idle" };
+  await page.route("**/api/test-runs/1/crawl/workflows", (route) =>
+    route.fulfill({
+      json: {
+        notes: [
+          {
+            id: 23,
+            name: "Add a delivery address",
+            reason: "The address page offers an Add an address button.",
+            status: "needs_input",
+            detail: "No sample address was provided.",
+            needs_input: !completed && !needsName,
+          },
+          ...(needsName && !completed
+            ? [
+                {
+                  id: 25,
+                  retry_of: 23,
+                  name: "Add a delivery address",
+                  status: "needs_input",
+                  reason: "The address page offers an Add an address button.",
+                  detail: "The address form requires a full name, but none was provided.",
+                  request: "Please provide the full name for this delivery address.",
+                  instructions: "Use 1 Example Street, Sydney NSW 2000",
+                  save_to_site_requested: true,
+                  needs_input: true,
+                },
+              ]
+            : []),
+          ...(completed
+            ? [
+                {
+                  id: 25,
+                  retry_of: 23,
+                  name: "Add a delivery address",
+                  status: "needs_input",
+                  needs_input: false,
+                  detail: "The address form requires a full name, but none was provided.",
+                },
+                {
+                  id: 26,
+                  retry_of: 25,
+                  name: "Add a delivery address",
+                  status: "crawled",
+                  needs_input: false,
+                  detail: "Reached the address form.",
+                },
+              ]
+            : []),
+          {
+            id: 24,
+            name: "Ship a pending order",
+            status: "not_attempted",
+            detail: "Not tried because this workflow appears destructive.",
+            needs_input: false,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/test-runs/1/crawl/workflows/retry/status", (route) =>
+    route.fulfill({ json: retryStatusResponse(retryState) }),
+  );
+  let submitted = null;
+  await page.route(/\/api\/test-runs\/1\/crawl\/workflows\/(23|25)\/retry$/, async (route) => {
+    submitted = route.request().postDataJSON();
+    retryState = {
+      status: "running",
+      note_id: Number(
+        route
+          .request()
+          .url()
+          .match(/\/(23|25)\/retry$/)[1],
+      ),
+      save_to_site_requested: true,
+      saved_to_site: false,
+      message: "Opening browser",
+      action_limit: 18,
+      actions_done: 0,
+      actions: [],
+    };
+    await route.fulfill({ json: retryState });
+  });
+  await page.goto("/#/runs/1/activity");
+  await expect(page.getByRole("button", { name: "1 needs input" })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-notice-narrow.png") });
+  await page.setViewportSize({ width: 1440, height: 1024 });
+  await page.getByRole("button", { name: "1 needs input" }).click();
+  await expect(page.getByRole("dialog", { name: "Needs input" })).toBeVisible();
+  await expect(page.getByText("Add a delivery address")).toBeVisible();
+  await expect(page.getByText("Ship a pending order")).toHaveCount(0);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-input-desktop.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-input-narrow.png") });
+  await page
+    .getByLabel("Sample data or instructions")
+    .fill("Use 1 Example Street, Sydney NSW 2000");
+  await page.getByLabel("Save to site").check();
+  await page.getByRole("button", { name: "Continue workflow" }).click();
+  await expect
+    .poll(() => submitted)
+    .toEqual({
+      instructions: "Use 1 Example Street, Sydney NSW 2000",
+      save_to_site: true,
+      generate_sample_data: false,
+    });
+  await expect(page.getByRole("button", { name: /^Workflows/ })).toHaveClass(/active/);
+  await expect(page.getByRole("dialog", { name: "Needs input" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /needs? input$/ })).toHaveCount(0);
+  await expect(page.getByText("Continuing workflow")).toBeVisible();
+  await expect(page.getByText("Opening browser")).toBeVisible();
+  await expect(page.getByText("0 actions completed")).toBeVisible();
+  await expect(page.getByText("Will save to site if reached")).toBeVisible();
+  retryState = {
+    ...retryState,
+    message: "Checking the result",
+    current_path: "/account/addresses",
+    actions_done: 1,
+    actions: ["click Add an address"],
+  };
+  await expect(page.getByText("click Add an address")).toBeVisible();
+  await expect(page.getByText("1 action completed")).toBeVisible();
+  await expect(
+    page.locator(".surface-crawl-note").filter({ hasText: "Add a delivery address" }),
+  ).toHaveCount(1);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-progress.png") });
+  retryState = {
+    ...retryState,
+    actions_done: 18,
+    actions: Array.from({ length: 18 }, (_, index) => `action ${index + 1}`),
+  };
+  const actionList = page.locator(".workflow-retry-actions");
+  await expect(actionList.locator("li")).toHaveCount(18);
+  await expect(actionList.locator("li").last()).toHaveText("action 18");
+  expect(await actionList.evaluate((list) => list.scrollHeight > list.clientHeight)).toBe(true);
+  needsName = true;
+  retryState = {
+    ...retryState,
+    status: "complete",
+    result_status: "needs_input",
+    message: "The address form requires a full name, but none was provided.",
+  };
+  await expect(page.getByText("Retry 1: Needs input")).toBeVisible();
+  await page.getByRole("button", { name: "1 needs input" }).click();
+  await expect(page.getByRole("dialog", { name: "Needs input" })).toBeVisible();
+  const drawer = page.getByRole("dialog", { name: "Needs input" });
+  await expect(
+    drawer.getByText("Please provide the full name for this delivery address."),
+  ).toBeVisible();
+  await expect(drawer.getByText("This attempt was not saved to the site.")).toBeVisible();
+  await expect(page.getByLabel("Sample data or instructions")).toHaveValue(
+    "Use 1 Example Street, Sydney NSW 2000",
+  );
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-needs-name.png") });
+  await page
+    .getByLabel("Sample data or instructions")
+    .fill("Use Test User, 1 Example Street, Sydney NSW 2000");
+  await page.getByLabel("Save to site").check();
+  await page.getByRole("button", { name: "Continue workflow" }).click();
+  await expect
+    .poll(() => submitted?.instructions)
+    .toBe("Use Test User, 1 Example Street, Sydney NSW 2000");
+  expect(submitted.generate_sample_data).toBe(false);
+  completed = true;
+  retryState = {
+    ...retryState,
+    status: "complete",
+    result_status: "crawled",
+    saved_to_site: true,
+    message: "Reached the address form.",
+  };
+  await expect(page.getByRole("button", { name: /^Workflows/ })).toHaveClass(/active/);
+  await expect(
+    page.locator(".surface-crawl-note").filter({ hasText: "Add a delivery address" }),
+  ).toHaveCount(1);
+  await expect(page.getByText("Reached the address form.").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /needs? input$/ })).toHaveCount(0);
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-workflow-result.png") });
+  await page.setViewportSize({ width: 1440, height: 1024 });
+  await expect(page.getByRole("dialog", { name: "Needs input" })).toHaveCount(0);
+});
+
+test("a workflow notification can authorize generated sample data", async ({ page }) => {
+  await installFixtures(page);
+  let submitted = null;
+  let retryState = { status: "idle" };
+  await page.route("**/api/test-runs/1/crawl/workflows", (route) =>
+    route.fulfill({
+      json: {
+        notes: [
+          {
+            id: 23,
+            name: "Add a delivery address",
+            detail: "An address is needed.",
+            needs_input: true,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/test-runs/1/crawl/workflows/retry/status", (route) =>
+    route.fulfill({ json: retryStatusResponse(retryState) }),
+  );
+  await page.route("**/api/test-runs/1/crawl/workflows/23/retry", async (route) => {
+    submitted = route.request().postDataJSON();
+    retryState = {
+      status: "running",
+      note_id: 23,
+      generate_sample_data: true,
+      message: "Opening browser",
+      actions_done: 0,
+      actions: [],
+    };
+    await route.fulfill({ json: retryState });
+  });
+  await page.goto("/#/runs/1/activity");
+  await page.getByRole("button", { name: "1 needs input" }).click();
+  await expect(page.getByRole("button", { name: "Continue workflow" })).toBeDisabled();
+  await page.getByRole("button", { name: "Generate for me" }).click();
+  await expect
+    .poll(() => submitted)
+    .toEqual({
+      instructions: "",
+      save_to_site: false,
+      generate_sample_data: true,
+    });
+  await expect(page.getByText("Generating test data and continuing")).toBeVisible();
+});
+
+test("site settings edit saved workflow data", async ({ page }) => {
+  await installFixtures(page);
+  const siteWithCredential = {
+    ...site,
+    requires_auth: true,
+    login_url: "http://example.test/login",
+    credentials: [
+      {
+        id: 23,
+        username: "tester",
+        password: "saved",
+        auth_mode: "auto",
+        login_fields: [
+          { key: "username", label: "Username", value: "tester", sensitive: false },
+          { key: "password", label: "Password", value: "saved", sensitive: true },
+        ],
+      },
+    ],
+  };
+  const savedWorkflow = {
+    name: "Checkout",
+    goal: "Open checkout form",
+    start_url: "http://example.test/cart",
+    instructions: "Add a test keyboard",
+  };
+  let updated = null;
+  await page.route("**/api/sites/1", (route) => {
+    if (route.request().method() === "PUT") {
+      updated = route.request().postDataJSON();
+      return route.fulfill({ json: { ...siteWithCredential, ...updated } });
+    }
+    return route.fulfill({ json: { ...siteWithCredential, workflow_data: [savedWorkflow] } });
+  });
+  await page.goto("/#/sites/1/edit");
+  await expect(page.getByText("Saved workflow data")).toBeVisible();
+  await expect(page.getByLabel("Workflow name")).toHaveValue("Checkout");
+  await page.getByLabel("Sample data or instructions").fill("Add a test mouse");
+  await page.getByLabel("Starting page URL").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-workflow-data.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByLabel("Starting page URL").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-workflow-data-narrow.png") });
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect.poll(() => updated).not.toBeNull();
+  expect(updated.workflow_data[0].instructions).toBe("Add a test mouse");
+  expect(updated.credentials[0].id).toBe(23);
 });
 
 test("SAST summary cards only appear on the Coverage tab", async ({ page }) => {
@@ -1379,7 +1755,8 @@ test("site map controls remain reachable across widths", async ({ page }) => {
   );
   await page.goto("/#/runs/1/sitemap");
   await expect(page).toHaveTitle("AESPA");
-  await expect(page.getByRole("button", { name: "User crawl progress" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Users \d+ users/ })).toBeVisible();
+  const displaySettings = page.getByRole("button", { name: /^Display \d+ shown$/ });
   for (const width of [2560, 1440, 1100, 900, 768, 640, 390]) {
     await page.setViewportSize({ width, height: 1000 });
     if (await page.getByLabel("Run section").isVisible()) {
@@ -1388,7 +1765,7 @@ test("site map controls remain reachable across widths", async ({ page }) => {
       await expect(page.locator(".web-run-tab-links button:visible")).toHaveCount(7);
     }
     const overflow = await page
-      .locator(".web-run-tab-bar, .sitemap-filter-panel, .sitemap-meta, .scope-hosts-panel")
+      .locator(".web-run-tab-bar, .sitemap-side-panel, .sitemap-meta, .scope-hosts-panel")
       .evaluateAll((elements) =>
         elements.filter((el) => el.scrollWidth > el.clientWidth + 1).map((el) => el.className),
       );
@@ -1397,7 +1774,7 @@ test("site map controls remain reachable across widths", async ({ page }) => {
       ".web-run-tab-links button",
       ".web-run-tab-actions button",
       ".sitemap-filter-summary .traffic-count-label",
-      ".crawl-user-progress-count",
+      ".side-section-count",
     ]) {
       for (const element of await page.locator(selector).all()) {
         if (!(await element.isVisible())) continue;
@@ -1406,7 +1783,7 @@ test("site map controls remain reachable across widths", async ({ page }) => {
         expect(bounds.x + bounds.width).toBeLessThanOrEqual(width + 1);
       }
     }
-    await page.getByRole("button", { name: "Display settings" }).click();
+    await displaySettings.click();
     await expect(page.getByLabel("API display")).toBeVisible();
     if (width > 1100) {
       const stats = await page.locator(".sitemap-meta > .run-stat").all();
@@ -1415,10 +1792,12 @@ test("site map controls remain reachable across widths", async ({ page }) => {
         expect(bounds.width, `stat width at ${width}px`).toBeLessThan(250);
       }
       const input = await page.getByLabel("Exclude site map extensions").boundingBox();
-      expect(input.width).toBeLessThan(200);
+      const panel = await page.locator(".sitemap-side-panel").boundingBox();
+      expect(input.x).toBeGreaterThanOrEqual(panel.x);
+      expect(input.x + input.width).toBeLessThanOrEqual(panel.x + panel.width);
     }
     await page.screenshot({ path: path.join(tmpdir(), `aespa-responsive-${width}.png`) });
-    await page.getByRole("button", { name: "Display settings" }).click();
+    await displaySettings.click();
   }
   await page.getByRole("button", { name: "By User", exact: true }).click();
   await expect(page.getByRole("button", { name: "By User", exact: true })).toHaveClass(/active/);

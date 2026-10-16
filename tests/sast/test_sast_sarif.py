@@ -6,13 +6,8 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
-from aespa import db as db_mod
-from aespa.db import get_session, set_engine
-from aespa.main import create_app
 from aespa.models import SastRun, ScanLead
 from aespa.services import sast_sarif
 
@@ -20,28 +15,9 @@ _UTC = timezone.utc
 
 
 @pytest.fixture(name="env")
-def env_fixture():
-    """Isolated in-memory database and test client."""
-    prev_engine = db_mod._engine
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)
-
-    def _override_session():
-        with Session(engine) as session:
-            yield session
-
-    app = create_app()
-    app.dependency_overrides[get_session] = _override_session
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield engine, c
-    set_engine(prev_engine)
+def env_fixture(client, engine):
+    """Shared engine plus a test client backed by it."""
+    return engine, client
 
 
 def test_parse_location_formats():

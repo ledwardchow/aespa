@@ -91,7 +91,7 @@ def upgrade() -> None:
         if legacy
         else False
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).isoformat(" ")
     if existing:
         connection.execute(
             sa.text(
@@ -211,7 +211,7 @@ def downgrade() -> None:
             "api_url": settings.get("api_url") or "http://127.0.0.1:1337",
             "api_key": secret,
             "scan_configuration_name": settings.get("scan_configuration_name"),
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc).isoformat(" "),
         }
         values.update(
             {

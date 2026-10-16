@@ -44,7 +44,7 @@ beforeEach(() => {
   sastRunsApi.getSastAgentLog.mockResolvedValue([]);
   sastRunsApi.getSastLeads.mockResolvedValue([]);
   sastRunsApi.getSastTokenUsage.mockResolvedValue({});
-  sastRunsApi.getSastHandoffTargets.mockResolvedValue([]);
+  sastRunsApi.getSastLiveTargets.mockResolvedValue([]);
   settingsApi.listLLMProfiles.mockResolvedValue([]);
 });
 
@@ -80,7 +80,15 @@ test("shows scanner events without reloading every SAST endpoint", async () => {
   expect(sastRunsApi.getSastAgentLog).toHaveBeenCalledTimes(1);
   expect(sastRunsApi.getSastLeads).toHaveBeenCalledTimes(1);
   expect(sastRunsApi.getSastTokenUsage).toHaveBeenCalledTimes(1);
-  expect(sastRunsApi.getSastHandoffTargets).toHaveBeenCalledTimes(1);
+  expect(sastRunsApi.getSastLiveTargets).toHaveBeenCalledTimes(1);
+});
+
+test("shows token usage on the coverage tab", async () => {
+  sastRunsApi.getSastTokenUsage.mockResolvedValue({ total_input: 1200, total_output: 300 });
+  render(<SastRunDetailExperience runId={249} initialTab="coverage" />);
+
+  expect(await screen.findByText("↑1.2K in")).toBeTruthy();
+  expect(screen.getByText("↓300 out")).toBeTruthy();
 });
 
 test("opens legacy security check links in the consolidated Threats view", async () => {
@@ -146,7 +154,7 @@ test("shows a source failure and resumes preparation on the same run", async () 
   expect(sastRunsApi.resumeSastSource).toHaveBeenCalledWith(249);
 });
 
-test("shows Resume Failed Work for unfinished work without a failed worker count", async () => {
+test("shows Resume failed work for unfinished work without a failed worker count", async () => {
   const user = userEvent.setup();
   sastRunsApi.getSastRun.mockResolvedValue({ ...run, status: "completed" });
   sastRunsApi.getSastScanStatus.mockResolvedValue({
@@ -157,6 +165,6 @@ test("shows Resume Failed Work for unfinished work without a failed worker count
 
   render(<SastRunDetailExperience runId={249} initialTab="coverage" />);
 
-  await user.click(await screen.findByRole("button", { name: "Resume Failed Work" }));
+  await user.click(await screen.findByRole("button", { name: "Resume failed work" }));
   expect(sastRunsApi.resumeSastScan).toHaveBeenCalledWith(249);
 });

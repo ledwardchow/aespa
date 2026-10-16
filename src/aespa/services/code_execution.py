@@ -478,7 +478,6 @@ class _Broker:
                 headers=merged_headers,
                 timeout=float(getattr(self.scanner_policy, "request_timeout_s", 10)),
                 follow_redirects=False,
-                verify=False,
                 source="python",
                 provenance=provenance,
             ) as client:

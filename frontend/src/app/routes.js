@@ -1,4 +1,5 @@
 import { lazy } from "react";
+import { PLAN_USAGE_EXTENSION_ID } from "../shared/api/chatgptPlanUsage.js";
 const lazyNamed = (loader, name) =>
   lazy(() => loader().then((module) => ({ default: module[name] })));
 
@@ -79,6 +80,8 @@ export const routes = {
       runId: route.id,
       initialTab: route.tab,
       initialFindingRef: route.findingRef,
+      findingIds: route.findingIds,
+      coverageReturn: route.coverageReturn,
       initialTrafficCoverage: route.trafficCoverage,
     }),
   },
@@ -163,6 +166,14 @@ export const routes = {
     Component: lazyNamed(() => import("../features/statistics/Statistics.jsx"), "StatisticsPage"),
     props: () => ({}),
   },
+  "chatgpt-plan-usage": {
+    section: "chatgpt-plan-usage",
+    Component: lazyNamed(
+      () => import("../features/chatgpt-plan-usage/ChatGPTPlanUsagePage.jsx"),
+      "ChatGPTPlanUsagePage",
+    ),
+    props: () => ({}),
+  },
   "run-new": {
     section: "sites",
     Component: lazyNamed(() => import("../features/sites/TestRunForm.jsx"), "TestRunForm"),
@@ -178,6 +189,8 @@ export const routes = {
       showTeamScan: preferences.showTeamScan,
       initialTab: route.tab,
       initialFindingRef: route.findingRef,
+      findingIds: route.findingIds,
+      coverageReturn: route.coverageReturn,
       initialLeadRef: route.leadRef,
       initialTrafficCoverage: route.trafficCoverage,
     }),
@@ -224,10 +237,9 @@ export const routes = {
     ),
     props: (_route, preferences) => ({
       onExtensionUpdated: (extension) => {
-        if (extension.id !== "aespa.benchmarking") return;
-        preferences.setBenchmarkLabCfg({
-          panel_enabled: extension.enabled && extension.status === "loaded",
-        });
+        const cfg = { panel_enabled: extension.enabled && extension.status === "loaded" };
+        if (extension.id === "aespa.benchmarking") preferences.setBenchmarkLabCfg(cfg);
+        if (extension.id === PLAN_USAGE_EXTENSION_ID) preferences.setPlanUsageCfg(cfg);
       },
     }),
   },
@@ -254,6 +266,14 @@ export const routes = {
       "BenchmarkLabPage",
     ),
     props: (route) => ({ initialResultId: route.id }),
+  },
+  "benchmark-scoring-guide": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkScoringGuide.jsx"),
+      "BenchmarkScoringGuide",
+    ),
+    props: () => ({}),
   },
   "benchmark-evaluation-new": {
     section: "benchmark-lab",

@@ -1,3 +1,5 @@
+import { fmtDate } from "../../shared/lib/dates.js";
+import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { useBenchmarkLinks } from "../../shared/hooks/useBenchmarkLinks.js";
 import { BenchmarkBadge } from "../../shared/ui/BenchmarkBadge.jsx";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
@@ -11,6 +13,7 @@ import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { usePolling } from "../../shared/hooks/usePolling.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function SastRunsListPage() {
   const [runs, setRuns] = useState(null);
@@ -133,29 +136,20 @@ export function SastRunsListPage() {
               onChange={onImport}
             />
             <button
-              className="btn ghost sm"
+              className="btn secondary"
               disabled={importing}
               onClick={() => importInputRef.current?.click()}
             >
-              {importing ? "Importing…" : "Import SAST Run"}
+              {importing ? "Importing…" : "Import SAST scan"}
             </button>
-            <button className="btn primary sm" onClick={() => nav("#/sast-runs/new")}>
-              New SAST Scan
+            <button className="btn" onClick={() => nav("#/sast-runs/new")}>
+              <IconPlus /> New SAST scan
             </button>
           </>
         }
       />
       <div className="content scroll-content">
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 16,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <PageError error={error} inline={!runs} onDismiss={() => setError(null)} />
         {runs === null && <div className="subtle">Loading…</div>}
         {runs !== null && runs.length === 0 && (
           <EmptyState
@@ -172,23 +166,23 @@ export function SastRunsListPage() {
               <colgroup>
                 <col
                   style={{
-                    width: "32%",
+                    width: "30%",
                   }}
                 />
                 <col
                   style={{
-                    width: "10%",
+                    width: "13%",
                   }}
                 />
                 <col
                   style={{
-                    width: "10%",
+                    width: "9%",
                   }}
                 />
-                <col style={{ width: "10%" }} />
+                <col style={{ width: "8%" }} />
                 <col
                   style={{
-                    width: "24%",
+                    width: "22%",
                   }}
                 />
                 <col />
@@ -233,7 +227,7 @@ export function SastRunsListPage() {
                   <NavigationRow
                     key={r.id}
                     href={`#/sast-runs/${r.id}/progress`}
-                    label={`View ${r.name}`}
+                    label={`Open ${r.name}`}
                   >
                     <td>
                       <a
@@ -269,16 +263,12 @@ export function SastRunsListPage() {
                     <td>{r.analysis_mode === "light" ? "Light" : "Deep"}</td>
                     <td>{r.leads_count}</td>
                     <td>
-                      {r.started_at ? (
-                        new Date(r.started_at).toLocaleString()
-                      ) : (
-                        <span className="subtle">—</span>
-                      )}
+                      {r.started_at ? fmtDate(r.started_at) : <span className="subtle">—</span>}
                     </td>
                     <td>
                       <div className="row" style={{ justifyContent: "flex-end" }}>
-                        <a className="btn ghost sm" href={`#/sast-runs/${r.id}/progress`}>
-                          View →
+                        <a className="btn secondary sm" href={`#/sast-runs/${r.id}/progress`}>
+                          Open
                         </a>
                         <button
                           type="button"

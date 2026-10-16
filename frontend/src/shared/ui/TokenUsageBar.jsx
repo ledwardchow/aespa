@@ -1,3 +1,5 @@
+import { parseDate } from "../lib/dates.js";
+import { fmtUsd } from "../lib/money.ts";
 export function fmtTok(n) {
   if (!n || n <= 0) return "0";
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
@@ -12,12 +14,7 @@ export function fmtCredits(n) {
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-export function fmtUsd(n) {
-  const value = Number(n);
-  if (!Number.isFinite(value)) return "—";
-  if (value === 0) return "$0.00";
-  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
-}
+export { fmtUsd };
 
 export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
   const hasTokens =
@@ -177,7 +174,7 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
               </span>
               {quota.reset_at ? (
                 <span className="token-out" title={quota.reset_at}>
-                  resets {new Date(quota.reset_at).toLocaleDateString()}
+                  resets {parseDate(quota.reset_at).toLocaleDateString()}
                 </span>
               ) : null}
             </div>

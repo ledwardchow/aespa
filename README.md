@@ -1,6 +1,6 @@
 # AESPA — AI-Enabled Security Pentesting Agent
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ledwardchow/aespa) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
+[![Ask DeepWiki](docs/images/deepwiki-badge.svg)](https://deepwiki.com/ledwardchow/aespa) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
 
 ## What is this?
 
@@ -31,7 +31,19 @@ You will need to provide:
 
 ## Performance
 
-Benchmarks are now on a dedicated website, [AESPABench](https://aespabench.maranthis.chatgpt.site)
+Benchmarks are now on a dedicated website, [AESPA Benchmark](https://bench.aespa.app).
+
+At time of writing (October 2026) this includes results for 24 models, including:
+
+- TAC1 models GPT-6 Luna/Sol
+- TAC3 model GPT-5.6-Cyber (as gpt-daybreak-red-latest)
+- Claude Mythos 5
+- Qwen 3.8 27b
+
+The best performing models (cost/benefit) are:
+
+- SAST: Qwen 3.8 27b (run locally), GPT-6 Luna
+- DAST: Qwen 3.8 27b (run locally), GPT-6 Sol
 
 ## Documentation
 
@@ -44,13 +56,30 @@ The [User Guide](docs/guide/index.md)!
 ## Requirements
 
 - Burp Suite Professional, if you want to use the active scan integration
-- One of: an Anthropic/OpenAI/Google/AWS Bedrock API key, a GitHub Copilot subscription, a ChatGPT/Codex subscription with the Codex CLI installed, or a local model
+- Access to a LLM service, AESPA supports most of them:
+  - The Anthropic API
+  - The OpenAI API
+  - Any OpenAI-compatible API (including local LLMs)
+  - OpenRouter
+  - Google Gemini API
+  - Google Vertex ADC
+  - Azure OpenAI Service/Foundry
+  - Amazon Bedrock Runtime/Mantle, via API key or IAM
+  - Claude subscription (via Claude CLI) 
+  - [Factory.AI](http://Factory.AI) subscription (via Droid CLI)
+  - GitHub Copilot subscription (via Copilot CLI)
+  - ChatGPT subscription (via Sign in with ChatGPT or Codex CLI). 
+  - Google Antigravity subscription (via agy CLI)
 
-Note, this was developed/tested mostly on Bedrock/Sonnet 4.6. Your results may vary on a different setup.
+If your API key has TPM/RPM quota caps this is configurable in the LLM Settings UI. If left unconfigured i've seen this consume up to ~10m TPM bursts.
 
-If your API key has TPM/RPM quota caps this is configurable in the LLM Settings UI. If left unconfigured i've seen this consume up to ~10m TPM bursts (inclusive of cached tokens).
+You will need to make sure your model is cyber-capable, i.e. doesn't have cyber refusals/you are part of the access program such as OpenAI Daybreak/Anthropic CVP/Google Fairwind.
 
+If you aren't part of any, I recommend the following:
 
+- Claude Sonnet 5 (doesn't seem to hit cyber refusals unless you type something sus on ALICE), usable results
+- Qwen 3.8 27b, runs locally on a 64GB Macbook or 24GB CUDA card, this performs better than Sonnet 5
+- Any Qwen 3.8 model or GLM 5.3
 
 ## Running (macOS/Windows)
 
@@ -190,15 +219,32 @@ Copy `.env.example` to `.env` and adjust as needed:
 cp .env.example .env
 ```
 
-| Variable             | Default                | Description                                       |
-| -------------------- | ---------------------- | ------------------------------------------------- |
-| `AESPA_DATABASE_URL` | `sqlite:///./aespa.db` | SQLAlchemy database URL                           |
-| `AESPA_HOST`         | `127.0.0.1`            | Bind address                                      |
-| `AESPA_PORT`         | `8000`                 | Bind port                                         |
-| `AESPA_WEB_DIR`      | `./src/aespa/web`      | Path to static web UI assets                      |
-| `AESPA_DATA_DIR`     | `./aespa_data`         | Path to persistent uploads and temporary storage  |
+| Variable             | Default                            | Description                               |
+| -------------------- | ---------------------------------- | ----------------------------------------- |
+| `AESPA_DATABASE_URL` | `sqlite:///./aespa_data/aespa.db` | SQLAlchemy database URL                   |
+| `AESPA_HOST`         | `127.0.0.1`                        | Bind address                              |
+| `AESPA_PORT`         | `8000`                             | Bind port                                 |
+| `AESPA_WEB_DIR`      | `./src/aespa/web`                  | Path to static web UI assets             |
+| `AESPA_DATA_DIR`     | `./aespa_data`                     | Path to databases and uploaded files     |
 
 If you don't do this, it will use the values above as the default.
+
+To move an installation, stop AESPA on both machines and copy `aespa_data/` and
+your `extensions/` folder to the new installation. AESPA stores its main,
+console-log, reporting-debug, and extension databases inside `aespa_data/`.
+On first start after upgrading an older installation, AESPA copies any databases
+at the installation root into `aespa_data/` and archives the originals under
+`aespa_data/legacy-backups/`.
+An older `.env` with `sqlite:///./aespa.db` also uses the new location. Custom
+`AESPA_DATABASE_URL` values still point to the path you configured, so include
+that database separately when moving an installation.
+
+In the console's **Settings → Data Folder**, enter a folder path to use it on
+the next launch. This works with the source run and the macOS and Windows desktop
+builds. Choose an empty folder for a new database, or a folder containing
+`aespa.db` and the rest of your AESPA data to use it without overwriting files.
+The desktop builds save this choice in their application support settings file,
+so it persists even though the app bundle is read-only.
 
 ## LLM Configuration
 
@@ -208,7 +254,7 @@ Open the app, go to **Settings → LLM**, and configure:
 - **Models & Profiles** — configure model parameters (max tokens, temperature, vision support) and create scan profiles. Scan profiles set default models and allow per-agent-role model assignments (e.g. assigning separate models for Test Lead, Specialist, Validator, or ALICE).
 - **Import / Export** — export or import your entire LLM configuration (providers, models, profiles) as a JSON file.
 
-## Use
+## Screenshots
 
 Landing page:  
 ![Screenshot](docs/images/sites.png)

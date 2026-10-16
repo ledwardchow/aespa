@@ -46,6 +46,7 @@ export function SiteForm({ siteId }) {
     login_url: "",
     notes: "",
     scan_guidance: "",
+    workflow_data: [],
     credentials: [],
   });
   const [loading, setLoading] = useState(isEdit);
@@ -70,7 +71,9 @@ export function SiteForm({ siteId }) {
           login_url: d.login_url || "",
           notes: d.notes || "",
           scan_guidance: d.scan_guidance || "",
+          workflow_data: d.workflow_data || [],
           credentials: d.credentials.map((c) => ({
+            id: c.id,
             username: c.username,
             password: c.password,
             login_fields: (c.login_fields?.length ? c.login_fields : defaultLoginFields()).map(
@@ -142,6 +145,12 @@ export function SiteForm({ siteId }) {
       login_url: form.requires_auth ? form.login_url.trim() || null : null,
       notes: form.notes.trim() || null,
       scan_guidance: form.scan_guidance.trim() || null,
+      workflow_data: form.workflow_data.map((item) => ({
+        name: item.name.trim(),
+        goal: item.goal.trim(),
+        start_url: item.start_url.trim(),
+        instructions: item.instructions.trim(),
+      })),
       credentials: form.requires_auth
         ? form.credentials.map((c) => {
             const usedKeys = new Set();
@@ -153,6 +162,7 @@ export function SiteForm({ siteId }) {
               selector: field.selector?.trim() || null,
             }));
             const base = {
+              ...(c.id ? { id: c.id } : {}),
               login_fields: loginFields,
               label: c.label || null,
               login_url: c.login_url?.trim() || null,
@@ -193,8 +203,7 @@ export function SiteForm({ siteId }) {
       <div className="content scroll-content">
         {loading && <div className="subtle">Loading…</div>}
         {!loading && (
-          <form className="card" onSubmit={onSubmit}>
-            {error && <div className="alert error">{error}</div>}
+          <form className="card site-form-card" onSubmit={onSubmit}>
             <div className="form-section-title">Site</div>
             <div className="field">
               <label>Name</label>
@@ -249,6 +258,110 @@ export function SiteForm({ siteId }) {
                 }
               />
             </div>
+            <div className="divider" />
+            <div className="form-section-title">Saved workflow data</div>
+            <p className="subtle">
+              The crawler uses these sample values and instructions when testing this site again.
+              Use test data. Saved values are sent to the configured crawler model and the site.
+            </p>
+            {form.workflow_data.map((item, index) => (
+              <div className="card workflow-site-item" key={index}>
+                <div className="field">
+                  <label htmlFor={`workflow-name-${index}`}>Workflow name</label>
+                  <input
+                    id={`workflow-name-${index}`}
+                    type="text"
+                    required
+                    maxLength={100}
+                    value={item.name}
+                    onChange={(event) =>
+                      upd({
+                        workflow_data: form.workflow_data.map((entry, i) =>
+                          i === index ? { ...entry, name: event.target.value } : entry,
+                        ),
+                      })
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor={`workflow-goal-${index}`}>Page or form to reach</label>
+                  <input
+                    id={`workflow-goal-${index}`}
+                    type="text"
+                    required
+                    maxLength={220}
+                    value={item.goal}
+                    onChange={(event) =>
+                      upd({
+                        workflow_data: form.workflow_data.map((entry, i) =>
+                          i === index ? { ...entry, goal: event.target.value } : entry,
+                        ),
+                      })
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor={`workflow-url-${index}`}>Starting page URL</label>
+                  <input
+                    id={`workflow-url-${index}`}
+                    type="url"
+                    required
+                    value={item.start_url}
+                    onChange={(event) =>
+                      upd({
+                        workflow_data: form.workflow_data.map((entry, i) =>
+                          i === index ? { ...entry, start_url: event.target.value } : entry,
+                        ),
+                      })
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor={`workflow-instructions-${index}`}>
+                    Sample data or instructions
+                  </label>
+                  <textarea
+                    id={`workflow-instructions-${index}`}
+                    required
+                    maxLength={4000}
+                    rows={4}
+                    value={item.instructions}
+                    onChange={(event) =>
+                      upd({
+                        workflow_data: form.workflow_data.map((entry, i) =>
+                          i === index ? { ...entry, instructions: event.target.value } : entry,
+                        ),
+                      })
+                    }
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="btn secondary sm"
+                  onClick={() =>
+                    upd({ workflow_data: form.workflow_data.filter((_, i) => i !== index) })
+                  }
+                >
+                  Remove workflow
+                </button>
+              </div>
+            ))}
+            {form.workflow_data.length < 20 && (
+              <button
+                type="button"
+                className="btn secondary sm"
+                onClick={() =>
+                  upd({
+                    workflow_data: [
+                      ...form.workflow_data,
+                      { name: "", goal: "", start_url: form.base_url, instructions: "" },
+                    ],
+                  })
+                }
+              >
+                Add workflow data
+              </button>
+            )}
             <div className="divider" />
             <div className="form-section-title">Authentication</div>
             <label className="toggle-row">
@@ -501,7 +614,7 @@ export function SiteForm({ siteId }) {
                           <div className="field">
                             <div
                               style={{
-                                background: "var(--surface-2,#2a2a2a)",
+                                background: "var(--panel-2)",
                                 border: "1px solid var(--border)",
                                 borderRadius: 4,
                                 padding: "8px 10px",
@@ -509,7 +622,7 @@ export function SiteForm({ siteId }) {
                                 color: "var(--text-2)",
                               }}
                             >
-                              🖥️ A browser window will open when a crawl or dynamic scan starts.
+                              🖥️ A browser window will open when a crawl or Dynamic Scan starts.
                               Complete the login (including any SSO / MFA / push notifications),
                               then click <strong>I'm Done</strong> in the run detail view. ALICE
                               reuses the session captured by whichever phase runs first.
@@ -520,7 +633,7 @@ export function SiteForm({ siteId }) {
                           <div className="field">
                             <div
                               style={{
-                                background: "var(--surface-2,#2a2a2a)",
+                                background: "var(--panel-2)",
                                 border: "1px solid var(--border)",
                                 borderRadius: 4,
                                 padding: "8px 10px",
@@ -550,6 +663,11 @@ export function SiteForm({ siteId }) {
               </>
             )}
             <div className="divider" />
+            {error && (
+              <div className="alert error form-error" role="alert">
+                {error}
+              </div>
+            )}
             <div className="row spread">
               <button
                 type="button"

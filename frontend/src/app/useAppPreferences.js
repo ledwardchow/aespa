@@ -1,5 +1,6 @@
 import * as settingsApi from "../shared/api/settings.js";
 import * as extensionsApi from "../shared/api/extensions.js";
+import { PLAN_USAGE_EXTENSION_ID } from "../shared/api/chatgptPlanUsage.js";
 import { useEffect, useState } from "react";
 
 export function useAppPreferences() {
@@ -45,6 +46,7 @@ export function useAppPreferences() {
   });
   const [reportingDebugCfg, setReportingDebugCfg] = useState(null);
   const [benchmarkLabCfg, setBenchmarkLabCfg] = useState(null);
+  const [planUsageCfg, setPlanUsageCfg] = useState(null);
   useEffect(() => {
     settingsApi
       .getVersion()
@@ -59,16 +61,15 @@ export function useAppPreferences() {
       .catch(() => {});
     extensionsApi
       .listExtensions()
-      .then((extensions) =>
-        setBenchmarkLabCfg({
-          panel_enabled: extensions.some(
+      .then((extensions) => {
+        const loaded = (id) =>
+          extensions.some(
             (extension) =>
-              extension.id === "aespa.benchmarking" &&
-              extension.enabled &&
-              extension.status === "loaded",
-          ),
-        }),
-      )
+              extension.id === id && extension.enabled && extension.status === "loaded",
+          );
+        setBenchmarkLabCfg({ panel_enabled: loaded("aespa.benchmarking") });
+        setPlanUsageCfg({ panel_enabled: loaded(PLAN_USAGE_EXTENSION_ID) });
+      })
       .catch(() => {});
   }, []);
 
@@ -89,5 +90,7 @@ export function useAppPreferences() {
     setReportingDebugCfg,
     benchmarkLabCfg,
     setBenchmarkLabCfg,
+    planUsageCfg,
+    setPlanUsageCfg,
   };
 }

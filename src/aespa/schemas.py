@@ -28,6 +28,7 @@ class LoginField(BaseModel):
 class CredentialIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    id: int | None = None
     username: str | None = None
     password: str | None = None
     login_fields: list[LoginField] = Field(default_factory=list)
@@ -112,6 +113,15 @@ class CredentialOut(BaseModel):
         return data
 
 
+class SiteWorkflowInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    goal: str = Field(min_length=1, max_length=220)
+    start_url: HttpUrl
+    instructions: str = Field(min_length=1, max_length=4000)
+
+
 class SiteBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -121,12 +131,22 @@ class SiteBase(BaseModel):
     login_url: HttpUrl | None = None
     notes: str | None = None
     scan_guidance: str | None = None
+    workflow_data: list[SiteWorkflowInput] | None = Field(default=None, max_length=20)
     scope_hosts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_auth_consistency(self) -> "SiteBase":
         if not self.requires_auth and self.login_url is not None:
             raise ValueError("login_url must be omitted when requires_auth is false")
+        site_port = self.base_url.port or (
+            443 if self.base_url.scheme == "https" else 80
+        )
+        for workflow in self.workflow_data or []:
+            start_port = workflow.start_url.port or (
+                443 if workflow.start_url.scheme == "https" else 80
+            )
+            if workflow.start_url.host != self.base_url.host or start_port != site_port:
+                raise ValueError("workflow starting pages must be on the site host")
         return self
 
 
@@ -180,6 +200,7 @@ class SiteDetail(BaseModel):
     login_url: str | None
     notes: str | None
     scan_guidance: str | None
+    workflow_data: list[SiteWorkflowInput] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     credentials: list[CredentialOut]
@@ -386,6 +407,7 @@ class SastRunSummary(BaseModel):
     collection_id: int | None
     document_id: int | None
     source_filename: str | None
+    source_archive_path: str | None = None
     source_provider: str = "upload"
     source_locator: str | None = None
     source_requested_ref: str | None = None
@@ -770,6 +792,7 @@ class LLMConfigIn(BaseModel):
     detected_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
     temperature: Optional[float] = Field(default=None)
     reasoning_effort: str | None = Field(default=None, max_length=32)
+    service_tier: str | None = Field(default=None, max_length=32)
     use_vision: bool = False
     force_tool_choice: bool = False
 
@@ -814,6 +837,7 @@ class LLMConfigOut(BaseModel):
     context_limit_source: str = "configured"
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
     use_vision: bool
     force_tool_choice: bool
     updated_at: datetime
@@ -892,6 +916,7 @@ class ScannerPolicyBase(BaseModel):
     sast_audit_logging_findings: bool = True
     sast_defense_in_depth_findings: bool = False
     sast_dependency_findings: bool = True
+    retire_auto_update: bool = True
     sast_min_severity: Literal["low", "medium", "high", "critical"] = "low"
     sast_budget_mode: Literal["adaptive", "fixed"] = "adaptive"
     sast_baseline_budget: int = Field(default=80, ge=1, le=1000)
@@ -987,7 +1012,7 @@ class CodeExecutionConfigBase(BaseModel):
     workspace_mb: int = Field(default=16, ge=4, le=64)
     output_limit_bytes: int = Field(default=65536, ge=8192, le=262144)
     artifact_limit_bytes: int = Field(default=10485760, ge=0, le=50 * 1024 * 1024)
-    max_requests_per_execution: int = Field(default=20, ge=0, le=100)
+    max_requests_per_execution: int = Field(default=50, ge=0, le=100)
     max_concurrent_requests: int = Field(default=5, ge=1, le=10)
     max_concurrent_executions: int = Field(default=2, ge=1, le=8)
     retain_redacted_source: bool = True
@@ -1058,6 +1083,8 @@ class ComponentMapperConfigOut(ComponentMapperConfigBase):
 class UpstreamProxyConfigBase(BaseModel):
     scanner_proxy_url: str | None = Field(default=None, max_length=500)
     llm_proxy_url: str | None = Field(default=None, max_length=500)
+    scanner_ca_bundle_path: str | None = Field(default=None, max_length=1000)
+    llm_ca_bundle_path: str | None = Field(default=None, max_length=1000)
     proxy_scanner: bool = False
     proxy_llm: bool = False
 
@@ -1075,7 +1102,22 @@ class UpstreamProxyConfigBase(BaseModel):
 
 
 class UpstreamProxyConfigIn(UpstreamProxyConfigBase):
-    pass
+    @field_validator("scanner_ca_bundle_path", "llm_ca_bundle_path")
+    @classmethod
+    def _validate_ca_bundle_path(cls, value):
+        if not value or not value.strip():
+            return None
+        import ssl
+        from pathlib import Path
+
+        path = Path(value.strip()).expanduser()
+        if not path.is_absolute() or not path.is_file():
+            raise ValueError("CA bundle must be an existing file on the AESPA computer")
+        try:
+            ssl.create_default_context(cafile=str(path))
+        except (OSError, ssl.SSLError) as exc:
+            raise ValueError("CA bundle must contain valid PEM certificates") from exc
+        return str(path)
 
 
 class UpstreamProxyConfigOut(UpstreamProxyConfigBase):
@@ -1241,182 +1283,6 @@ class ReportingDebugConfigOut(ReportingDebugConfigBase):
     updated_at: datetime
 
 
-# ── Benchmark Lab schemas ───────────────────────────────────────────────────
-
-
-class BenchmarkLabConfigBase(BaseModel):
-    panel_enabled: bool = False
-    default_match_mode: Literal["deterministic", "assisted", "human_reviewed"] = (
-        "assisted"
-    )
-    default_repetitions: int = Field(default=1, ge=1, le=100)
-
-
-class BenchmarkLabConfigIn(BenchmarkLabConfigBase):
-    pass
-
-
-class BenchmarkLabConfigOut(BenchmarkLabConfigBase):
-    updated_at: datetime
-
-
-class BenchmarkLocation(BaseModel):
-    path: str = Field(min_length=1, max_length=1000)
-    line: int | None = Field(default=None, ge=1)
-
-
-class BenchmarkGroundTruthItem(BaseModel):
-    external_id: str = Field(min_length=1, max_length=200)
-    title: str = Field(default="", max_length=1000)
-    description: str = Field(default="", max_length=10000)
-    category: str = Field(default="", max_length=200)
-    severity: str = Field(default="medium", max_length=32)
-    locations: list[BenchmarkLocation] = Field(default_factory=list, max_length=100)
-    root_cause: str = Field(default="", max_length=10000)
-    affected_operation: str = Field(default="", max_length=2000)
-    expected_evidence: list[str] = Field(default_factory=list, max_length=100)
-    classification: str = Field(default="exploitable", max_length=100)
-
-
-class BenchmarkGroundTruth(BaseModel):
-    schema_version: int = Field(default=1, ge=1)
-    name: str = Field(default="", max_length=500)
-    source_digest: str | None = Field(default=None, max_length=200)
-    items: list[BenchmarkGroundTruthItem] = Field(max_length=10000)
-
-    @model_validator(mode="after")
-    def _unique_external_ids(self) -> "BenchmarkGroundTruth":
-        ids = [item.external_id for item in self.items]
-        if len(ids) != len(set(ids)):
-            raise ValueError("ground-truth external_id values must be unique")
-        return self
-
-
-class BenchmarkDatasetIn(BaseModel):
-    name: str = Field(min_length=1, max_length=500)
-    schema_version: int = Field(default=1, ge=1)
-    source_digest: str | None = Field(default=None, max_length=200)
-    ground_truth: BenchmarkGroundTruth | None = None
-    ground_truth_json: dict | str | None = None
-
-    @model_validator(mode="after")
-    def _require_ground_truth(self) -> "BenchmarkDatasetIn":
-        if self.ground_truth is None and self.ground_truth_json is None:
-            raise ValueError("ground_truth is required")
-        return self
-
-
-class BenchmarkDatasetOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    name: str
-    schema_version: int
-    source_digest: str | None
-    ground_truth_digest: str
-    item_count: int = 0
-    ground_truth: BenchmarkGroundTruth | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class BenchmarkEvaluationIn(BaseModel):
-    name: str = Field(min_length=1, max_length=500)
-    sast_run_id: int = Field(gt=0)
-    dataset_id: int = Field(gt=0)
-    match_mode: Literal["deterministic", "assisted", "human_reviewed"] = "assisted"
-    llm_profile_id: int | None = Field(default=None, gt=0)
-    policy: dict = Field(default_factory=dict)
-    notes: str = Field(default="", max_length=10000)
-
-
-class BenchmarkMatchOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    evaluation_id: int
-    ground_truth_external_id: str | None
-    scan_lead_id: int | None
-    disposition: str
-    confidence: float
-    rationale: str
-    human_reviewed: bool
-    review_note: str
-    review_history_json: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class BenchmarkMatchReviewIn(BaseModel):
-    disposition: Literal[
-        "full",
-        "partial",
-        "missed",
-        "additional_valid",
-        "false_positive",
-        "duplicate",
-        "unreviewed",
-    ]
-    review_note: str = Field(default="", max_length=10000)
-    rationale: str | None = Field(default=None, max_length=10000)
-    confidence: float | None = Field(default=None, ge=0, le=1)
-
-
-class BenchmarkEvaluationOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    name: str
-    sast_run_id: int
-    dataset_id: int
-    status: str
-    match_mode: str
-    matching_version: str
-    policy_json: str
-    run_provenance_json: str
-    blindness_status: str
-    blindness_checks_json: str
-    metrics_json: str
-    error_message: str | None
-    started_at: datetime | None
-    completed_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-    semantic_coverage: dict = Field(default_factory=dict)
-    partial_coverage_reasons: list = Field(default_factory=list)
-    matches: list[BenchmarkMatchOut] = Field(default_factory=list)
-
-
-class BenchmarkComparisonIn(BaseModel):
-    name: str = Field(min_length=1, max_length=500)
-    dataset_id: int = Field(gt=0)
-    evaluation_ids: list[int] = Field(min_length=2, max_length=100)
-    thresholds: dict = Field(default_factory=dict)
-    include_contaminated: bool = False
-
-    @field_validator("evaluation_ids")
-    @classmethod
-    def _unique_evaluations(cls, value: list[int]) -> list[int]:
-        if len(value) != len(set(value)):
-            raise ValueError("evaluation_ids must be unique")
-        return value
-
-
-class BenchmarkComparisonOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    name: str
-    dataset_id: int
-    evaluation_ids: list[int] = Field(default_factory=list)
-    thresholds_json: str
-    metrics_json: str
-    status: str
-    include_contaminated: bool
-    created_at: datetime
-    updated_at: datetime
-
-
 # ── Browser debug config schemas ─────────────────────────────────────────────
 
 
@@ -1485,6 +1351,7 @@ class LLMExportProfileItem(BaseModel):
     max_context_tokens: int | None = None
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
     use_vision: bool = False
     force_tool_choice: bool = False
     is_active: bool = False
@@ -1507,6 +1374,36 @@ class LLMImportResult(BaseModel):
 # ── Test run schemas ──────────────────────────────────────────────────────────
 
 
+class SavedCrawlCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class SavedCrawlUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class SavedCrawlOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    name: str
+    notes: str | None = None
+    source_run_id: int | None = None
+    source_run_exists: bool = False
+    crawler_mode: str
+    page_selection: str = "each_url"
+    page_count: int
+    size_bytes: int
+    created_at: datetime
+
+
 class TestRunCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -1516,6 +1413,7 @@ class TestRunCreate(BaseModel):
     max_pages: int = Field(default=500, ge=5, le=500)
     llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
     crawler_mode: Literal["url", "interactive"] = "url"
+    page_selection: Literal["each_url", "group_similar"] = "each_url"
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
 
@@ -1525,6 +1423,7 @@ class TestRunUpdate(BaseModel):
     max_pages: int = Field(ge=5, le=500)
     llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
     crawler_mode: Literal["url", "interactive"] | None = None
+    page_selection: Literal["each_url", "group_similar"] | None = None
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
 
@@ -1537,6 +1436,10 @@ class StartCrawlBody(BaseModel):
     """
 
     crawl_credential_id: int | None = None
+    start_pentest_after_crawl: bool = False
+    coverage_mode: WebCoverageModeLiteral | None = None
+    crawler_mode: Literal["url", "interactive"] | None = None
+    page_selection: Literal["each_url", "group_similar"] | None = None
 
 
 class CredentialSummary(BaseModel):
@@ -1564,6 +1467,9 @@ class TestRunSummary(BaseModel):
     max_pages: int
     llm_max_concurrency: int | None = None
     crawler_mode: str = "url"
+    page_selection: str = "each_url"
+    crawl_started_once: bool = False
+    route_groups: list[dict] = Field(default_factory=list)
     scan_mode: str = "aggressive"
     coverage_mode: str = "track"
     scan_mode_locked: bool = False

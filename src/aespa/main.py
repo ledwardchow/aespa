@@ -18,6 +18,7 @@ from aespa.api.api_collections import router as api_collections_router
 from aespa.api.api_test_runs import router as api_test_runs_router
 from aespa.api.events import router as events_router
 from aespa.api.extensions import router as extensions_router
+from aespa.api.report_leads import router as report_leads_router
 from aespa.api.reporting_debug import router as reporting_debug_router
 from aespa.api.sast_runs import router as sast_runs_router
 from aespa.api.scan import router as scan_router
@@ -27,7 +28,7 @@ from aespa.api.statistics import router as statistics_router
 from aespa.api.systems import router as systems_router
 from aespa.api.test_runs import router as test_runs_router
 from aespa.api.traffic import router as traffic_router
-from aespa.config import DEFAULT_LOG_DB_PATH, Settings, get_settings
+from aespa.config import Settings, get_settings, settings_env_path
 from aespa.db import get_session, init_db
 from aespa.extensions.api import ExtensionApiDispatcher
 from aespa.services import alice_goals as alice_goals_svc
@@ -38,7 +39,9 @@ from aespa.services import copilot_provider as copilot_provider_svc
 from aespa.services import droid_provider as droid_provider_svc
 from aespa.services import sast_sources as sast_sources_svc
 from aespa.services import validator as validator_svc
+from aespa.services.run_cleanup import LegacyBenchmarkReferenceError
 from aespa.services.settings import get_cloudflare_access_config
+from aespa.storage_migration import migrate_legacy_storage
 
 
 @asynccontextmanager
@@ -132,10 +135,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     app = FastAPI(title="AESPA", version=settings.app_version, lifespan=_lifespan)
 
+    @app.exception_handler(LegacyBenchmarkReferenceError)
+    async def _legacy_benchmark_reference(
+        _request: Request, exc: LegacyBenchmarkReferenceError
+    ):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
     app.include_router(sites_router)
     app.include_router(api_collections_router)
     app.include_router(api_test_runs_router)
     app.include_router(sast_runs_router)
+    app.include_router(report_leads_router)
     app.include_router(extensions_router)
     app.include_router(settings_router)
     app.include_router(test_runs_router)
@@ -259,8 +269,8 @@ def _build_frontend_if_stale() -> None:
     subprocess.run([npm, "run", "build"], cwd=frontend, check=True)
 
 
-def _ensure_port_available(host: str, port: int) -> None:
-    """Exit with an actionable message when the configured listener is occupied."""
+def _port_available(host: str, port: int) -> bool:
+    """Check whether a listener can bind to the requested address."""
     import errno
     import socket
 
@@ -270,17 +280,24 @@ def _ensure_port_available(host: str, port: int) -> None:
         # on POSIX, avoiding false positives from recently closed connections.
         with socket.create_server((host, port), family=family):
             pass
+        return True
     except OSError as exc:
         address_in_use = exc.errno in {errno.EADDRINUSE, 10048} or (
             getattr(exc, "winerror", None) == 10048
         )
         if address_in_use:
-            raise SystemExit(
-                f"[aespa] Cannot start: {host}:{port} is already in use. "
-                "Stop the process using that port, or choose another port by "
-                f"setting AESPA_PORT={port + 1} in .env."
-            ) from exc
+            return False
         raise SystemExit(f"[aespa] Cannot listen on {host}:{port}: {exc}") from exc
+
+
+def _find_available_port(host: str, preferred_port: int) -> int:
+    """Try the configured port, then 9000 and successive higher ports."""
+    if _port_available(host, preferred_port):
+        return preferred_port
+    for port in range(max(9000, preferred_port + 1), 65536):
+        if _port_available(host, port):
+            return port
+    raise SystemExit(f"[aespa] Cannot start: no available port for {host}.")
 
 
 def _run_server(server) -> bool:
@@ -313,7 +330,10 @@ def main() -> None:
     from aespa.console import InteractiveConsole, interactive_console_available
 
     settings = get_settings()
-    _ensure_port_available(settings.host, settings.port)
+    migrate_legacy_storage(settings)
+    port = _find_available_port(settings.host, settings.port)
+    if port != settings.port:
+        print(f"[aespa] Port {settings.port} is in use; using port {port}.")
     _build_frontend_if_stale()
     ensure_chromium()
     restart: dict[str, object | None] = {"port": None, "server": None, "quit": False}
@@ -337,12 +357,12 @@ def main() -> None:
 
     console = (
         InteractiveConsole(
-            port=settings.port,
+            port=port,
             host=settings.host,
-            env_path=Path.cwd() / ".env",
+            env_path=settings_env_path(),
             on_port_change=change_port,
             on_quit=request_quit,
-            log_db_path=DEFAULT_LOG_DB_PATH,
+            log_db_path=Path(settings.data_dir) / "logs.db",
         )
         if interactive_console_available()
         else None
@@ -359,11 +379,13 @@ def main() -> None:
             agent_activity_log.warning(NO_GRAPHICAL_DISPLAY_MESSAGE)
     startup_failure: str | None = None
     try:
-        port = settings.port
         while True:
             if restart["quit"]:
                 break
-            _ensure_port_available(settings.host, port)
+            available_port = _find_available_port(settings.host, port)
+            if available_port != port:
+                print(f"[aespa] Port {port} is in use; using port {available_port}.")
+                port = available_port
             server = uvicorn.Server(
                 uvicorn.Config(
                     "aespa.main:app",

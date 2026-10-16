@@ -2,8 +2,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
 
 def test_get_llm_config_initially_null(client: TestClient):
@@ -276,6 +275,32 @@ def test_upstream_proxy_config_rejects_invalid_url(client: TestClient, field: st
     assert response.status_code == 422
 
 
+def test_upstream_proxy_config_accepts_ca_bundle_paths(client: TestClient):
+    import certifi
+
+    bundle = certifi.where()
+    response = client.put(
+        "/api/settings/upstream-proxy",
+        json={
+            "scanner_ca_bundle_path": bundle,
+            "llm_ca_bundle_path": bundle,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["scanner_ca_bundle_path"] == bundle
+    assert response.json()["llm_ca_bundle_path"] == bundle
+    saved = client.get("/api/settings/upstream-proxy")
+    assert saved.json()["scanner_ca_bundle_path"] == bundle
+
+
+def test_upstream_proxy_config_rejects_missing_ca_bundle(client: TestClient):
+    response = client.put(
+        "/api/settings/upstream-proxy",
+        json={"llm_ca_bundle_path": "/missing/company-ca.pem"},
+    )
+    assert response.status_code == 422
+
+
 def test_cloudflare_access_config_round_trip(client: TestClient):
     # Defaults to no audience (legacy behaviour: audience check skipped).
     r = client.get("/api/settings/cloudflare-access")
@@ -456,6 +481,66 @@ def _make_profile(client: TestClient, provider_id: int, **overrides):
     }
     payload.update(overrides)
     return client.post("/api/settings/llm/model-configs", json=payload)
+
+
+def test_thinking_level_is_rejected_when_model_lists_none(
+    client: TestClient, monkeypatch
+):
+    async def no_levels(**kwargs):
+        return {"models": ["plain-model"], "capabilities": {"plain-model": {}}}
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_model_options_for_format", no_levels
+    )
+    provider = _make_provider(
+        client, models=["plain-model"], model_capabilities={"plain-model": {}}
+    ).json()
+
+    rejected = _make_profile(
+        client, provider["id"], model="plain-model", reasoning_effort="xhigh"
+    )
+    assert rejected.status_code == 422
+    assert "Set Thinking level to Default" in rejected.json()["detail"]
+
+    accepted = _make_profile(client, provider["id"], model="plain-model")
+    assert accepted.status_code == 200
+    assert accepted.json()["reasoning_effort"] is None
+
+
+def test_thinking_level_uses_live_levels_when_none_are_saved(
+    client: TestClient, monkeypatch
+):
+    calls = []
+
+    async def live_levels(**kwargs):
+        calls.append(kwargs)
+        return {
+            "models": ["live-model"],
+            "capabilities": {"live-model": {"supported_efforts": ["low", "high"]}},
+        }
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_model_options_for_format", live_levels
+    )
+    provider = _make_provider(
+        client, models=["live-model"], model_capabilities={"live-model": {}}
+    ).json()
+
+    accepted = _make_profile(
+        client, provider["id"], model="live-model", reasoning_effort="high"
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["reasoning_effort"] == "high"
+    assert calls and calls[0]["api_format"] == "openai"
+
+    rejected = _make_profile(
+        client,
+        provider["id"],
+        name="Other",
+        model="live-model",
+        reasoning_effort="xhigh",
+    )
+    assert rejected.status_code == 422
 
 
 def test_auto_context_uses_freshly_discovered_form_value(client: TestClient):
@@ -988,69 +1073,60 @@ def test_write_only_api_keys_behavior(client: TestClient):
     assert "burp-secret-key" not in burp_get.text
 
 
-def test_run_llm_config_resolves_provider_fields_without_changing_session_instance():
-    from aespa import models as _models  # noqa: F401
+def test_run_llm_config_resolves_provider_fields_without_changing_session_instance(
+    engine,
+):
     from aespa.models import LLMConfig, LLMProviderConfig, Site, TestRun
     from aespa.services import settings as settings_service
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    try:
-        SQLModel.metadata.create_all(engine)
-        with Session(engine) as session:
-            provider = LLMProviderConfig(
-                name="Azure Claude",
-                api_format="azure_foundry_anthropic",
-                api_key="provider-key",
-                base_url="https://example.services.ai.azure.com/anthropic/v1",
-                models_json='["claude-sonnet-4-5"]',
-            )
-            profile = LLMConfig(
-                name="Claude profile",
-                is_active=True,
-                provider_id=1,
-                model="claude-sonnet-4-5",
-                api_key=None,
-                base_url=None,
-            )
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(provider)
-            session.add(profile)
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-            run = TestRun(site_id=site.id, name="Run", llm_config_id=profile.id)
-            session.add(run)
-            session.commit()
-            session.refresh(run)
+    with Session(engine) as session:
+        provider = LLMProviderConfig(
+            name="Azure Claude",
+            api_format="azure_foundry_anthropic",
+            api_key="provider-key",
+            base_url="https://example.services.ai.azure.com/anthropic/v1",
+            models_json='["claude-sonnet-4-5"]',
+        )
+        profile = LLMConfig(
+            name="Claude profile",
+            is_active=True,
+            provider_id=1,
+            model="claude-sonnet-4-5",
+            api_key=None,
+            base_url=None,
+        )
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(provider)
+        session.add(profile)
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        run = TestRun(site_id=site.id, name="Run", llm_config_id=profile.id)
+        session.add(run)
+        session.commit()
+        session.refresh(run)
 
-            cfg = settings_service.get_llm_config_for_run(session, run)
+        cfg = settings_service.get_llm_config_for_run(session, run)
 
-            assert inspect(cfg, raiseerr=False) is None
-            assert inspect(profile).session is session
-            assert session.is_modified(profile) is False
-            assert cfg.provider == "azure_foundry_anthropic"
-            assert cfg.api_key == "provider-key"
-            assert cfg.base_url == "https://example.services.ai.azure.com/anthropic/v1"
+        assert inspect(cfg, raiseerr=False) is None
+        assert inspect(profile).session is session
+        assert session.is_modified(profile) is False
+        assert cfg.provider == "azure_foundry_anthropic"
+        assert cfg.api_key == "provider-key"
+        assert cfg.base_url == "https://example.services.ai.azure.com/anthropic/v1"
 
-            settings_service.get_run_scanner_policy(session, run)
-            assert session.is_modified(profile) is False
-            assert profile.api_key is None
-            assert profile.base_url is None
-            profile_id = profile.id
-            session.expire_all()
-            assert cfg.api_key == "provider-key"
+        settings_service.get_run_scanner_policy(session, run)
+        assert session.is_modified(profile) is False
+        assert profile.api_key is None
+        assert profile.base_url is None
+        profile_id = profile.id
+        session.expire_all()
+        assert cfg.api_key == "provider-key"
 
-        with Session(engine) as session:
-            persisted = session.get(LLMConfig, profile_id)
-            assert persisted.api_key is None
-            assert persisted.base_url is None
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    with Session(engine) as session:
+        persisted = session.get(LLMConfig, profile_id)
+        assert persisted.api_key is None
+        assert persisted.base_url is None
 
 
 def test_profile_model_must_belong_to_provider(client: TestClient):

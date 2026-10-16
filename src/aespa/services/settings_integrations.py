@@ -8,7 +8,6 @@ from sqlmodel import Session
 
 from aespa.models import (
     AdversarialValidatorConfig,
-    BenchmarkLabConfig,
     BrowserDebugConfig,
     CloudflareAccessConfig,
     CodeExecutionConfig,
@@ -23,8 +22,6 @@ from aespa.models import (
     UpstreamProxyConfig,
 )
 from aespa.schemas import (
-    BenchmarkLabConfigIn,
-    BenchmarkLabConfigOut,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
     CloudflareAccessConfigIn,
@@ -94,6 +91,7 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
             cfg, "sast_defense_in_depth_findings", False
         ),
         sast_dependency_findings=getattr(cfg, "sast_dependency_findings", True),
+        retire_auto_update=getattr(cfg, "retire_auto_update", True),
         sast_min_severity=getattr(cfg, "sast_min_severity", "low"),
         sast_budget_mode=getattr(cfg, "sast_budget_mode", "adaptive"),
         sast_baseline_budget=getattr(cfg, "sast_baseline_budget", 80),
@@ -191,6 +189,7 @@ def upsert_scanner_policy(
     cfg.sast_audit_logging_findings = payload.sast_audit_logging_findings
     cfg.sast_defense_in_depth_findings = payload.sast_defense_in_depth_findings
     cfg.sast_dependency_findings = payload.sast_dependency_findings
+    cfg.retire_auto_update = payload.retire_auto_update
     cfg.sast_min_severity = payload.sast_min_severity
     cfg.sast_budget_mode = payload.sast_budget_mode
     cfg.sast_baseline_budget = payload.sast_baseline_budget
@@ -307,6 +306,8 @@ def get_upstream_proxy_config(session: Session) -> UpstreamProxyConfigOut:
     return UpstreamProxyConfigOut(
         scanner_proxy_url=cfg.scanner_proxy_url,
         llm_proxy_url=cfg.llm_proxy_url,
+        scanner_ca_bundle_path=cfg.scanner_ca_bundle_path,
+        llm_ca_bundle_path=cfg.llm_ca_bundle_path,
         proxy_scanner=cfg.proxy_scanner,
         proxy_llm=cfg.proxy_llm,
         updated_at=cfg.updated_at,
@@ -321,6 +322,8 @@ def upsert_upstream_proxy_config(
         cfg = UpstreamProxyConfig(id=_SINGLETON_ID)
     cfg.scanner_proxy_url = payload.scanner_proxy_url
     cfg.llm_proxy_url = payload.llm_proxy_url
+    cfg.scanner_ca_bundle_path = payload.scanner_ca_bundle_path
+    cfg.llm_ca_bundle_path = payload.llm_ca_bundle_path
     cfg.proxy_scanner = payload.proxy_scanner
     cfg.proxy_llm = payload.proxy_llm
     cfg.updated_at = _utcnow()
@@ -532,36 +535,6 @@ def upsert_reporting_debug_config(
     session.commit()
     session.refresh(cfg)
     return get_reporting_debug_config(session)
-
-
-def get_benchmark_lab_config(session: Session) -> BenchmarkLabConfigOut:
-    cfg = session.get(BenchmarkLabConfig, _SINGLETON_ID)
-    if cfg is None:
-        return BenchmarkLabConfigOut(
-            **BenchmarkLabConfigIn().model_dump(), updated_at=_utcnow()
-        )
-    return BenchmarkLabConfigOut(
-        panel_enabled=cfg.panel_enabled,
-        default_match_mode=cfg.default_match_mode,
-        default_repetitions=cfg.default_repetitions,
-        updated_at=cfg.updated_at,
-    )
-
-
-def upsert_benchmark_lab_config(
-    session: Session, payload: BenchmarkLabConfigIn
-) -> BenchmarkLabConfigOut:
-    cfg = session.get(BenchmarkLabConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = BenchmarkLabConfig(id=_SINGLETON_ID)
-    cfg.panel_enabled = payload.panel_enabled
-    cfg.default_match_mode = payload.default_match_mode
-    cfg.default_repetitions = payload.default_repetitions
-    cfg.updated_at = _utcnow()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return get_benchmark_lab_config(session)
 
 
 def get_browser_debug_config(session: Session) -> BrowserDebugConfigOut:

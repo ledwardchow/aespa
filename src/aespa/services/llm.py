@@ -14,8 +14,10 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
-from contextlib import asynccontextmanager
+from collections import OrderedDict
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +27,7 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 from urllib.parse import quote
 
 import httpx
+import httpx2
 
 from aespa.models import LLMConfig
 from aespa.services.prompts.login_action import LOGIN_ACTION_PROMPT
@@ -58,9 +61,16 @@ from aespa.services.prompts.validator import (
     _VALIDATION_VERDICT_PROMPT,
     VALIDATOR_AGENT_TOOLS,  # noqa: F401 — re-exported via aespa.services.llm
 )
+from aespa.services.tls import httpx_verify
 
 log = logging.getLogger("aespa.llm")
 traffic_log = logging.getLogger("aespa.llm.traffic")
+
+
+def describe_exception(exc: Exception) -> str:
+    """Keep errors with no message useful in saved scan events."""
+    return str(exc).strip() or type(exc).__name__
+
 
 _tool_text_delta_var: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar(
     "llm_tool_text_delta", default=None
@@ -133,6 +143,7 @@ def _is_llm_refusal(exc: BaseException) -> bool:
 
 
 _llm_proxy_var: ContextVar[str | None] = ContextVar("_llm_proxy", default=None)
+_llm_ca_bundle_var: ContextVar[str | None] = ContextVar("_llm_ca_bundle", default=None)
 _run_id_var: ContextVar[int | None] = ContextVar("_run_id", default=None)
 _run_kind_var: ContextVar[str] = ContextVar("_run_kind", default="web")
 _emit_fn_var: ContextVar[Any | None] = ContextVar("_emit_fn", default=None)
@@ -152,6 +163,9 @@ _traffic_operation_var: ContextVar[str | None] = ContextVar(
 )
 _operation_var: ContextVar[str | None] = ContextVar("llm_operation", default=None)
 _traffic_call_ids = itertools.count(1)
+_traffic_prefixes: OrderedDict[str, int] = OrderedDict()
+_TRAFFIC_PREFIX_LIMIT = 4096
+_traffic_prefix_lock = threading.Lock()
 
 
 def _usage_provider(config: LLMConfig) -> str:
@@ -1070,6 +1084,22 @@ def set_llm_proxy(url: str | None) -> None:
     _llm_proxy_var.set(url)
 
 
+def set_llm_ca_bundle(path: str | None) -> None:
+    _llm_ca_bundle_var.set(path)
+
+
+@contextmanager
+def llm_transport_scope(proxy_url: str | None, ca_bundle_path: str | None):
+    """Use one request's LLM network settings without changing other tasks."""
+    proxy_token = _llm_proxy_var.set(proxy_url)
+    ca_token = _llm_ca_bundle_var.set(ca_bundle_path)
+    try:
+        yield
+    finally:
+        _llm_ca_bundle_var.reset(ca_token)
+        _llm_proxy_var.reset(proxy_token)
+
+
 def _emit_run_event(event: dict) -> None:
     """Emit an event to whatever log is wired for the active run.
 
@@ -1157,8 +1187,8 @@ def _llm_client_kwargs() -> dict:
     """
     proxy = _llm_proxy_var.get()
     return {
-        "http_client": httpx.AsyncClient(
-            verify=proxy is None,
+        "http_client": httpx2.AsyncClient(
+            verify=httpx_verify(_llm_ca_bundle_var.get(), proxy is None),
             headers=_LLM_HEADERS,
             **{"proxy": proxy} if proxy else {},
         )
@@ -1172,7 +1202,7 @@ def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
     configured (HTTPS interception). See ``_llm_client_kwargs`` for rationale.
     """
     proxy = _llm_proxy_var.get()
-    kwargs.setdefault("verify", proxy is None)
+    kwargs.setdefault("verify", _llm_ca_bundle_var.get() or proxy is None)
     kwargs["headers"] = {**_LLM_HEADERS, **kwargs.get("headers", {})}
     if proxy:
         kwargs["proxy"] = proxy
@@ -1190,6 +1220,23 @@ def _bedrock_botocore_config(proxy_url: str | None):
     if proxy_url:
         kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
     return BotocoreConfig(**kwargs)
+
+
+def _bedrock_session(profile: str | None, proxy_url: str | None, ca_bundle: str | None):
+    """Give Bedrock and any AWS credential refresh the same network settings."""
+    import boto3
+
+    session_kwargs = {"profile_name": profile} if profile else {}
+    if ca_bundle or proxy_url:
+        import botocore.session
+
+        core_session = botocore.session.get_session()
+        if ca_bundle:
+            core_session.set_config_variable("ca_bundle", ca_bundle)
+        if proxy_url:
+            core_session.set_default_client_config(_bedrock_botocore_config(proxy_url))
+        session_kwargs["botocore_session"] = core_session
+    return boto3.Session(**session_kwargs)
 
 
 def _bedrock_http_timeout() -> httpx.Timeout:
@@ -1778,6 +1825,53 @@ def _infer_llm_operation() -> str:
     return f"{module}.{function}"
 
 
+def _traffic_request_payload(
+    system_message: str,
+    messages: list[dict],
+    call_id: int,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build the logged request, replacing a known conversation prefix by a link.
+
+    The full request is logged the first time a conversation is seen. Later
+    requests that extend an already logged conversation record only the new
+    messages plus the call ID that holds the earlier ones.
+    """
+    if not traffic_log.isEnabledFor(logging.INFO):
+        return {}
+    digest = hashlib.sha256(system_message.encode("utf-8", "replace"))
+    prefixes: list[str] = []
+    for message in messages:
+        digest.update(
+            json.dumps(message, ensure_ascii=False, sort_keys=True, default=str).encode(
+                "utf-8", "replace"
+            )
+        )
+        prefixes.append(digest.copy().hexdigest())
+    with _traffic_prefix_lock:
+        matched = 0
+        previous_call: int | None = None
+        for index in range(len(prefixes) - 1, -1, -1):
+            found = _traffic_prefixes.get(prefixes[index])
+            if found is not None:
+                matched, previous_call = index + 1, found
+                _traffic_prefixes.move_to_end(prefixes[index])
+                break
+        if prefixes:
+            _traffic_prefixes[prefixes[-1]] = call_id
+            _traffic_prefixes.move_to_end(prefixes[-1])
+            while len(_traffic_prefixes) > _TRAFFIC_PREFIX_LIMIT:
+                _traffic_prefixes.popitem(last=False)
+    if previous_call is None:
+        return {"system": system_message, "messages": messages, **extra}
+    return {
+        "continues_call": previous_call,
+        "previous_messages": matched,
+        "new_messages": messages[matched:],
+        **extra,
+    }
+
+
 def _log_llm_traffic(
     direction: str,
     config: LLMConfig,
@@ -1896,7 +1990,7 @@ async def stream_chat_completion(
 ) -> AsyncGenerator[str, None]:
     operation = _operation_var.get() or _infer_llm_operation()
     call_id = next(_traffic_call_ids)
-    request = {"system": system_message, "messages": messages}
+    request = _traffic_request_payload(system_message, messages, call_id)
     _log_llm_traffic(
         "REQUEST",
         config,
@@ -2059,6 +2153,7 @@ async def _stream_chat_completion_impl(
                 raise RuntimeError(f"Bedrock API key stream failed: {e}") from e
         else:
             _proxy_url = _llm_proxy_var.get()
+            _ca_bundle = _llm_ca_bundle_var.get()
             _model = config.model
             _messages = converse_messages
             _system = system_list
@@ -2068,18 +2163,15 @@ async def _stream_chat_completion_impl(
             _endpoint = config.base_url or None
 
             def _run_converse_stream():
-                import boto3
-
                 region = _bedrock_region(config)
                 profile = config.aws_profile or os.getenv("AWS_PROFILE")
-                session_kwargs = {"profile_name": profile} if profile else {}
-                session = boto3.Session(**session_kwargs)
+                session = _bedrock_session(profile, _proxy_url, _ca_bundle)
                 _boto_cfg = _bedrock_botocore_config(_proxy_url)
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=_endpoint,
-                    verify=not _proxy_url,
+                    verify=_ca_bundle or not _proxy_url,
                     config=_boto_cfg,
                 )
                 return client.converse_stream(
@@ -2530,7 +2622,7 @@ def _bedrock_reasoning_fields(config: LLMConfig) -> dict[str, Any]:
         return {}
     return {
         "thinking": {"type": "adaptive"},
-        "outputConfig": {"effort": config.reasoning_effort},
+        "output_config": {"effort": config.reasoning_effort},
     }
 
 
@@ -2683,7 +2775,7 @@ def _make_google_client(config: LLMConfig):
     elif config.base_url:
         _g_http_opts["base_url"] = config.base_url
     _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=_g_proxy is None,
+        verify=httpx_verify(_llm_ca_bundle_var.get(), _g_proxy is None),
         headers=_LLM_HEADERS,
         **({"proxy": _g_proxy} if _g_proxy else {}),
     )
@@ -3191,10 +3283,15 @@ def _make_responses_client(config: LLMConfig) -> Any:
 async def _make_chatgpt_plan_client(config: LLMConfig) -> Any:
     from openai import AsyncOpenAI
 
-    from aespa.services import chatgpt_plan
+    from aespa.services import chatgpt_plan, llm_sign_in_stop
 
+    try:
+        api_key = await chatgpt_plan.access_token(getattr(config, "username", None))
+    except chatgpt_plan.ChatGPTSignInRequired as exc:
+        llm_sign_in_stop.schedule_stop(_run_kind_var.get(), _run_id_var.get(), str(exc))
+        raise
     return AsyncOpenAI(
-        api_key=await chatgpt_plan.access_token(getattr(config, "username", None)),
+        api_key=api_key,
         base_url="https://api.openai.com/v1",
         max_retries=0,
         **_llm_client_kwargs(),
@@ -3209,6 +3306,32 @@ async def _add_daybreak_access(config: LLMConfig, kwargs: dict[str, Any]) -> Non
     )
     if program:
         kwargs["extra_body"] = {"access_programs": {"cyber": program}}
+
+
+async def _create_chatgpt_plan_stream(client: Any, kwargs: dict[str, Any]) -> Any:
+    """Retry connection timeouts before the provider receives a request."""
+    from openai import APITimeoutError
+
+    for attempt in range(3):
+        try:
+            return await client.responses.create(**kwargs)
+        except (APITimeoutError, httpx.ConnectTimeout, httpx2.ConnectTimeout) as exc:
+            connect_timeout = isinstance(
+                exc, (httpx.ConnectTimeout, httpx2.ConnectTimeout)
+            )
+            if isinstance(exc, APITimeoutError):
+                connect_timeout = isinstance(
+                    exc.__cause__, (httpx.ConnectTimeout, httpx2.ConnectTimeout)
+                )
+            if not connect_timeout or attempt == 2:
+                raise
+            delay = 2**attempt
+            log.warning(
+                "ChatGPT connection timed out; retrying request %s/3 in %ss",
+                attempt + 2,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
 
 async def _chatgpt_plan_response(
@@ -3226,7 +3349,7 @@ async def _chatgpt_plan_response(
         completed = None
         output_items: list[Any] = []
         try:
-            stream = await client.responses.create(**kwargs)
+            stream = await _create_chatgpt_plan_stream(client, kwargs)
             async for event in stream:
                 event_type = getattr(event, "type", None)
                 if event_type == "response.output_text.delta" and on_text_delta:
@@ -3363,6 +3486,8 @@ def _responses_request_kwargs(
             ]
         if config.reasoning_effort:
             kwargs["reasoning"] = {"effort": config.reasoning_effort}
+        if getattr(config, "service_tier", None):
+            kwargs["service_tier"] = config.service_tier
         return kwargs
     prompt_cache_key = _grok_prompt_cache_key(
         config,
@@ -4087,7 +4212,7 @@ def _bedrock_mantle_region_from_url(base_url: str) -> str:
     return match.group(1) if match else _bedrock_mantle_region()
 
 
-class _BedrockMantleSigV4Auth(httpx.Auth):
+class _BedrockMantleSigV4Auth(httpx2.Auth):
     """httpx auth flow that SigV4-signs Bedrock Mantle requests with AWS creds.
 
     Lets the OpenAI SDK reach the OpenAI-compatible Mantle endpoint using the
@@ -4107,12 +4232,13 @@ class _BedrockMantleSigV4Auth(httpx.Auth):
 
     def _resolve_credentials(self):
         if self._credentials is None:
-            import boto3
+            from aespa.services.llm_network import configured_llm_network
 
-            session = (
-                boto3.Session(profile_name=self._profile)
-                if self._profile
-                else boto3.Session()
+            saved_proxy, saved_ca = configured_llm_network()
+            session = _bedrock_session(
+                self._profile,
+                _llm_proxy_var.get() or saved_proxy,
+                _llm_ca_bundle_var.get() or saved_ca,
             )
             creds = session.get_credentials()
             if creds is None:
@@ -4124,7 +4250,7 @@ class _BedrockMantleSigV4Auth(httpx.Auth):
             self._credentials = creds
         return self._credentials
 
-    def _sign(self, request: httpx.Request) -> None:
+    def _sign(self, request: httpx2.Request) -> None:
         from botocore.auth import SigV4Auth
         from botocore.awsrequest import AWSRequest
 
@@ -4148,11 +4274,11 @@ class _BedrockMantleSigV4Auth(httpx.Auth):
         for key, value in aws_request.headers.items():
             request.headers[key] = value
 
-    def sync_auth_flow(self, request: httpx.Request):
+    def sync_auth_flow(self, request: httpx2.Request):
         self._sign(request)
         yield request
 
-    async def async_auth_flow(self, request: httpx.Request):
+    async def async_auth_flow(self, request: httpx2.Request):
         # botocore credential resolution / signing is synchronous and may touch
         # the filesystem or IMDS on first use; keep it off the event loop.
         await asyncio.get_running_loop().run_in_executor(None, self._sign, request)
@@ -4186,8 +4312,8 @@ def _make_bedrock_mantle_client(config: LLMConfig):
         region=_bedrock_mantle_region_from_url(base_url),
         profile=config.aws_profile or os.getenv("AWS_PROFILE"),
     )
-    http_client = httpx.AsyncClient(
-        verify=proxy is None,
+    http_client = httpx2.AsyncClient(
+        verify=httpx_verify(_llm_ca_bundle_var.get(), proxy is None),
         headers=_LLM_HEADERS,
         auth=signer,
         **({"proxy": proxy} if proxy else {}),
@@ -4220,8 +4346,8 @@ def _make_bedrock_mantle_anthropic_client(config: LLMConfig):
         region=_bedrock_mantle_region_from_url(base_url),
         profile=config.aws_profile or os.getenv("AWS_PROFILE"),
     )
-    http_client = httpx.AsyncClient(
-        verify=proxy is None,
+    http_client = httpx2.AsyncClient(
+        verify=httpx_verify(_llm_ca_bundle_var.get(), proxy is None),
         headers=_LLM_HEADERS,
         auth=signer,
         **({"proxy": proxy} if proxy else {}),
@@ -4265,25 +4391,23 @@ async def _bedrock(
     if not config.api_key:
         import asyncio as _aio
 
-        import boto3
-
         region = _bedrock_region(config)
         profile = config.aws_profile or os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
+        _ca_bundle = _llm_ca_bundle_var.get()
         _model = config.model
         _messages = payload["messages"]
         _infer = payload["inferenceConfig"]
         _endpoint = config.base_url or None
 
         def _run_sync() -> dict:
-            _session_kwargs = {"profile_name": profile} if profile else {}
-            _session = boto3.Session(**_session_kwargs)
+            _session = _bedrock_session(profile, _proxy_url, _ca_bundle)
             _boto_cfg = _bedrock_botocore_config(_proxy_url)
             _client = _session.client(
                 "bedrock-runtime",
                 region_name=region,
                 endpoint_url=_endpoint,
-                verify=not _proxy_url,
+                verify=_ca_bundle or not _proxy_url,
                 config=_boto_cfg,
             )
             return _client.converse(
@@ -5000,10 +5124,13 @@ async def normalize_finding_titles(
 
     existing_list = "\n".join(
         f"  {i + 1}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f['title']}"
+        + f"\n     url: {str(f.get('affected_url') or '')[:200]}"
+        + f"\n     desc: {str(f.get('description') or '')[:180]}"
         for i, f in enumerate(existing_findings[:60])
     )
     new_list = "\n".join(
         f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f.get('title', '?')}"
+        + f"\n     url: {str(f.get('affected_url') or '')[:200]}"
         + (
             f"\n     desc: {(f.get('description') or '')[:120]}"
             if f.get("description")
@@ -6174,11 +6301,12 @@ async def _call_with_tools(
     call_id = next(_traffic_call_ids)
     active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
     messages = _repair_tool_use_inputs(messages)
-    request = {
-        "system": system_message,
-        "messages": messages,
-        "tools": [tool.get("name", "") for tool in active_tools],
-    }
+    request = _traffic_request_payload(
+        system_message,
+        messages,
+        call_id,
+        tools=[tool.get("name", "") for tool in active_tools],
+    )
     _log_llm_traffic(
         "REQUEST",
         config,
@@ -6669,6 +6797,7 @@ async def _call_with_tools_impl(
             # Env-credential path (IAM role, ~/.aws/credentials, instance profile …).
             # Capture proxy URL now — ContextVar values are not inherited by threads.
             _proxy_url = _llm_proxy_var.get()
+            _ca_bundle = _llm_ca_bundle_var.get()
             _on_text_delta = _tool_text_delta_var.get()
             loop = _asyncio.get_event_loop()
 
@@ -6680,18 +6809,15 @@ async def _call_with_tools_impl(
                     future.result()
 
             def _run_converse_stream():
-                import boto3
-
                 region = _bedrock_region(config)
                 profile = config.aws_profile or os.getenv("AWS_PROFILE")
-                session_kwargs = {"profile_name": profile} if profile else {}
-                session = boto3.Session(**session_kwargs)
+                session = _bedrock_session(profile, _proxy_url, _ca_bundle)
                 _boto_cfg = _bedrock_botocore_config(_proxy_url)
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=config.base_url or None,
-                    verify=not _proxy_url,
+                    verify=_ca_bundle or not _proxy_url,
                     config=_boto_cfg,
                 )
                 _infer_converse: dict = {"maxTokens": config.max_tokens}
@@ -7760,10 +7886,11 @@ async def thinking_agentic_loop(
                             pass
                 content_blocks, stop_reason, raw_content = _llm_fut.result()
             except Exception as exc:
-                log.error(
+                error_message = describe_exception(exc)
+                log.exception(
                     "thinking_agentic_loop: API error at step %d: %s",
                     tool_call_count + 1,
-                    exc,
+                    error_message,
                 )
                 _is_refusal = _is_llm_refusal(exc)
                 _is_quota_pause = isinstance(exc, LLMQuotaPauseError)
@@ -7786,11 +7913,11 @@ async def thinking_agentic_loop(
                                 "Please refresh your AWS credentials and resume the pentest."
                             )
                         elif _is_refusal:
-                            _msg = f"Step {tool_call_count + 1}: LLM provider refused the scan request — {exc}"
+                            _msg = f"Step {tool_call_count + 1}: LLM provider refused the scan request — {error_message}"
                         elif _is_quota_pause:
-                            _msg = f"Step {tool_call_count + 1}: scan paused because the Codex allowance or rate-limit window is exhausted — {exc}"
+                            _msg = f"Step {tool_call_count + 1}: scan paused because the Codex allowance or rate-limit window is exhausted — {error_message}"
                         else:
-                            _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
+                            _msg = f"Step {tool_call_count + 1}: LLM API error — {error_message}"
                         emit_fn(
                             {
                                 "type": "scanner_phase",
@@ -7799,7 +7926,8 @@ async def thinking_agentic_loop(
                                 "message": _msg,
                                 "data": {
                                     "step": tool_call_count + 1,
-                                    "error": str(exc),
+                                    "error": error_message,
+                                    "error_type": type(exc).__name__,
                                 },
                             }
                         )

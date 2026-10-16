@@ -1,3 +1,4 @@
+import { fmtTime } from "../../shared/lib/dates.js";
 import { normaliseAgentStatus } from "../../shared/runs/AgentStatusRows.jsx";
 
 const FIXED_AGENTS = [
@@ -75,13 +76,7 @@ const FINAL_AGENTS = [
 ];
 
 function eventTime(value) {
-  if (!value) return "--:--:--";
-  return new Date(value).toLocaleTimeString("en-US", {
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return fmtTime(value, "--:--:--");
 }
 
 function inferClassGroup(row) {

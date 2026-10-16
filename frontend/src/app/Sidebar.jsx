@@ -1,7 +1,6 @@
 import {
   IconSites,
   IconApis,
-  IconSettings,
   IconPlay,
   IconShield,
   IconChevronLeft,
@@ -9,10 +8,22 @@ import {
   IconBug,
   IconChart,
   IconSystems,
+  IconCpu,
+  IconPuzzle,
+  IconSliders,
+  IconGauge,
+  IconFlask,
 } from "../shared/ui/Icons.jsx";
 export function Sidebar({ section, collapsed, onToggle, preferences }) {
-  const { appVersion, username, showUsername, showSystems, reportingDebugCfg, benchmarkLabCfg } =
-    preferences;
+  const {
+    appVersion,
+    username,
+    showUsername,
+    showSystems,
+    reportingDebugCfg,
+    benchmarkLabCfg,
+    planUsageCfg,
+  } = preferences;
   const onSites = section === "sites";
   const onApis = section === "apis";
   const onSystems = section === "systems";
@@ -24,6 +35,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
   const onReportingDebug = section === "reporting-debug";
   const onBenchmarkLab = section === "benchmark-lab";
   const onStats = section === "stats";
+  const onPlanUsage = section === "chatgpt-plan-usage";
 
   return (
     <aside className={"sidebar" + (collapsed ? " sidebar--collapsed" : "")}>
@@ -124,11 +136,11 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           </span>
           {!collapsed && " APIs"}
         </a>
-        <a href="#/sast-runs" className={"nav-item" + (onSast ? " active" : "")} title="SAST">
+        <a href="#/sast-runs" className={"nav-item" + (onSast ? " active" : "")} title="SAST Scans">
           <span className="nav-icon">
             <IconShield />
           </span>
-          {!collapsed && " SAST"}
+          {!collapsed && " SAST Scans"}
         </a>
         <a
           href="#/active-jobs"
@@ -145,16 +157,24 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
             Stats
           </div>
         )}
-        <a
-          href="#/stats/usage"
-          className={"nav-item" + (onStats ? " active" : "")}
-          title="Usage statistics"
-        >
+        <a href="#/stats/usage" className={"nav-item" + (onStats ? " active" : "")} title="Usage">
           <span className="nav-icon">
             <IconChart />
           </span>
           {!collapsed && " Usage"}
         </a>
+        {planUsageCfg?.panel_enabled && (
+          <a
+            href="#/stats/chatgpt-plan"
+            className={"nav-item" + (onPlanUsage ? " active" : "")}
+            title="ChatGPT Plan Usage"
+          >
+            <span className="nav-icon">
+              <IconGauge />
+            </span>
+            {!collapsed && " ChatGPT Plan Usage"}
+          </a>
+        )}
         {!collapsed && (
           <div
             className="nav-section-label"
@@ -171,7 +191,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           title="LLM Configuration"
         >
           <span className="nav-icon">
-            <IconSettings />
+            <IconCpu />
           </span>
           {!collapsed && " LLM Configuration"}
         </a>
@@ -181,7 +201,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           title="Extensions"
         >
           <span className="nav-icon">
-            <IconSettings />
+            <IconPuzzle />
           </span>
           {!collapsed && " Extensions"}
         </a>
@@ -191,7 +211,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           title="Settings"
         >
           <span className="nav-icon">
-            <IconSettings />
+            <IconSliders />
           </span>
           {!collapsed && " Settings"}
         </a>
@@ -226,7 +246,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
                 title="Benchmark Lab"
               >
                 <span className="nav-icon">
-                  <IconChart />
+                  <IconFlask />
                 </span>
                 {!collapsed && " Benchmark Lab"}
               </a>

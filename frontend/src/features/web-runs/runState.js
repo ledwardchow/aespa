@@ -9,6 +9,7 @@ export const canResumeSelectedScanMode = (hasCheckpoint, selectedMode, savedMode
 
 export const RUN_PRIMARY_ACTION = Object.freeze({
   START_CRAWL: "start_crawl",
+  START_CRAWL_THEN_PENTEST: "start_crawl_then_pentest",
   START_PENTEST: "start_pentest",
   RESUME_PENTEST: "resume_pentest",
 });

@@ -11,8 +11,6 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import Session, select
 
-from aespa.schemas import BenchmarkGroundTruth
-
 from .models import (
     Comparison,
     Dataset,
@@ -22,6 +20,7 @@ from .models import (
     ScanResult,
     TransferIdentity,
 )
+from .schemas import BenchmarkGroundTruth
 
 MODELS = {"results": ScanResult, "evaluations": Evaluation, "comparisons": Comparison}
 

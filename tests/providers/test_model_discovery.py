@@ -4,10 +4,21 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from aespa.models import UpstreamProxyConfig
 from aespa.services import model_discovery, settings
 
 
-def test_discover_openai_models():
+def test_discover_openai_models(db_session, fake_ssl_context):
+    db_session.add(
+        UpstreamProxyConfig(
+            id=1,
+            proxy_llm=True,
+            llm_proxy_url="http://proxy.example:8080",
+            llm_ca_bundle_path="/tmp/company-ca.pem",
+        )
+    )
+    db_session.commit()
+    captured = {}
     mock_response = MagicMock()
     mock_response.json.return_value = {
         "data": [
@@ -19,7 +30,7 @@ def test_discover_openai_models():
 
     class _MockClient:
         def __init__(self, **kwargs):
-            pass
+            captured.update(kwargs)
 
         async def __aenter__(self):
             return self
@@ -34,6 +45,8 @@ def test_discover_openai_models():
     with patch("httpx.AsyncClient", _MockClient):
         models = asyncio.run(model_discovery.discover_openai_models(api_key="test-key"))
         assert models == ["gpt-4o", "gpt-4o-mini"]
+    assert captured["proxy"] == "http://proxy.example:8080"
+    assert captured["verify"] == fake_ssl_context("/tmp/company-ca.pem")
 
 
 def test_discover_bedrock_mantle_models_uses_v1_models_route():
@@ -60,7 +73,7 @@ def test_discover_bedrock_mantle_models_uses_v1_models_route():
             captured["url"] = url
             return mock_response
 
-    with patch("httpx.AsyncClient", _MockClient):
+    with patch("httpx2.AsyncClient", _MockClient):
         records = asyncio.run(
             model_discovery.discover_bedrock_mantle_model_options(
                 api_key="mantle-key",
@@ -104,7 +117,7 @@ def test_discover_bedrock_mantle_models_uses_sigv4_without_api_key(monkeypatch):
 
     monkeypatch.setenv("AWS_PROFILE", "mantle-dev")
     monkeypatch.setattr("aespa.services.llm._BedrockMantleSigV4Auth", _MockSigner)
-    with patch("httpx.AsyncClient", _MockClient):
+    with patch("httpx2.AsyncClient", _MockClient):
         asyncio.run(
             model_discovery.discover_bedrock_mantle_model_options(
                 base_url="https://bedrock-mantle.eu-west-1.api.aws",
@@ -114,6 +127,30 @@ def test_discover_bedrock_mantle_models_uses_sigv4_without_api_key(monkeypatch):
 
     assert captured["signer"] == {"region": "eu-west-1", "profile": "mantle-selected"}
     assert captured["client"]["auth"] is signer
+
+
+def test_discover_bedrock_mantle_models_accepts_real_sigv4_signer(monkeypatch):
+    """The real signer must be accepted by the real HTTP client used here."""
+    from aespa.services.llm import _BedrockMantleSigV4Auth
+
+    captured: dict[str, object] = {}
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"data": [{"id": "nvidia.nemotron"}]}
+
+    async def _fake_get(self, url):
+        captured["auth"] = self.auth
+        return mock_response
+
+    monkeypatch.setattr("httpx2.AsyncClient.get", _fake_get)
+    records = asyncio.run(
+        model_discovery.discover_bedrock_mantle_model_options(
+            base_url="https://bedrock-mantle.us-east-1.api.aws",
+            profile="mantle-selected",
+        )
+    )
+
+    assert isinstance(captured["auth"], _BedrockMantleSigV4Auth)
+    assert [record["id"] for record in records] == ["nvidia.nemotron"]
 
 
 def test_provider_model_discovery_sorts_and_deduplicates_all_formats(monkeypatch):

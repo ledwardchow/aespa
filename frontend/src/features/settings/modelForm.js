@@ -38,6 +38,7 @@ export function llmProfileToForm(cfg, providers = []) {
       use_vision: cfg.use_vision ?? false,
       force_tool_choice: cfg.force_tool_choice ?? false,
       reasoning_effort: cfg.reasoning_effort || "",
+      service_tier: cfg.service_tier || "",
     };
   }
   const defaultModel = sortModelNames(provider?.models)[0] || "";
@@ -68,5 +69,6 @@ export function llmPayload(form) {
     use_vision: form.use_vision,
     force_tool_choice: form.force_tool_choice,
     reasoning_effort: form.reasoning_effort || null,
+    service_tier: form.service_tier || null,
   };
 }

@@ -8,6 +8,11 @@
   margin: 0 -28px;
 }
 
+.run-usage-bars {
+  flex-shrink: 0;
+  margin: 0 -28px;
+}
+
 /* Site plan card */
 .site-plan-card {
   flex-shrink: 0;
@@ -117,7 +122,7 @@
   border-bottom: 1px solid transparent;
 }
 .activity-entry:hover {
-  background: var(--hover, rgba(255, 255, 255, 0.03));
+  background: var(--hover);
 }
 .activity-ts {
   flex-shrink: 0;
@@ -585,10 +590,6 @@
 .web-run-coverage-tab .intel-panel {
   margin: 0;
 }
-.coverage-sub-tab-bar {
-  gap: 0;
-  padding: 0 28px;
-}
 .activity-sub-tab-btn {
   flex: 0 0 auto;
   background: none;
@@ -604,9 +605,6 @@
   transition:
     color 0.15s,
     border-color 0.15s;
-}
-.coverage-sub-tab-btn {
-  padding-inline: 16px;
 }
 .activity-sub-tab-btn:hover {
   color: var(--text);
@@ -646,7 +644,7 @@
   cursor: pointer;
 }
 .agent-row--expandable:hover {
-  background: var(--hover, rgba(255, 255, 255, 0.03));
+  background: var(--hover);
 }
 .agent-row--active {
   order: 0;

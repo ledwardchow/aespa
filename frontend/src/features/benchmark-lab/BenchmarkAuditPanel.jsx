@@ -1,3 +1,4 @@
+import { fmtDate } from "../../shared/lib/dates.js";
 function checkStatus(value) {
   if (value && typeof value === "object") return checkStatus(value.status);
   if (value === true || value === "valid" || value === "pass" || value === "passed") return "pass";
@@ -55,7 +56,7 @@ export function BenchmarkAuditPanel({ evaluation }) {
         <dt>Matching version</dt>
         <dd>{evaluation?.matching_version || "—"}</dd>
         <dt>Created</dt>
-        <dd>{evaluation?.created_at ? new Date(evaluation.created_at).toLocaleString() : "—"}</dd>
+        <dd>{evaluation?.created_at ? fmtDate(evaluation.created_at) : "—"}</dd>
       </dl>
     </div>
   );

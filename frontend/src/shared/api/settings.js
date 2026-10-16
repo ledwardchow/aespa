@@ -97,6 +97,10 @@ export const getScannerPolicy = () => req("/api/settings/scanner-policy");
 export const upsertScannerPolicy = (b) =>
   req("/api/settings/scanner-policy", { method: "PUT", body: b });
 
+export const getRetireListStatus = () => req("/api/settings/retire-list");
+
+export const refreshRetireList = () => req("/api/settings/retire-list/refresh", { method: "POST" });
+
 export const getCodeExecutionConfig = () => req("/api/settings/code-execution");
 
 export const upsertCodeExecutionConfig = (b) =>
@@ -144,11 +148,6 @@ export const getReportingDebugConfig = () => req("/api/settings/reporting-debug"
 
 export const upsertReportingDebugConfig = (b) =>
   req("/api/settings/reporting-debug", { method: "PUT", body: b });
-
-export const getBenchmarkLabConfig = () => req("/api/settings/benchmark-lab");
-
-export const upsertBenchmarkLabConfig = (b) =>
-  req("/api/settings/benchmark-lab", { method: "PUT", body: b });
 
 export const getBrowserDebugConfig = () => req("/api/settings/browser-debug");
 

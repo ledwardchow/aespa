@@ -79,6 +79,77 @@ def test_scan_guidance_round_trips(client):
     assert upd.json()["scan_guidance"] == "Updated steps."
 
 
+def test_site_workflow_data_can_be_edited_without_a_run(client):
+    workflow = {
+        "name": "Checkout",
+        "goal": "Open checkout form",
+        "start_url": "https://juice.local/cart",
+        "instructions": "Add the sample product",
+    }
+    created = make_site(client, name="With workflow", workflow_data=[workflow])
+    assert created.status_code == 201
+    site_id = created.json()["id"]
+    assert created.json()["workflow_data"][0] == workflow
+
+    detail = client.get(f"/api/sites/{site_id}")
+    assert detail.json()["workflow_data"] == [workflow]
+    updated = client.put(
+        f"/api/sites/{site_id}",
+        json={
+            "name": "With workflow",
+            "base_url": "https://juice.local",
+            "requires_auth": False,
+            "workflow_data": [{**workflow, "instructions": "Use a sample keyboard"}],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["workflow_data"][0]["instructions"] == "Use a sample keyboard"
+
+    unchanged = client.put(
+        f"/api/sites/{site_id}",
+        json={"name": "With workflow", "base_url": "https://juice.local"},
+    )
+    assert unchanged.status_code == 200
+    assert (
+        unchanged.json()["workflow_data"][0]["instructions"] == "Use a sample keyboard"
+    )
+
+
+def test_site_export_keeps_saved_workflow_data(session):
+    workflow = {
+        "name": "Checkout",
+        "goal": "Open checkout form",
+        "start_url": "https://juice.local/cart",
+        "instructions": "Add a sample keyboard",
+    }
+    site = Site(
+        name="With workflow",
+        base_url="https://juice.local",
+        workflow_data_json=json.dumps([workflow]),
+    )
+    session.add(site)
+    session.commit()
+    imported = sites_service.import_site(
+        session, sites_service.export_site(session, site.id)
+    )
+    assert sites_service.workflow_data_for_site(imported) == [workflow]
+
+
+def test_site_rejects_workflow_data_for_another_host(client):
+    response = make_site(
+        client,
+        workflow_data=[
+            {
+                "name": "Other",
+                "goal": "Open external form",
+                "start_url": "https://other.test/form",
+                "instructions": "Use test data",
+            }
+        ],
+    )
+    assert response.status_code == 422
+
+
 def test_create_site_with_auth_and_credentials(client):
     r = make_site(
         client,
@@ -334,6 +405,93 @@ def test_update_site_replaces_credentials(client):
     assert usernames == {"x", "y"}
 
 
+def test_update_site_keeps_existing_credential_ids(client, session):
+    created = make_site(
+        client,
+        name="Stable credentials",
+        requires_auth=True,
+        login_url="https://auth.local/login",
+        credentials=[
+            {
+                "username": "same-user",
+                "password": "old-1",
+                "label": "first",
+                "totp_seed": "JBSWY3DPEHPK3PXP",
+            },
+            {"username": "same-user", "password": "old-2", "label": "second"},
+        ],
+    ).json()
+    first, second = created["credentials"]
+    updated = client.put(
+        f"/api/sites/{created['id']}",
+        json={
+            "name": "Stable credentials",
+            "base_url": "https://auth.local",
+            "requires_auth": True,
+            "login_url": "https://auth.local/login",
+            "credentials": [
+                {
+                    "id": first["id"],
+                    "username": "renamed",
+                    "password": "new-1",
+                    "label": "first",
+                },
+                {
+                    "id": second["id"],
+                    "username": "same-user",
+                    "password": "old-2",
+                    "label": "second",
+                },
+            ],
+        },
+    )
+    assert updated.status_code == 200
+    assert {c["id"] for c in updated.json()["credentials"]} == {
+        first["id"],
+        second["id"],
+    }
+    assert session.get(Credential, first["id"]).password == "new-1"
+    assert session.get(Credential, first["id"]).totp_seed == "JBSWY3DPEHPK3PXP"
+
+    invalid = client.put(
+        f"/api/sites/{created['id']}",
+        json={
+            "name": "Stable credentials",
+            "base_url": "https://auth.local",
+            "requires_auth": True,
+            "login_url": "https://auth.local/login",
+            "credentials": [{"id": 99999, "username": "bad", "password": "bad"}],
+        },
+    )
+    assert invalid.status_code == 400
+    assert {
+        c["id"] for c in client.get(f"/api/sites/{created['id']}").json()["credentials"]
+    } == {first["id"], second["id"]}
+
+
+def test_update_site_matches_unique_username_without_id(client):
+    created = make_site(
+        client,
+        name="Older API client",
+        requires_auth=True,
+        login_url="https://auth.local/login",
+        credentials=[{"username": "a", "password": "old"}],
+    ).json()
+    old_id = created["credentials"][0]["id"]
+    updated = client.put(
+        f"/api/sites/{created['id']}",
+        json={
+            "name": "Older API client",
+            "base_url": "https://auth.local",
+            "requires_auth": True,
+            "login_url": "https://auth.local/login",
+            "credentials": [{"username": "a", "password": "new"}],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["credentials"][0]["id"] == old_id
+
+
 def test_update_site_not_found(client):
     r = client.put(
         "/api/sites/9999",
@@ -398,29 +556,15 @@ def test_add_credential(client):
     ).json()
     r = client.post(
         f"/api/sites/{site['id']}/credentials",
-        json={"username": "newuser", "password": "newpass", "label": "tester"},
-    )
-    assert r.status_code == 201
-    assert r.json()["username"] == "newuser"
-
-
-def test_add_credential_accepts_login_url(client):
-    site = make_site(
-        client,
-        name="Auth Site",
-        requires_auth=True,
-        login_url="https://auth.local/login",
-    ).json()
-    r = client.post(
-        f"/api/sites/{site['id']}/credentials",
         json={
-            "username": "admin",
+            "username": "newuser",
             "password": "newpass",
+            "label": "tester",
             "login_url": "https://auth.local/admin/login",
         },
     )
-
     assert r.status_code == 201
+    assert r.json()["username"] == "newuser"
     assert r.json()["login_url"] == "https://auth.local/admin/login"
 
 

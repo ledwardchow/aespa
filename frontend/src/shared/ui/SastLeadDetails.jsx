@@ -88,11 +88,13 @@ export function SastLeadDetails({ lead, showSummary = true, findingHref }) {
             )}
             <MetaItem label="Source" value={lead.source} />
             <MetaItem
-              label="Source SAST run"
+              label={lead.producer_run_type === "external" ? "Source report" : "Source SAST run"}
               value={
-                lead.producer_run_id
-                  ? `${lead.producer_run_type || "run"} #${lead.producer_run_id}`
-                  : null
+                lead.producer_run_type === "external"
+                  ? source.external_report?.filename
+                  : lead.producer_run_id
+                    ? `${lead.producer_run_type || "run"} #${lead.producer_run_id}`
+                    : null
               }
             />
             <MetaItem

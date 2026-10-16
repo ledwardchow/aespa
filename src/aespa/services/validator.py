@@ -46,9 +46,22 @@ from aespa.services.settings import (
     get_adversarial_validator_config,
     get_llm_config_for_role,
     get_run_scanner_policy,
+    get_upstream_proxy_config,
 )
 
 log = logging.getLogger("aespa.validator")
+
+
+def _apply_traffic_settings() -> None:
+    with Session(get_engine()) as session:
+        config = get_upstream_proxy_config(session)
+    scanner_svc._scanner_proxy_var.set(
+        config.scanner_proxy_url if config.proxy_scanner else None
+    )
+    scanner_svc._scanner_ca_bundle_var.set(config.scanner_ca_bundle_path)
+    llm_svc.set_llm_proxy(config.llm_proxy_url if config.proxy_llm else None)
+    llm_svc.set_llm_ca_bundle(config.llm_ca_bundle_path)
+
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -330,6 +343,7 @@ async def _validate_finding_inline(
     scanner_policy=None,
 ) -> None:
     """Validate a newly-created finding while a scan is still running."""
+    _apply_traffic_settings()
     with Session(get_engine()) as s:
         finding = s.get(ScanFinding, finding_id)
         run = s.get(TestRun, run_id)
@@ -454,6 +468,7 @@ async def _validation_task(
 ) -> None:
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
     try:
+        _apply_traffic_settings()
         await _do_validate(
             run_id,
             finding_ids=finding_ids,
@@ -937,7 +952,7 @@ async def _validator_http_request(
             headers=hdrs,
             timeout=REQUEST_TIMEOUT,
             follow_redirects=getattr(scanner_policy, "follow_redirects", True),
-            verify=False,
+            verify=scanner_svc._scanner_tls_verify(),
             page_id=(traffic_provenance or {}).get("page_id"),
             provenance=traffic_provenance,
         ) as client:
@@ -1093,6 +1108,7 @@ async def _validate_one(
             reasoning,
             validation_results=[],
             source="deterministic_validation",
+            expected_finding=finding,
         )
         if verdict == "confirmed":
             await _attach_poc_if_confirmed(
@@ -1121,6 +1137,7 @@ async def _validate_one(
             f"Not validated: severity '{finding.severity}' is below the configured threshold '{validator_cfg.min_severity}'.",
             validation_results=[],
             source="severity_threshold",
+            expected_finding=finding,
         )
         return
 
@@ -1163,6 +1180,7 @@ async def _validate_one(
             reasoning,
             validation_results=[],
             source="adversarial_validator",
+            expected_finding=finding,
         )
         if verdict == "confirmed":
             await _attach_poc_if_confirmed(
@@ -1261,6 +1279,7 @@ async def _validate_one(
         reasoning,
         validation_results=results,
         source="llm_validation",
+        expected_finding=finding,
     )
 
 
@@ -1388,6 +1407,7 @@ async def _persist_verdict(
     *,
     validation_results: list[dict] | None = None,
     source: str = "validation",
+    expected_finding: ScanFinding | None = None,
 ) -> None:
     allowed_verdicts = {
         "confirmed",
@@ -1408,6 +1428,13 @@ async def _persist_verdict(
     with Session(get_engine()) as s:
         row = s.get(ScanFinding, finding_id)
         if row:
+            if expected_finding is not None and (
+                row.title != expected_finding.title
+                or row.severity != expected_finding.severity
+                or row.evidence != expected_finding.evidence
+            ):
+                log.info("Ignoring stale validation for updated finding %s", finding_id)
+                return
             ensure_finding_reference(s, row)
             finding_reference = row.reference
             finding_title = row.title or finding_title
@@ -1717,7 +1744,7 @@ async def _request_access_validation_actor(
             },
             timeout=scanner_policy.request_timeout_s,
             follow_redirects=scanner_policy.follow_redirects,
-            verify=False,
+            verify=scanner_svc._scanner_tls_verify(),
             page_id=finding.page_id,
             provenance={
                 "agent_id": f"validator-{finding.id}",
@@ -2050,6 +2077,13 @@ async def _attach_poc_if_confirmed(
     with Session(get_engine()) as s:
         row = s.get(ScanFinding, finding.id)
         if row is None:
+            return
+        if (
+            row.title != finding.title
+            or row.severity != finding.severity
+            or row.evidence != finding.evidence
+        ):
+            log.info("Ignoring stale PoC for updated finding %s", finding.id)
             return
         row.poc_command = command
         row.poc_setup = setup
@@ -2526,7 +2560,7 @@ async def _run_validation_probe(
             headers=hdrs,
             timeout=scanner_policy.request_timeout_s,
             follow_redirects=scanner_policy.follow_redirects,
-            verify=False,
+            verify=scanner_svc._scanner_tls_verify(),
             provenance={
                 "agent_id": "validator",
                 "purpose": traffic_svc.request_purpose(

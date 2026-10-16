@@ -20,8 +20,8 @@ Tests:
   17. start-scan endpoint persists coverage_mode on the run
   18. _make_web_post_finding_fn cleans comma-separated affected_url lists
   19. _make_web_post_finding_fn strips parenthetical annotations from affected_url
-  20. _make_web_post_finding_fn falls back to finding.page_id when affected_url doesn't match
-  21. _make_web_post_finding_fn prefers finding.page_id over creating a placeholder
+  20. _make_web_post_finding_fn uses an exact affected URL when one matches
+  21. _make_web_post_finding_fn leaves hinted page coverage unchanged for unknown URLs
   22. _clean_affected_url unit cases
   23. ALICE write_finding flips the workprogram cell when the hook is registered
 """
@@ -333,7 +333,7 @@ def test_post_probe_fn_flips_in_progress(db_engine, db_session, run):
     assert cell.status == "in_progress"
 
 
-def test_post_probe_fn_returns_canonical_page_for_query_variant(
+def test_post_probe_fn_does_not_attribute_query_variant_to_existing_page(
     db_engine, db_session, run
 ):
     page = _make_page(
@@ -352,7 +352,15 @@ def test_post_probe_fn_returns_canonical_page_for_query_variant(
         500,
     )
 
-    assert resolved == page.id
+    assert resolved is None
+    db_session.expire_all()
+    cell = db_session.exec(
+        select(PageOwaspTest)
+        .where(PageOwaspTest.test_run_id == run.id)
+        .where(PageOwaspTest.page_id == page.id)
+        .where(PageOwaspTest.owasp_category == "A03")
+    ).one()
+    assert cell.status == "not_started"
     pages = db_session.exec(
         select(CrawledPage).where(CrawledPage.test_run_id == run.id)
     ).all()
@@ -409,31 +417,27 @@ def test_post_probe_fn_noop_blank_category(db_engine, db_session, run):
     assert cell.status == "not_started"
 
 
-# ── 10b. _make_web_post_probe_fn creates a page + cell for unknown URLs ────────
+# ── 10b. HTTP probes do not create crawl pages ────────────────────────────────
 
 
-def test_post_probe_fn_creates_page_for_unknown_url(db_engine, db_session, run):
-    """If the scan probes a URL not yet in the crawl, a placeholder page is created."""
+def test_post_probe_fn_does_not_create_page_for_unknown_url(db_engine, db_session, run):
     fn = _make_web_post_probe_fn(run.id)
-    fn("http://example.com/new-page", "POST", "A03")
+    resolved = fn("http://example.com/new-page", "POST", "A03")
 
     db_session.expire_all()
-    page = db_session.exec(
-        select(CrawledPage)
-        .where(CrawledPage.test_run_id == run.id)
-        .where(CrawledPage.url == "http://example.com/new-page")
-    ).first()
-    assert page is not None
-    assert page.in_scope is True
-
-    cell = db_session.exec(
-        select(PageOwaspTest)
-        .where(PageOwaspTest.test_run_id == run.id)
-        .where(PageOwaspTest.page_id == page.id)
-        .where(PageOwaspTest.owasp_category == "A03")
-    ).first()
-    assert cell is not None
-    assert cell.status == "in_progress"
+    assert resolved is None
+    assert (
+        db_session.exec(
+            select(CrawledPage).where(CrawledPage.test_run_id == run.id)
+        ).all()
+        == []
+    )
+    assert (
+        db_session.exec(
+            select(PageOwaspTest).where(PageOwaspTest.test_run_id == run.id)
+        ).all()
+        == []
+    )
 
 
 # ── 11. _make_web_post_finding_fn flips cell to finding ──────────────────────
@@ -501,11 +505,12 @@ def test_post_finding_fn_uses_affected_url(db_engine, db_session, run):
     assert root_cell.status == "not_started"
 
 
-# ── 11c. _make_web_post_finding_fn creates page for unknown affected_url ───────
+# ── 11c. Findings on unknown URLs do not create crawl pages ────────────────────
 
 
-def test_post_finding_fn_creates_page_for_unknown_url(db_engine, db_session, run):
-    """Finding at a URL not in the crawl gets a placeholder page + cell."""
+def test_post_finding_fn_does_not_create_page_for_unknown_url(
+    db_engine, db_session, run
+):
 
     class _FakeFinding:
         id = 42
@@ -517,20 +522,18 @@ def test_post_finding_fn_creates_page_for_unknown_url(db_engine, db_session, run
     fn(_FakeFinding())
 
     db_session.expire_all()
-    page = db_session.exec(
-        select(CrawledPage)
-        .where(CrawledPage.test_run_id == run.id)
-        .where(CrawledPage.url == "http://example.com/api/health")
-    ).first()
-    assert page is not None
-    cell = db_session.exec(
-        select(PageOwaspTest)
-        .where(PageOwaspTest.test_run_id == run.id)
-        .where(PageOwaspTest.page_id == page.id)
-        .where(PageOwaspTest.owasp_category == "A05")
-    ).first()
-    assert cell is not None
-    assert cell.status == "finding"
+    assert (
+        db_session.exec(
+            select(CrawledPage).where(CrawledPage.test_run_id == run.id)
+        ).all()
+        == []
+    )
+    assert (
+        db_session.exec(
+            select(PageOwaspTest).where(PageOwaspTest.test_run_id == run.id)
+        ).all()
+        == []
+    )
 
 
 # ── 11d. _match_page_for_url does not swallow sub-paths into root ──────────────
@@ -543,7 +546,7 @@ def test_match_page_does_not_match_root_to_subpath(db_engine, db_session, run):
     root = _make_page(db_session, run, "http://example.com/", ["A01"])
     pages = [db_session.get(CrawledPage, root.id)]
     result = _match_page_for_url("http://example.com/api/health", pages)
-    assert result is None  # no match — should create a new placeholder
+    assert result is None
 
 
 # ── 12. get_web_coverage_matrix returns seeded=False when no cells ────────────
@@ -857,74 +860,28 @@ def test_start_scan_accepts_standard_coverage_mode(client, db_engine, db_session
     assert db_session.get(TestRun, run["id"]).coverage_mode == "standard"
 
 
-def test_started_deep_scan_rejects_non_deep_mode(client, db_engine, db_session):
-    site = client.post(
-        "/api/sites", json={"name": "S", "base_url": "http://t.com"}
-    ).json()
-    run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
-    persisted = db_session.get(TestRun, run["id"])
-    persisted.coverage_mode = "deep"
-    db_session.add(persisted)
-    db_session.add(
-        ScanLog(
-            test_run_id=run["id"],
-            run_kind="web",
-            phase="scan_started",
-            status="start",
-        )
-    )
-    db_session.commit()
-
-    response = client.post(
-        f"/api/test-runs/{run['id']}/thinking-scan/start",
-        json={"coverage_mode": "track"},
-    )
-
-    assert response.status_code == 409
-    assert "cannot switch" in response.json()["detail"]
-    db_session.expire_all()
-    assert db_session.get(TestRun, run["id"]).coverage_mode == "deep"
-
-
-def test_started_non_deep_scan_rejects_deep_mode(client, db_engine, db_session):
-    site = client.post(
-        "/api/sites", json={"name": "S", "base_url": "http://t.com"}
-    ).json()
-    run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
-    persisted = db_session.get(TestRun, run["id"])
-    persisted.coverage_mode = "standard"
-    db_session.add(persisted)
-    db_session.add(
-        ScanLog(
-            test_run_id=run["id"],
-            run_kind="web",
-            phase="scan_started",
-            status="start",
-        )
-    )
-    db_session.commit()
-
-    response = client.post(
-        f"/api/test-runs/{run['id']}/thinking-scan/start",
-        json={"coverage_mode": "deep"},
-    )
-
-    assert response.status_code == 409
-    assert "cannot switch" in response.json()["detail"]
-    db_session.expire_all()
-    assert db_session.get(TestRun, run["id"]).coverage_mode == "standard"
-
-
-@pytest.mark.parametrize("requested_mode", ["track", "standard", "enforce", "deep"])
-def test_started_team_scan_is_locked_to_team_mode(
-    client, db_engine, db_session, requested_mode
+@pytest.mark.parametrize(
+    ("saved_mode", "requested_mode"),
+    [
+        ("deep", "track"),
+        ("standard", "deep"),
+        ("team", "track"),
+        ("team", "standard"),
+        ("team", "enforce"),
+        ("team", "deep"),
+        ("standard", "team"),
+        ("deep", "team"),
+    ],
+)
+def test_started_scan_cannot_switch_coverage_mode(
+    client, db_session, saved_mode, requested_mode
 ):
     site = client.post(
         "/api/sites", json={"name": "S", "base_url": "http://t.com"}
     ).json()
     run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
     persisted = db_session.get(TestRun, run["id"])
-    persisted.coverage_mode = "team"
+    persisted.coverage_mode = saved_mode
     db_session.add(persisted)
     db_session.add(
         ScanLog(
@@ -942,64 +899,9 @@ def test_started_team_scan_is_locked_to_team_mode(
     )
 
     assert response.status_code == 409
+    assert "cannot switch" in response.json()["detail"]
     db_session.expire_all()
-    assert db_session.get(TestRun, run["id"]).coverage_mode == "team"
-
-
-def test_started_ordinary_scan_rejects_team_mode(client, db_engine, db_session):
-    site = client.post(
-        "/api/sites", json={"name": "S", "base_url": "http://t.com"}
-    ).json()
-    run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
-    persisted = db_session.get(TestRun, run["id"])
-    persisted.coverage_mode = "standard"
-    db_session.add(persisted)
-    db_session.add(
-        ScanLog(
-            test_run_id=run["id"],
-            run_kind="web",
-            phase="scan_started",
-            status="start",
-        )
-    )
-    db_session.commit()
-
-    response = client.post(
-        f"/api/test-runs/{run['id']}/thinking-scan/start",
-        json={"coverage_mode": "team"},
-    )
-
-    assert response.status_code == 409
-    db_session.expire_all()
-    assert db_session.get(TestRun, run["id"]).coverage_mode == "standard"
-
-
-def test_started_deep_scan_rejects_team_mode(client, db_engine, db_session):
-    site = client.post(
-        "/api/sites", json={"name": "S", "base_url": "http://t.com"}
-    ).json()
-    run = client.post(f"/api/sites/{site['id']}/test-runs", json={"name": "R"}).json()
-    persisted = db_session.get(TestRun, run["id"])
-    persisted.coverage_mode = "deep"
-    db_session.add(persisted)
-    db_session.add(
-        ScanLog(
-            test_run_id=run["id"],
-            run_kind="web",
-            phase="scan_started",
-            status="start",
-        )
-    )
-    db_session.commit()
-
-    response = client.post(
-        f"/api/test-runs/{run['id']}/thinking-scan/start",
-        json={"coverage_mode": "team"},
-    )
-
-    assert response.status_code == 409
-    db_session.expire_all()
-    assert db_session.get(TestRun, run["id"]).coverage_mode == "deep"
+    assert db_session.get(TestRun, run["id"]).coverage_mode == saved_mode
 
 
 # ── 18. _clean_affected_url unit cases ────────────────────────────────────────
@@ -1088,26 +990,18 @@ def test_post_finding_fn_strips_parenthetical_annotation(db_engine, db_session, 
     assert cell.status == "finding"
 
 
-# ── 21. _make_web_post_finding_fn falls back to finding.page_id when no url match ──
+# ── 21. _make_web_post_finding_fn accepts an exact root URL ───────────────────
 
 
-def test_post_finding_fn_falls_back_to_finding_page_id(db_engine, db_session, run):
-    """When the affected_url is the bare root '/', and a parent page exists, use it.
-
-    The scanner's ``_dynamic_finding_page_id`` already uses prefix overlap to
-    pick a parent page for the finding's ``page_id``.  The workprogram hook
-    must trust that resolution when exact+normalised match on affected_url
-    cannot find a page — otherwise findings on sub-paths (whose affected_url
-    was rewritten to the root) get stranded on a brand new placeholder row
-    instead of the crawled page the user expects.
-    """
+def test_post_finding_fn_uses_exact_root_url(db_engine, db_session, run):
+    """An exact root URL can update its existing page cell."""
     root = _make_page(db_session, run, "http://example.com/", ["A03"])
     seed_web_workprogram(run.id)
 
     class _FakeFinding:
         id = 503
-        page_id = root.id  # scanner already chose the root
-        affected_url = "http://example.com/"  # bare root, still matches root exactly
+        page_id = root.id
+        affected_url = "http://example.com/"
         owasp_category = "A03"
 
     fn = _make_web_post_finding_fn(run.id)
@@ -1122,31 +1016,22 @@ def test_post_finding_fn_falls_back_to_finding_page_id(db_engine, db_session, ru
     ).first()
     assert cell is not None
     assert cell.status == "finding"
-    # No placeholder created.
     placeholders = db_session.exec(
         select(CrawledPage)
         .where(CrawledPage.test_run_id == run.id)
         .where(CrawledPage.url == "http://example.com/")
     ).all()
-    # Only the original root page should exist.
     assert len(placeholders) == 1
     assert placeholders[0].id == root.id
 
 
-# ── 22. _make_web_post_finding_fn prefers page_id over placeholder when no exact match ──
+# ── 22. Unknown affected URLs cannot use a stale page hint ───────────────────
 
 
-def test_post_finding_fn_uses_page_id_when_affected_url_is_garbage(
+def test_post_finding_fn_does_not_use_page_hint_for_unknown_affected_url(
     db_engine, db_session, run
 ):
-    """If affected_url is unreadable, fall back to the scanner's page_id, not a placeholder.
-
-    Regression: the LLM sometimes writes findings with affected_url values like
-    'http://t/* (all endpoints)' or 'http://t/, http://t/api/foo' that never
-    match a crawled page.  Before the fix this created a placeholder row with
-    the garbage string as its URL.  With page_id fallback, the cell lands on
-    the page the scanner already chose.
-    """
+    """An unknown affected URL cannot change coverage on a hinted page."""
     root = _make_page(db_session, run, "http://example.com/", ["A01"])
     seed_web_workprogram(run.id)
 
@@ -1167,8 +1052,8 @@ def test_post_finding_fn_uses_page_id_when_affected_url_is_garbage(
         .where(PageOwaspTest.owasp_category == "A01")
     ).first()
     assert cell is not None
-    assert cell.status == "finding"
-    # No placeholder row with the garbage URL was created.
+    assert cell.status == "not_started"
+    assert json.loads(cell.finding_ids_json) == []
     placeholder = db_session.exec(
         select(CrawledPage)
         .where(CrawledPage.test_run_id == run.id)

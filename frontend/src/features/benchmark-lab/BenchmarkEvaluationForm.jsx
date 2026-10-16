@@ -1,3 +1,4 @@
+import { fmtDate } from "../../shared/lib/dates.js";
 import { useEffect, useMemo, useState } from "react";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
 import * as sastApi from "../../shared/api/sastRuns.js";
@@ -125,7 +126,6 @@ export function BenchmarkEvaluationForm() {
               Only terminal ordinary SAST runs can be evaluated. Ground truth is stored separately
               from source snapshots and scanner artifacts.
             </p>
-            {error && <div className="alert error">{error}</div>}
             {loading ? (
               <div className="subtle">Loading runs and datasets…</div>
             ) : (
@@ -155,11 +155,11 @@ export function BenchmarkEvaluationForm() {
                     </span>
                     <span>
                       {selectedRun.started_at
-                        ? new Date(selectedRun.started_at).toLocaleString()
+                        ? fmtDate(selectedRun.started_at)
                         : "Start time unavailable"}{" "}
                       →{" "}
                       {selectedRun.completed_at
-                        ? new Date(selectedRun.completed_at).toLocaleString()
+                        ? fmtDate(selectedRun.completed_at)
                         : "Completion time unavailable"}
                     </span>
                   </div>
@@ -270,6 +270,11 @@ export function BenchmarkEvaluationForm() {
                 onChange={(event) => setForm({ ...form, notes: event.target.value })}
               />
             </label>
+            {error && (
+              <div className="alert error form-error" role="alert">
+                {error}
+              </div>
+            )}
             <div className="form-actions">
               <button type="button" className="btn ghost" onClick={() => nav("#/benchmark-lab")}>
                 Cancel

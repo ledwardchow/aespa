@@ -278,7 +278,7 @@ export function SystemSettingsPanels({
             maxWidth: 680,
           }}
         >
-          <div className="form-section-title">Experimental Features</div>
+          <div className="form-section-title">Experimental features</div>
           <div
             className="field-hint"
             style={{
@@ -316,7 +316,7 @@ export function SystemSettingsPanels({
                 } catch {}
               }}
             />
-            <span>DAST Deep Scan Mode</span>
+            <span>DAST Deep Scan mode</span>
           </label>
           <div className="field-hint" style={{ marginTop: 6 }}>
             Show Deep mode for web DAST runs and its settings under Settings.
@@ -350,7 +350,7 @@ export function SystemSettingsPanels({
                 } catch {}
               }}
             />
-            <span>SAST Deep Mode</span>
+            <span>SAST Deep mode</span>
           </label>
           <div className="field-hint" style={{ marginTop: 6 }}>
             Show Deep mode when creating a SAST scan. Light mode is used otherwise.

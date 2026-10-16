@@ -42,12 +42,6 @@ def test_readiness_prompt_summaries_bound_metadata():
 
 
 @pytest.fixture()
-def data_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
-    return tmp_path
-
-
-@pytest.fixture()
 def client(isolated_client, data_dir):
     return isolated_client
 

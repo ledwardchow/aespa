@@ -14,7 +14,6 @@ beforeEach(() => {
     playwright_chromium_installing: false,
     graphical_display_available: true,
   });
-  settingsApi.getBenchmarkLabConfig.mockResolvedValue({ panel_enabled: false });
   settingsApi.getReportingDebugConfig.mockResolvedValue({
     capture_enabled: false,
     panel_enabled: false,
@@ -45,8 +44,6 @@ test("hides Playwright Chromium and selects system Chrome after provisioning fai
       username=""
       reportingDebugCfg={{ capture_enabled: false, panel_enabled: false }}
       setReportingDebugCfg={vi.fn()}
-      benchmarkLabCfg={{ panel_enabled: false }}
-      setBenchmarkLabCfg={vi.fn()}
     />,
   );
 
@@ -55,7 +52,7 @@ test("hides Playwright Chromium and selects system Chrome after provisioning fai
   expect(screen.getByText(/could not be installed/)).toBeTruthy();
 });
 
-test("groups Systems, Deep Scan, and Team Scan under Experimental Features", () => {
+test("groups Systems, Deep Scan, and Team Scan under Experimental features", () => {
   const setShowDeepScan = vi.fn();
   const setShowTeamScan = vi.fn();
   render(
@@ -72,14 +69,12 @@ test("groups Systems, Deep Scan, and Team Scan under Experimental Features", () 
       username=""
       reportingDebugCfg={{ capture_enabled: false, panel_enabled: false }}
       setReportingDebugCfg={vi.fn()}
-      benchmarkLabCfg={{ panel_enabled: false }}
-      setBenchmarkLabCfg={vi.fn()}
     />,
   );
 
-  expect(screen.getByText("Experimental Features")).toBeTruthy();
+  expect(screen.getByText("Experimental features")).toBeTruthy();
   expect(screen.getByLabelText("Systems scanning").checked).toBe(true);
-  const deepScanToggle = screen.getByLabelText("DAST Deep Scan Mode");
+  const deepScanToggle = screen.getByLabelText("DAST Deep Scan mode");
   expect(deepScanToggle.checked).toBe(false);
 
   fireEvent.click(deepScanToggle);

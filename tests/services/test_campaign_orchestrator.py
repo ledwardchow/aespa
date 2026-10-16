@@ -19,9 +19,6 @@ import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
-    System,
-    SystemComponent,
-    SystemTarget,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
@@ -35,6 +32,9 @@ from aespa.models import (
     ScanLead,
     ScanLeadComponentProvenance,
     Site,
+    System,
+    SystemComponent,
+    SystemTarget,
     TestRun,
 )
 from aespa.schemas import (
@@ -63,9 +63,7 @@ def _seed_application(session: Session) -> dict:
     site = Site(name="Portal", base_url="http://portal.test")
     session.add(site)
     session.flush()
-    target = SystemTarget(
-        system_id=app.id, target_type="site", target_id=site.id
-    )
+    target = SystemTarget(system_id=app.id, target_type="site", target_id=site.id)
     session.add(target)
     session.commit()
     session.refresh(component)
@@ -219,9 +217,7 @@ async def test_partial_sast_failure_produces_warning_but_still_reaches_review(
         site = Site(name="P2", base_url="http://p2.test")
         s.add(site)
         s.flush()
-        target = SystemTarget(
-            system_id=app.id, target_type="site", target_id=site.id
-        )
+        target = SystemTarget(system_id=app.id, target_type="site", target_id=site.id)
         s.add(target)
         s.commit()
         payload = CampaignCreate(
@@ -353,9 +349,7 @@ async def test_resume_source_member_retries_only_selected_child(
 ):
     with Session(isolated_db_engine) as s:
         ctx = _seed_application(s)
-        second = SystemComponent(
-            system_id=ctx["system_id"], name="orders-api"
-        )
+        second = SystemComponent(system_id=ctx["system_id"], name="orders-api")
         s.add(second)
         s.flush()
         second_snapshot = ComponentSnapshot(

@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 from aespa.db import get_engine
 from aespa.models import ScannerSession
 from aespa.schemas import ScannerSessionValidationItem, ScannerSessionValidationResult
+from aespa.services.tls import httpx_verify
 
 _INVALID_SESSION_STATUSES = {401, 419, 440}
 
@@ -252,8 +253,18 @@ def record_session_probe_result(
 async def _probe_session(
     url: str, headers: dict[str, Any], cookies: dict[str, Any]
 ) -> int:
+    from aespa.services.settings import get_upstream_proxy_config
+
+    with Session(get_engine()) as session:
+        config = get_upstream_proxy_config(session)
+    ca_bundle = config.scanner_ca_bundle_path
+    proxy = config.scanner_proxy_url if config.proxy_scanner else None
     async with httpx.AsyncClient(
-        timeout=15.0, follow_redirects=True, verify=False, trust_env=False
+        timeout=15.0,
+        follow_redirects=True,
+        verify=httpx_verify(ca_bundle, False),
+        proxy=proxy,
+        trust_env=False,
     ) as client:
         response = await client.get(
             url,

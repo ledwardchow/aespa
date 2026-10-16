@@ -3,7 +3,8 @@ import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
-import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { PageHeader, Breadcrumbs } from "../../shared/ui/PageHeader.jsx";
+import { useRecordName } from "../../shared/hooks/useRecordName.ts";
 
 export function ApiTestRunForm({ collectionId }) {
   const [form, setForm] = useState({
@@ -19,6 +20,7 @@ export function ApiTestRunForm({ collectionId }) {
       ...f,
       ...p,
     }));
+  const collectionName = useRecordName(apiCollectionsApi.getApiCollection, collectionId);
   useEffect(() => {
     settingsApi
       .listLLMProfiles()
@@ -47,14 +49,17 @@ export function ApiTestRunForm({ collectionId }) {
       <PageHeader
         title={
           <>
-            <Crumb href={`#/apis/${collectionId}`}>API collection</Crumb>
-            <Sep />
-            New test run
+            <Breadcrumbs
+              items={[
+                { label: "APIs", href: "#/apis" },
+                { label: collectionName || "API collection", href: `#/apis/${collectionId}` },
+                { label: "New test run" },
+              ]}
+            />
           </>
         }
       />
       <div className="content scroll-content">
-        {error && <div className="alert error">{error}</div>}
         <form
           className="card"
           style={{
@@ -108,10 +113,15 @@ export function ApiTestRunForm({ collectionId }) {
             >
               <option value="track">Quick — adaptive scan with coverage tracking</option>
               <option value="standard">Standard — meet the configured coverage target</option>
-              <option value="enforce">Full — test every applicable coverage obligation</option>
+              <option value="enforce">Full — run every applicable test</option>
               <option value="sast_validate">SAST Validate — test only imported SAST leads</option>
             </select>
           </div>
+          {error && (
+            <div className="alert error form-error" role="alert">
+              {error}
+            </div>
+          )}
           <div
             className="row spread"
             style={{
