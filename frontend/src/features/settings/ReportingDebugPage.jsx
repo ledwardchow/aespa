@@ -363,7 +363,7 @@ export function ReportingDebugPage() {
                 onClick={savePrompt}
                 disabled={promptSaving || !promptText.trim() || selectedPromptVersion?.is_builtin}
               >
-                {promptSaving ? "Saving…" : "Save Prompt"}
+                {promptSaving ? "Saving…" : "Save prompt"}
               </button>
               <button
                 className="btn secondary"

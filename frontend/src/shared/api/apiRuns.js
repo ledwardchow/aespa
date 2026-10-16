@@ -57,6 +57,11 @@ export const getApiFindings = (id) => readFindings({ runKind: "api", runId: id }
 export const clearApiFindings = (id) =>
   req(`/api/api-test-runs/${id}/findings`, { method: "DELETE" });
 
+export const deleteApiFindingGroup = (id, title) =>
+  req(`/api/api-test-runs/${id}/findings?title=${encodeURIComponent(title)}`, {
+    method: "DELETE",
+  });
+
 export const deleteApiFinding = (id, fid) =>
   req(`/api/api-test-runs/${id}/findings/${fid}`, { method: "DELETE" });
 

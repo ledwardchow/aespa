@@ -17,6 +17,11 @@ from aespa.models import (
 from aespa.services import crawl_workflows, recon_summary, sites
 
 
+def _retry_state(run_id: int, note_id: int) -> dict:
+    status = crawl_workflows.workflow_retry_status(run_id)
+    return next(item for item in status["retries"] if item["note_id"] == note_id)
+
+
 def test_inferred_workflow_must_start_on_an_observed_page(monkeypatch):
     async def fake_completion(_config, _prompt):
         return json.dumps(
@@ -60,6 +65,167 @@ def test_inferred_workflow_must_start_on_an_observed_page(monkeypatch):
         "Submit a product review",
     ]
     assert proposals[1]["destructive"] is False
+    assert [item["generate_sample_data"] for item in proposals] == [False, True]
+
+
+def test_inference_asks_for_actions_instead_of_generic_pages(monkeypatch):
+    prompts = []
+
+    async def completion(_config, prompt):
+        prompts.append(prompt)
+        return '{"workflows":[]}'
+
+    monkeypatch.setattr(crawl_workflows.llm_svc, "plain_completion", completion)
+    assert (
+        asyncio.run(
+            crawl_workflows._infer_workflows(
+                object(),
+                [{"url": "https://shop.test/admin"}],
+                {"https://shop.test/admin"},
+            )
+        )
+        == []
+    )
+    assert "specific goal" in prompts[0]
+    assert "Do not list ordinary pages, page titles" in prompts[0]
+    assert "Include each distinct reached function" not in prompts[0]
+
+
+def test_inference_keeps_distinct_reached_states_and_validates_page_ids(monkeypatch):
+    async def fake_completion(_config, _prompt):
+        return json.dumps(
+            {
+                "workflows": [
+                    {
+                        "name": "Checkout",
+                        "start_url": "https://shop.test/app",
+                        "goal": "Open checkout",
+                        "reason": "Observed form",
+                        "reached_page_id": 11,
+                    },
+                    {
+                        "name": "Checkout",
+                        "start_url": "https://shop.test/app",
+                        "goal": "Review order",
+                        "reason": "Observed state",
+                        "reached_page_id": 12,
+                    },
+                    {
+                        "name": "Unknown",
+                        "start_url": "https://shop.test/app",
+                        "goal": "Unknown",
+                        "reason": "Invalid page",
+                        "reached_page_id": 99,
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(crawl_workflows.llm_svc, "plain_completion", fake_completion)
+    proposals = asyncio.run(
+        crawl_workflows._infer_workflows(
+            object(),
+            [
+                {"page_id": 11, "url": "https://shop.test/app"},
+                {"page_id": 12, "url": "https://shop.test/app"},
+            ],
+            {"https://shop.test/app"},
+        )
+    )
+    assert [proposal["reached_page_id"] for proposal in proposals] == [11, 12]
+
+
+def test_inference_keeps_different_goals_with_the_same_name_and_start(monkeypatch):
+    workflows = [
+        {
+            "name": "Account settings",
+            "start_url": "https://shop.test/account",
+            "goal": goal,
+            "reason": "The account page offers this action",
+        }
+        for goal in ("Change email", "Change password")
+    ]
+
+    async def completion(_config, _prompt):
+        return json.dumps({"workflows": workflows})
+
+    monkeypatch.setattr(crawl_workflows.llm_svc, "plain_completion", completion)
+
+    async def infer(prior=None):
+        return await crawl_workflows._infer_workflows(
+            object(),
+            [{"url": "https://shop.test/account"}],
+            {"https://shop.test/account"},
+            prior,
+        )
+
+    assert [item["goal"] for item in asyncio.run(infer())] == [
+        "Change email",
+        "Change password",
+    ]
+    prior = {crawl_workflows._workflow_identity(workflows[0])}
+    assert [item["goal"] for item in asyncio.run(infer(prior))] == ["Change password"]
+
+
+def test_reached_note_never_requests_input():
+    assert (
+        crawl_workflows._needs_user_input({"status": "crawled", "needs_input": True})
+        is False
+    )
+
+
+def test_reached_inference_is_recorded_without_opening_browser(monkeypatch):
+    notes = []
+    page = CrawledPage(id=42, test_run_id=999, url="https://shop.test/app")
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_crawl_inventory",
+        lambda _run_id: ([{"page_id": 42, "url": page.url}], {page.url: page}),
+    )
+    monkeypatch.setattr(
+        crawl_workflows, "_prior_workflow_identities", lambda _run_id: set()
+    )
+    monkeypatch.setattr(crawl_workflows, "_saved_workflow_proposals", lambda _site: [])
+    monkeypatch.setattr(
+        crawl_workflows, "list_workflow_notes", lambda _session, _id: []
+    )
+
+    async def infer(*_args):
+        return [
+            {
+                "name": "Write review",
+                "goal": "Open review editor",
+                "reason": "Observed form",
+                "start_url": page.url,
+                "reached_page_id": 42,
+                "destructive": False,
+            }
+        ]
+
+    monkeypatch.setattr(crawl_workflows, "_infer_workflows", infer)
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_record_note",
+        lambda *args, **kwargs: notes.append((args, kwargs)),
+    )
+    asyncio.run(
+        crawl_workflows.explore_after_crawl(
+            999,
+            llm_cfg=object(),
+            site=SimpleNamespace(base_url="https://shop.test"),
+            creds=[],
+            shared=object(),
+            max_pages=10,
+            browser_engine="chromium",
+            browser_visible=False,
+            pw_proxy={},
+            global_http_header={},
+        )
+    )
+    assert len(notes) == 1
+    assert notes[0][0][2] == "crawled"
+    assert notes[0][1]["page_id"] == 42
+    assert notes[0][1].get("needs_input", False) is False
 
 
 def test_workflow_reuses_saved_account_after_credential_ids_change():
@@ -131,7 +297,7 @@ def test_workflow_reads_old_credential_identity_from_page_views(isolated_db_engi
     assert crawl_workflows._historical_credential_usernames(run_id) == {34: {"amelia"}}
 
 
-def test_state_change_guard_allows_cart_setup_and_payment():
+def test_state_change_guard_allows_cart_setup_and_waits_for_payment_data():
     observation = {
         "url": "https://shop.test/product",
         "controls": [
@@ -165,13 +331,13 @@ def test_state_change_guard_allows_cart_setup_and_payment():
     assert crawl_workflows._action_allowed(
         {"action": "click", "index": 0, "risk": "safe"}, observation
     )[0]
-    assert crawl_workflows._action_allowed(
+    assert not crawl_workflows._action_allowed(
         {"action": "click", "index": 1, "risk": "safe"}, observation
     )[0]
     assert crawl_workflows._action_allowed(
         {"action": "click", "index": 2, "risk": "safe"}, observation
     )[0]
-    assert crawl_workflows._action_allowed(
+    assert not crawl_workflows._action_allowed(
         {"action": "click", "index": 3, "risk": "safe"}, observation
     )[0]
 
@@ -205,7 +371,7 @@ def test_save_button_is_not_blocked_by_a_sibling_cancel_button():
     )[0]
 
 
-def test_form_action_allows_order_submission():
+def test_form_action_requires_supplied_payment_data_for_order_submission():
     observation = {
         "url": "https://shop.test/checkout",
         "controls": [
@@ -219,8 +385,13 @@ def test_form_action_allows_order_submission():
         ],
         "fields": [],
     }
-    assert crawl_workflows._action_allowed(
+    assert not crawl_workflows._action_allowed(
         {"action": "click", "index": 0, "risk": "safe"}, observation
+    )[0]
+    assert crawl_workflows._action_allowed(
+        {"action": "click", "index": 0, "risk": "safe"},
+        observation,
+        "Use the supplied test payment details",
     )[0]
 
 
@@ -336,6 +507,8 @@ def test_generated_values_do_not_fill_payment_or_secret_fields():
         ("https://shop.test/payment-methods", "holder"),
         ("https://shop.test/address", "card_number"),
         ("https://shop.test/address", "security_code"),
+        ("https://shop.test/login", "password"),
+        ("https://shop.test/login", "otp"),
     ]:
         allowed, reason = crawl_workflows._action_allowed(
             decision,
@@ -355,6 +528,97 @@ def test_generated_values_do_not_fill_payment_or_secret_fields():
         )
         assert not allowed
         assert reason == "Payment or secret fields need user-supplied test data."
+
+
+def test_bank_profile_contact_data_can_be_fictitious():
+    assert crawl_workflows._can_generate_sample_data(
+        {
+            "name": "Send a birthday card",
+            "goal": "Write a message",
+            "destructive": False,
+        }
+    )
+    assert crawl_workflows._action_allowed(
+        {"action": "fill", "index": 0, "value": "1 Example Street"},
+        {
+            "url": "https://shop.test/admin/bank-team/profile",
+            "controls": [],
+            "fields": [
+                {
+                    "name": "bank_contact_address",
+                    "fieldName": "bank_contact_address",
+                    "type": "text",
+                    "label": "Contact address",
+                }
+            ],
+        },
+        generate_sample_data=True,
+    ) == (True, "")
+
+
+def test_new_test_account_password_can_be_generated_but_current_password_cannot():
+    observation = {
+        "url": "https://shop.test/register",
+        "title": "Create account",
+        "controls": [],
+        "fields": [
+            {"fieldName": "password", "type": "password"},
+            {"fieldName": "confirmPassword", "type": "password"},
+            {"fieldName": "currentPassword", "type": "password"},
+        ],
+    }
+    for index in (0, 1):
+        assert crawl_workflows._action_allowed(
+            {"action": "fill", "index": index, "value": "Test-only-secret-123"},
+            observation,
+            generate_sample_data=True,
+        ) == (True, "")
+    assert crawl_workflows._action_allowed(
+        {"action": "fill", "index": 2, "value": "guessed-secret"},
+        observation,
+        generate_sample_data=True,
+    ) == (False, "Payment or secret fields need user-supplied test data.")
+    assert crawl_workflows._action_allowed(
+        {"action": "fill", "index": 0, "value": "guessed-secret"},
+        {
+            **observation,
+            "url": "https://shop.test/account",
+            "title": "Sign in",
+            "text": "Sign in or create account",
+        },
+        generate_sample_data=True,
+    ) == (False, "Payment or secret fields need user-supplied test data.")
+
+
+def test_model_reconsiders_missing_new_test_account_password(monkeypatch):
+    responses = [
+        {
+            "action": "stop",
+            "needs_input": True,
+            "request": "Please provide a password for the new account.",
+        },
+        {"action": "fill", "index": 0, "value": "Test-only-secret-123"},
+    ]
+
+    async def fake_decide(*_args):
+        return responses.pop(0)
+
+    monkeypatch.setattr(crawl_workflows, "_decide_action", fake_decide)
+    decision = asyncio.run(
+        crawl_workflows._decide_with_corrections(
+            object(),
+            {"generate_sample_data": True},
+            {
+                "url": "https://shop.test/register",
+                "title": "Create account",
+                "fields": [{"fieldName": "password", "type": "password"}],
+                "controls": [],
+            },
+            [],
+        )
+    )
+    assert decision["action"] == "fill"
+    assert responses == []
 
 
 def test_radio_choices_use_field_indexes_and_keep_sensitive_fields_guarded():
@@ -480,7 +744,7 @@ def test_generated_values_are_ready_to_edit_and_reuse():
     )
 
 
-def test_crawler_model_gets_generation_permission_only_for_requested_retry(monkeypatch):
+def test_crawler_model_gets_generation_rule_for_eligible_workflow(monkeypatch):
     prompts = []
 
     async def fake_completion(_config, prompt):
@@ -497,7 +761,7 @@ def test_crawler_model_gets_generation_permission_only_for_requested_retry(monke
     asyncio.run(
         crawl_workflows._decide_action(object(), {"name": "Address"}, observation, [])
     )
-    assert "explicitly authorized you to generate" in prompts[0]
+    assert "Generate missing ordinary sample values" in prompts[0]
     assert "do not invent names" in prompts[1]
 
 
@@ -559,7 +823,7 @@ def test_workflow_reminds_model_of_generation_approval(monkeypatch):
         )
     )
     assert decision["action"] == "fill"
-    assert "already approved" in prompts[1][-1]
+    assert "Generate ordinary test values" in prompts[1][-1]
 
 
 def test_workflow_corrects_radio_selection_and_repeated_field(monkeypatch):
@@ -767,6 +1031,108 @@ def test_saved_site_workflow_data_is_reused_by_later_crawls(isolated_db_engine):
     assert saved[0]["instructions"] == "Use 2 Example Street"
     assert proposals[0]["user_instructions"] == "Use 2 Example Street"
     assert proposals[0]["saved_site_data"] is True
+    assert proposals[0]["generate_sample_data"] is True
+
+
+def test_saved_payment_and_delete_workflows_do_not_generate_data():
+    site = Site(
+        name="Shop",
+        base_url="https://shop.test",
+        workflow_data_json=json.dumps(
+            [
+                {
+                    "name": "Update bank details",
+                    "goal": "Set up a bank transfer",
+                    "start_url": "https://shop.test/account",
+                    "instructions": "Use supplied test payment data",
+                },
+                {
+                    "name": "Delete address",
+                    "goal": "Remove an address",
+                    "start_url": "https://shop.test/account",
+                    "instructions": "Use the saved account",
+                },
+            ]
+        ),
+    )
+    proposals = crawl_workflows._saved_workflow_proposals(site)
+    assert [item["generate_sample_data"] for item in proposals] == [False, False]
+    assert [item["destructive"] for item in proposals] == [False, True]
+
+
+def test_bank_account_and_billing_address_forms_use_generated_sample_data():
+    site = Site(
+        name="Bank",
+        base_url="https://bank.test",
+        workflow_data_json=json.dumps(
+            [
+                {
+                    "name": name,
+                    "goal": goal,
+                    "start_url": "https://bank.test/account",
+                    "instructions": "Use a test contact name",
+                }
+                for name, goal in [
+                    (
+                        "Open a bank account",
+                        "Choose an account type and enter contact details",
+                    ),
+                    ("Update billing address", "Save a new postal address"),
+                ]
+            ]
+        ),
+    )
+    proposals = crawl_workflows._saved_workflow_proposals(site)
+    assert len(proposals) == 2
+    assert all(item["generate_sample_data"] for item in proposals)
+
+
+@pytest.mark.parametrize(
+    ("action", "field", "value"),
+    [
+        ("fill", {"type": "text", "fieldName": "contactName"}, "Test Person"),
+        (
+            "select",
+            {
+                "type": "select-one",
+                "fieldName": "bankAccountType",
+                "options": [{"value": "savings"}],
+            },
+            "savings",
+        ),
+        (
+            "check",
+            {
+                "type": "radio",
+                "fieldName": "bankAccountType",
+                "choice_value": "savings",
+            },
+            "savings",
+        ),
+    ],
+)
+def test_account_opening_fields_accept_generated_data(action, field, value):
+    allowed, reason = crawl_workflows._action_allowed(
+        {"action": action, "index": 0, "value": value},
+        {"url": "https://bank.test/bank-account/open", "fields": [field]},
+        generate_sample_data=True,
+    )
+    assert allowed, reason
+
+
+@pytest.mark.parametrize("instructions", ["", "Use 1 Example Street"])
+def test_generated_cart_data_does_not_authorize_placing_an_order(instructions):
+    allowed, reason = crawl_workflows._action_allowed(
+        {"action": "click", "index": 0},
+        {
+            "url": "https://shop.test/checkout",
+            "controls": [{"kind": "button", "name": "Place order"}],
+        },
+        instructions,
+        generate_sample_data=True,
+    )
+    assert not allowed
+    assert "Payment" in reason
 
 
 def test_saved_site_workflows_do_not_leave_the_site():
@@ -824,27 +1190,27 @@ def test_retry_checkbox_waits_for_success_before_saving(
         crawl_workflows.start_workflow_retry(
             run_id, note, "Use 1 Example Street", save_to_site=True
         )
-        await crawl_workflows._retry_tasks[run_id]
+        await crawl_workflows._retry_tasks[(run_id, 23)]
 
     asyncio.run(submit())
     with Session(isolated_db_engine) as session:
         saved = sites.workflow_data_for_site(session.get(Site, site_id))
     assert saved == []
-    assert crawl_workflows.workflow_retry_status(run_id)["saved_to_site"] is False
-    assert attempts == [(True, False, "Use 1 Example Street")]
+    assert _retry_state(run_id, 23)["saved_to_site"] is False
+    assert attempts == [(True, True, "Use 1 Example Street")]
 
     async def retry_without_input():
         crawl_workflows.start_workflow_retry(run_id, note, "")
-        await crawl_workflows._retry_tasks[run_id]
+        await crawl_workflows._retry_tasks[(run_id, 23)]
 
     asyncio.run(retry_without_input())
-    assert attempts[-1] == (False, False, "")
+    assert attempts[-1] == (False, True, "")
 
     async def generate():
         crawl_workflows.start_workflow_retry(
             run_id, note, "", generate_sample_data=True
         )
-        await crawl_workflows._retry_tasks[run_id]
+        await crawl_workflows._retry_tasks[(run_id, 23)]
 
     asyncio.run(generate())
     assert attempts[-1] == (False, True, "")
@@ -853,12 +1219,52 @@ def test_retry_checkbox_waits_for_success_before_saving(
         crawl_workflows.start_workflow_retry(
             run_id, {**note, "generate_sample_data": True}, ""
         )
-        await crawl_workflows._retry_tasks[run_id]
+        await crawl_workflows._retry_tasks[(run_id, 23)]
 
     asyncio.run(retry_approved_note())
     assert attempts[-1] == (False, True, "")
-    crawl_workflows._retry_tasks.pop(run_id, None)
-    crawl_workflows._retry_results.pop(run_id, None)
+    crawl_workflows._retry_tasks.pop((run_id, 23), None)
+    crawl_workflows._retry_results.pop((run_id, 23), None)
+
+
+def test_retry_keeps_saved_values_and_excludes_payment_even_if_requested(monkeypatch):
+    run_id = 9_720
+    workflows = []
+
+    async def fake_retry(_run_id, workflow, *, save_to_site=False):
+        workflows.append(workflow)
+
+    monkeypatch.setattr(crawl_workflows, "_run_workflow_retry", fake_retry)
+    note = {
+        "id": 24,
+        "name": "Update bank details",
+        "goal": "Set up bank transfer",
+        "start_url": "https://shop.test/account",
+        "instructions": "Use the supplied test account",
+        "generate_sample_data": True,
+    }
+
+    async def retry():
+        crawl_workflows.start_workflow_retry(
+            run_id, note, "", generate_sample_data=True
+        )
+        await crawl_workflows._retry_tasks[(run_id, 24)]
+
+    try:
+        asyncio.run(retry())
+        assert workflows[0]["generate_sample_data"] is False
+        assert workflows[0]["user_instructions"] == "Use the supplied test account"
+        assert _retry_state(run_id, 24)["generate_sample_data"] is False
+        with pytest.raises(ValueError, match="cannot be retried"):
+            crawl_workflows.start_workflow_retry(
+                run_id,
+                {**note, "id": 25, "name": "Delete bank account"},
+                "",
+                generate_sample_data=True,
+            )
+    finally:
+        crawl_workflows._retry_tasks.pop((run_id, 24), None)
+        crawl_workflows._retry_results.pop((run_id, 24), None)
 
 
 def test_crawl_note_appears_in_attack_surface(isolated_db_engine):
@@ -892,7 +1298,9 @@ def test_crawl_note_appears_in_attack_surface(isolated_db_engine):
             )
         )
         session.commit()
-        assert crawl_workflows._prior_workflow_names(run.id) == {"checkout"}
+        assert crawl_workflows._prior_workflow_identities(run.id) == {
+            ("checkout", "/", "")
+        }
         summary = recon_summary.build_recon_summary(run.id, session=session)
 
     assert len(summary["crawl_notes"]) == 1
@@ -1188,14 +1596,14 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
         "retry_of": 123,
         "user_instructions": "Use 1 Example Street",
     }
-    crawl_workflows._retry_results[run_id] = {"saved_to_site": False}
+    crawl_workflows._retry_results[(run_id, 123)] = {"saved_to_site": False}
     asyncio.run(
         crawl_workflows._run_workflow_retry(run_id, workflow, save_to_site=True)
     )
     assert captured["run_id"] == run_id
     assert captured["max_pages"] == 25
     assert captured["selected_workflows"] == [workflow]
-    status = crawl_workflows.workflow_retry_status(run_id)
+    status = _retry_state(run_id, 123)
     assert status["status"] == "complete"
     assert status["note_id"] == 123
     assert status["result_status"] == "needs_input"
@@ -1208,11 +1616,11 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
         raise RuntimeError("Browser closed")
 
     monkeypatch.setattr(crawl_workflows, "explore_after_crawl", failed_explore)
-    crawl_workflows._retry_results[run_id] = {"saved_to_site": False}
+    crawl_workflows._retry_results[(run_id, 123)] = {"saved_to_site": False}
     asyncio.run(
         crawl_workflows._run_workflow_retry(run_id, workflow, save_to_site=True)
     )
-    assert crawl_workflows.workflow_retry_status(run_id)["status"] == "error"
+    assert _retry_state(run_id, 123)["status"] == "error"
     with Session(isolated_db_engine) as session:
         assert sites.workflow_data_for_site(session.get(Site, site_id)) == []
         notes = crawl_workflows.list_workflow_notes(session, run_id)
@@ -1223,17 +1631,17 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
     result["status"] = "crawled"
     workflow["generate_sample_data"] = True
     workflow["generated_values"] = [{"field": "full_name", "value": "AESPA Test User"}]
-    crawl_workflows._retry_results[run_id] = {"saved_to_site": False}
+    crawl_workflows._retry_results[(run_id, 123)] = {"saved_to_site": False}
     asyncio.run(
         crawl_workflows._run_workflow_retry(run_id, workflow, save_to_site=True)
     )
-    assert crawl_workflows.workflow_retry_status(run_id)["saved_to_site"] is True
+    assert _retry_state(run_id, 123)["saved_to_site"] is True
     with Session(isolated_db_engine) as session:
         saved = sites.workflow_data_for_site(session.get(Site, site_id))
     assert saved[0]["instructions"] == (
         "Use 1 Example Street\nGenerated test values:\nfull_name: AESPA Test User"
     )
-    crawl_workflows._retry_results.pop(run_id, None)
+    crawl_workflows._retry_results.pop((run_id, 123), None)
 
 
 def test_retry_note_keeps_specific_request_and_instructions(isolated_db_engine):
@@ -1349,4 +1757,361 @@ def test_model_reconsiders_missing_generated_data_after_server_error(monkeypatch
         )
     )
     assert result["action"] == "fill"
-    assert "already approved" in histories[1][-1]
+    assert "Generate ordinary test values" in histories[1][-1]
+
+
+def test_several_workflow_retries_can_run_at_once(monkeypatch):
+    run_id = 9_731
+    release = asyncio.Event()
+    started: list[int] = []
+
+    async def fake_retry(_run_id, workflow, *, save_to_site=False):
+        started.append(workflow["retry_of"])
+        await release.wait()
+
+    monkeypatch.setattr(crawl_workflows, "_run_workflow_retry", fake_retry)
+
+    def note(note_id: int) -> dict:
+        return {
+            "id": note_id,
+            "name": f"Workflow {note_id}",
+            "goal": "Reach a page",
+            "start_url": "https://shop.test/account",
+            "needs_input": True,
+        }
+
+    async def scenario():
+        for note_id in (1, 2, 3):
+            crawl_workflows.start_workflow_retry(run_id, note(note_id), "Use test data")
+        with pytest.raises(ValueError, match="already running"):
+            crawl_workflows.start_workflow_retry(run_id, note(2), "Use test data")
+        with pytest.raises(ValueError, match="at once"):
+            crawl_workflows.start_workflow_retry(run_id, note(4), "Use test data")
+        status = crawl_workflows.workflow_retry_status(run_id)
+        assert status["status"] == "running"
+        assert [item["note_id"] for item in status["retries"]] == [1, 2, 3]
+        await asyncio.sleep(0)
+        assert sorted(started) == [1, 2, 3]
+        release.set()
+        await asyncio.gather(
+            *(crawl_workflows._retry_tasks[(run_id, n)] for n in (1, 2, 3))
+        )
+        await asyncio.sleep(0)
+        assert not crawl_workflows._active_retry_notes(run_id)
+        crawl_workflows.start_workflow_retry(run_id, note(4), "Use test data")
+        await crawl_workflows._retry_tasks[(run_id, 4)]
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        for note_id in (1, 2, 3, 4):
+            crawl_workflows._retry_tasks.pop((run_id, note_id), None)
+            crawl_workflows._retry_results.pop((run_id, note_id), None)
+
+
+def test_workflows_run_at_once_in_separate_browser_sessions(monkeypatch):
+    import playwright.async_api
+
+    from aespa.services import crawler
+
+    run_id = 9_732
+    start_page = SimpleNamespace(
+        id=5, replay_credential_id=None, accessible_by="[]", req_auth=False
+    )
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_crawl_inventory",
+        lambda _run_id: (
+            [{"url": "https://shop.test/a"}],
+            {crawler._norm("https://shop.test/a"): start_page},
+        ),
+    )
+    monkeypatch.setattr(
+        crawl_workflows, "_historical_credential_usernames", lambda _run_id: {}
+    )
+    contexts = []
+
+    class FakePage:
+        url = "https://shop.test/a"
+
+        async def goto(self, url, **_kwargs):
+            self.url = url
+
+    class FakeContext:
+        def __init__(self):
+            self.closed = False
+            contexts.append(self)
+
+        async def route(self, *_args):
+            return None
+
+        async def new_page(self):
+            return FakePage()
+
+        async def close(self):
+            self.closed = True
+
+    class FakeBrowser:
+        async def new_context(self, **_kwargs):
+            return FakeContext()
+
+        async def close(self):
+            return None
+
+    class FakePlaywright:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    async def fake_launch(*_args, **_kwargs):
+        return FakeBrowser()
+
+    async def no_wait(*_args, **_kwargs):
+        return None
+
+    running = 0
+    most_running = 0
+
+    async def fake_observe(_page):
+        nonlocal running, most_running
+        running += 1
+        most_running = max(most_running, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return {"url": "https://shop.test/a", "fields": [], "controls": []}
+
+    async def fake_decide(*_args, **_kwargs):
+        return {"action": "stop", "reason": "Nothing more to do."}
+
+    notes = []
+    monkeypatch.setattr(playwright.async_api, "async_playwright", FakePlaywright)
+    monkeypatch.setattr(crawl_workflows, "launch_playwright_browser", fake_launch)
+    monkeypatch.setattr(crawl_workflows, "playwright_user_agent", lambda _b: "test")
+    monkeypatch.setattr(
+        crawl_workflows, "protect_playwright_context", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        crawl_workflows.traffic_svc, "setup_playwright_logging", lambda *a, **k: None
+    )
+    monkeypatch.setattr(crawler, "_wait_for_content_settle", no_wait)
+    monkeypatch.setattr(crawl_workflows, "_observe", fake_observe)
+    monkeypatch.setattr(crawl_workflows, "_decide_with_corrections", fake_decide)
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_record_note",
+        lambda _run_id, workflow, status, *_args, **_kwargs: notes.append(
+            (workflow["name"], status)
+        ),
+    )
+    workflows = [
+        {
+            "name": f"Workflow {index}",
+            "goal": "Reach a page",
+            "reason": "Seen in the crawl",
+            "start_url": "https://shop.test/a",
+            "destructive": False,
+        }
+        for index in range(5)
+    ]
+    asyncio.run(
+        crawl_workflows.explore_after_crawl(
+            run_id,
+            llm_cfg=None,
+            site=SimpleNamespace(base_url="https://shop.test", login_url=""),
+            creds=[],
+            shared=None,
+            max_pages=10,
+            browser_engine="chromium",
+            browser_visible=False,
+            pw_proxy={},
+            global_http_header={},
+            selected_workflows=workflows,
+        )
+    )
+    assert len(contexts) == 5
+    assert all(context.closed for context in contexts)
+    assert most_running == crawl_workflows._MAX_PARALLEL_WORKFLOWS
+    assert all(workflow["generate_sample_data"] for workflow in workflows)
+    assert sorted(name for name, _status in notes) == [
+        f"Workflow {index}" for index in range(5)
+    ]
+
+
+def test_payment_and_delete_workflows_stop_before_browser_actions(monkeypatch):
+    import playwright.async_api
+
+    from aespa.services import crawler
+
+    url = "https://shop.test/account"
+    page = SimpleNamespace(
+        id=5, replay_credential_id=None, accessible_by="[]", req_auth=False
+    )
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_crawl_inventory",
+        lambda _run_id: ([{"url": url}], {crawler._norm(url): page}),
+    )
+    monkeypatch.setattr(
+        crawl_workflows, "_historical_credential_usernames", lambda _id: {}
+    )
+    notes = []
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_record_note",
+        lambda _id, workflow, status, _steps, _detail, **kwargs: notes.append(
+            (
+                workflow["name"],
+                status,
+                kwargs.get("needs_input"),
+                workflow["generate_sample_data"],
+            )
+        ),
+    )
+
+    class Browser:
+        async def new_context(self, **_kwargs):
+            raise AssertionError(
+                "Payment and deletion must stop before browser actions"
+            )
+
+        async def close(self):
+            pass
+
+    class Playwright:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+    async def launch(*_args, **_kwargs):
+        return Browser()
+
+    monkeypatch.setattr(playwright.async_api, "async_playwright", Playwright)
+    monkeypatch.setattr(crawl_workflows, "launch_playwright_browser", launch)
+    workflows = [
+        {
+            "name": name,
+            "goal": goal,
+            "reason": "Observed in crawl",
+            "start_url": url,
+            "destructive": destructive,
+            "generate_sample_data": True,
+        }
+        for name, goal, destructive in (
+            ("Make payment", "Pay for an order", False),
+            ("Delete address", "Remove an address", True),
+        )
+    ]
+    asyncio.run(
+        crawl_workflows.explore_after_crawl(
+            9_721,
+            llm_cfg=None,
+            site=SimpleNamespace(base_url="https://shop.test", login_url=""),
+            creds=[],
+            shared=None,
+            max_pages=10,
+            browser_engine="chromium",
+            browser_visible=False,
+            pw_proxy={},
+            global_http_header={},
+            selected_workflows=workflows,
+        )
+    )
+    assert notes == [
+        ("Make payment", "needs_input", True, False),
+        ("Delete address", "not_attempted", None, False),
+    ]
+
+
+def _payment_observation() -> dict:
+    return {
+        "url": "https://shop.test/checkout",
+        "controls": [],
+        "fields": [
+            {
+                "index": 0,
+                "name": "pm",
+                "fieldName": "pm",
+                "type": "radio",
+                "label": "New card",
+                "choice_value": "new",
+                "checked": True,
+            },
+            {
+                "index": 1,
+                "name": "pm",
+                "fieldName": "pm",
+                "type": "radio",
+                "label": "Bank transfer - pay after placing the order",
+                "choice_value": "bank-transfer",
+                "checked": False,
+            },
+            {
+                "index": 2,
+                "name": "cardNumber",
+                "fieldName": "cardNumber",
+                "fieldId": "cardNumber",
+                "type": "text",
+                "label": "Card number",
+            },
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "instructions",
+    [
+        "Pay by bank transfer",
+        "Use bank-transfer",
+        "Choose Bank transfer - pay after placing the order",
+    ],
+)
+def test_radio_choice_is_accepted_when_instructions_name_its_label(instructions):
+    assert crawl_workflows._action_allowed(
+        {"action": "check", "index": 1},
+        _payment_observation(),
+        instructions,
+        generate_sample_data=True,
+    ) == (True, "")
+
+
+def test_radio_choice_needs_a_whole_word_match():
+    observation = _payment_observation()
+    for instructions in ["Use a saved payment method", "Banking details to follow"]:
+        assert crawl_workflows._action_allowed(
+            {"action": "check", "index": 1},
+            observation,
+            instructions,
+            generate_sample_data=True,
+        ) == (False, "Payment or secret fields need user-supplied test data.")
+
+
+def test_needs_input_request_names_the_field_or_option():
+    observation = _payment_observation()
+    assert crawl_workflows._input_request(
+        "Payment or secret fields need user-supplied test data.",
+        {"action": "check", "index": 1},
+        observation,
+    ) == (
+        'Name the option to choose, such as "Bank transfer - pay after placing '
+        'the order". Other options: "New card".'
+    )
+    assert (
+        crawl_workflows._input_request(
+            "Payment or secret fields need user-supplied test data.",
+            {"action": "fill", "index": 2, "value": "4111"},
+            observation,
+        )
+        == 'Provide a test value for the "Card number" payment or secret field.'
+    )
+    assert (
+        crawl_workflows._input_request(
+            "The field needs a value supplied by the user.",
+            {"action": "fill", "index": 0},
+            {"fields": [{"fieldName": "postcode", "type": "text"}]},
+        )
+        == 'Provide a sample value for the "postcode" field.'
+    )

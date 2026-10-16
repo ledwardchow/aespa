@@ -39,7 +39,7 @@ function CoverageBadges({ statuses = {} }) {
   );
 }
 
-export function AttackSurfacePanel({ summary, routeGroups = [] }) {
+export function AttackSurfacePanel({ summary, routeGroups = [], runId, completion }) {
   const [expanded, setExpanded] = useState({
     meta: true,
     groups: true,
@@ -71,7 +71,6 @@ export function AttackSurfacePanel({ summary, routeGroups = [] }) {
     );
   }
 
-  const coverage = summary.coverage || {};
   const inputs = summary.input_surface || {};
   const technologies = summary.technologies || [];
   const shownRoutes = filteredRoutes.slice(0, 100);
@@ -92,7 +91,11 @@ export function AttackSurfacePanel({ summary, routeGroups = [] }) {
           <span>Parameters</span>
         </div>
         <div className="surface-summary-card">
-          <strong>{coverage.completion_percent || 0}%</strong>
+          <strong>
+            {completion
+              ? `${Math.round((100 * completion.resolved_units) / (completion.applicable_units || 1))}%`
+              : "Unavailable"}
+          </strong>
           <span>Coverage resolved</span>
         </div>
       </div>
@@ -106,9 +109,9 @@ export function AttackSurfacePanel({ summary, routeGroups = [] }) {
           onToggle={toggle}
         >
           <p className="subtle surface-section-note">
-            Only a few pages of each route were visited. Testing and coverage use these pages.
+            The crawl sampled pages from each route. Other found links remain available for testing.
           </p>
-          <RouteGroupsTable groups={routeGroups} />
+          <RouteGroupsTable groups={routeGroups} runId={runId} />
         </Section>
       ) : null}
 

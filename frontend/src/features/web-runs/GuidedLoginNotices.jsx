@@ -14,7 +14,7 @@ export function GuidedLoginNotices({
   const status = entraPrompts[0]?.status;
   const entraTone =
     status === "success"
-      ? "var(--success,#22c55e)"
+      ? "var(--ok)"
       : status === "timeout" || status === "retry_required"
         ? "var(--danger)"
         : "var(--accent)";
@@ -34,7 +34,7 @@ export function GuidedLoginNotices({
       {interactiveLogins.length > 0 && (
         <div
           style={{
-            background: "var(--surface-2,#2a2a2a)",
+            background: "var(--panel-2)",
             border: "1px solid var(--warn,#f59e0b)",
             borderRadius: 6,
             padding: "10px 14px",
@@ -52,7 +52,7 @@ export function GuidedLoginNotices({
       {entraPrompts.length > 0 && (
         <div
           style={{
-            background: "var(--surface-2,#2a2a2a)",
+            background: "var(--panel-2)",
             border: `2px solid ${entraTone}`,
             borderRadius: 6,
             padding: "12px 16px",
@@ -91,7 +91,7 @@ export function GuidedLoginNotices({
       {errors.length > 0 && (
         <div
           style={{
-            background: "var(--surface-2,#2a2a2a)",
+            background: "var(--panel-2)",
             border: "2px solid var(--danger)",
             borderRadius: 6,
             padding: "12px 16px",
@@ -120,7 +120,7 @@ export function GuidedLoginNotices({
       {pending.length > 0 && (
         <div
           style={{
-            background: "var(--surface-2,#2a2a2a)",
+            background: "var(--panel-2)",
             border: "2px solid var(--warn,#f59e0b)",
             borderRadius: 6,
             padding: "12px 16px",

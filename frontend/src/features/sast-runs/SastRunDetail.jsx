@@ -306,7 +306,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
     }
   };
   const onDelete = async () => {
-    if (!confirm("Delete this SAST run and all its leads?")) return;
+    if (!confirm(`Delete "${run?.name || "this SAST run"}" and all its leads?`)) return;
     try {
       const collId = run?.collection_id;
       await sastRunsApi.deleteSastRun(runId);

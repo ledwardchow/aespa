@@ -246,14 +246,14 @@ export const renderAliceBlocks = (text, isThinking, stepData = {}) => {
           <div
             className="alice-tool-header-row"
             style={{
-              borderLeft: "3px solid #10b981",
+              borderLeft: "3px solid var(--ok)",
               paddingLeft: "10px",
             }}
           >
             <span
               className="alice-tool-prompt"
               style={{
-                color: "#10b981",
+                color: "var(--ok)",
               }}
             >
               ←
@@ -261,8 +261,8 @@ export const renderAliceBlocks = (text, isThinking, stepData = {}) => {
             <span
               className="alice-tool-badge"
               style={{
-                background: "rgba(16, 185, 129, 0.15)",
-                color: "#34d399",
+                background: "var(--ok-bg)",
+                color: "var(--ok)",
               }}
             >
               RESPONSE

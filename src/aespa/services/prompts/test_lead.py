@@ -816,9 +816,10 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "all target requests must use aespa_runtime and remain scope-checked and traffic-logged.\n"
     "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
     "the target. Available sub-commands: site_map, page_detail, history_search, "
-    "finding_list, lead_list, lead_detail, target_inventory, traffic_search, extract_entities, specialist_status, "
+    "finding_list, lead_list, lead_detail, target_inventory, discovered_targets, traffic_search, extract_entities, specialist_status, "
     "coverage_gaps, workflow_list, workflow_detail. coverage_gaps returns a compact live list of uncovered "
     "page/category cells and named workflow checks; use it when choosing the next test or before done. "
+    "discovered_targets pages through exact URLs, including links skipped by grouped crawling. "
     "After 3 consecutive calls, either execute a probe/write a finding or "
     "include context_budget_reason with a concrete summary and why one more targeted "
     "scan round will change the next action.\n"
@@ -919,6 +920,10 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "page_id": {
                     "type": "integer",
                     "description": "Optional crawled page ID. Keeps this request attributed to the exact URL/SPA state.",
+                },
+                "object_check_id": {
+                    "type": "integer",
+                    "description": "Selected exact-object check ID when sending its comparison request.",
                 },
                 "headers": {"type": "object"},
                 "body": {},
@@ -1170,6 +1175,26 @@ THINKING_AGENT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "select_object_check",
+        "description": (
+            "Select one exact discovered object for an A01 account comparison after a direct "
+            "successful baseline request. This does not send a request. Use the target and "
+            "observation IDs returned by discovered_targets and http_request."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "integer"},
+                "baseline_observation_id": {"type": "integer"},
+                "comparison_actor_key": {"type": "string"},
+                "method": {"type": "string"},
+                "technique": {"type": "string"},
+                "parameter": {"type": "string"},
+            },
+            "required": ["target_id", "baseline_observation_id", "comparison_actor_key"],
+        },
+    },
+    {
         "name": "context_tool",
         "description": (
             "Retrieve scanner context without hitting the target. "
@@ -1290,6 +1315,10 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "evidence": {"type": "string"},
                 "request_evidence": {"type": "string"},
                 "response_evidence": {"type": "string"},
+                "object_check_id": {
+                    "type": "integer",
+                    "description": "Selected A01 object check ID backed by the same exact comparison.",
+                },
                 "note": {"type": "string"},
             },
             "required": ["title", "severity", "affected_url", "evidence"],
@@ -1468,6 +1497,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "target_url": {
                     "type": "string",
                     "description": "The specific URL the specialist should focus on.",
+                },
+                "method": {"type": "string"},
+                "body": {},
+                "state_key": {"type": "string"},
+                "comparison_actor_key": {"type": "string"},
+                "evidence_observation_ids": {
+                    "type": "array", "items": {"type": "integer"},
+                    "description": "Direct access observation IDs that support this handoff.",
                 },
                 "page_id": {
                     "type": "integer",
@@ -1784,6 +1821,8 @@ Context tools:
   `owasp_category` filters by exact OWASP code (e.g. A03); `search` is free-text substring.
 - target_inventory: args may include page_id, kind, source, search/filter, and limit; returns normalized
   endpoints, forms, inputs, scripts, storage keys, IDs, and response fields from crawl intelligence.
+- discovered_targets: args may include route_pattern, search, cursor, and limit; returns exact URLs,
+  who saw each link, direct access observations, and selected checks. A link alone is not access proof.
 - search_assets: alias of target_inventory, useful with source/kind/search for JS/public asset leads.
 - traffic_search: args may include page_id, session_label, method, status, search/filter, and limit; returns captured HTTP
   request/response excerpts from crawl and scans.

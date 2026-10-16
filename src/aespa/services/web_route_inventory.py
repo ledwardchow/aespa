@@ -222,6 +222,8 @@ def _upsert_route_shell(
         )
         page_id = _match_page_for_url(url, pages)
         page = session.get(CrawledPage, page_id) if page_id is not None else None
+        if page is None and not browser_observation:
+            return None, False
         if page is None:
             page = CrawledPage(
                 test_run_id=run_id,

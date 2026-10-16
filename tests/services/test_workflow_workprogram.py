@@ -5,7 +5,14 @@ import json
 import pytest
 from sqlmodel import select
 
-from aespa.models import CrawledPage, ScanLog, Site, TestRun, TrafficEntry
+from aespa.models import (
+    CrawledPage,
+    ScanLog,
+    Site,
+    TestRun,
+    TrafficEntry,
+    WorkflowCoverageItem,
+)
 from aespa.services.web_workprogram import (
     _build_web_enforce_directive,
     get_web_coverage_gaps,
@@ -38,12 +45,14 @@ def _page(
     url: str = "https://target.local/orders",
     steps: list[dict] | None = None,
     business_logic: bool = False,
+    takes_input: bool = False,
 ) -> CrawledPage:
     page = CrawledPage(
         test_run_id=run_id,
         url=url,
         replay_steps_json=json.dumps({"root_url": url, "steps": steps or []}),
         has_business_logic=business_logic,
+        takes_input=takes_input,
         in_scope=True,
         state_kind=state_kind,
         state_key=f"state-{access}-{db_session.exec(select(CrawledPage.id)).all()}",
@@ -292,4 +301,184 @@ def test_sensitive_signed_in_workflow_gets_every_check_except_tampering(db_sessi
         "replay",
         "csrf",
         "reauth",
+    }
+
+
+def test_inventory_keeps_unreached_note_without_promoting_observed_states(db_session):
+    run = _run(db_session)
+    first = _page(
+        db_session, run.id, url="https://target.local/app", steps=[{"kind": "click"}]
+    )
+    second = _page(
+        db_session, run.id, url="https://target.local/app", steps=[{"kind": "click"}]
+    )
+    static = _page(
+        db_session, run.id, state_kind="url", url="https://target.local/help"
+    )
+    first.state_label = "Review editor"
+    second.state_label = "Checkout form"
+    db_session.add(first)
+    db_session.add(second)
+    db_session.add(static)
+    failed = ScanLog(
+        test_run_id=run.id,
+        run_kind="web",
+        phase="crawl_note",
+        data_json=json.dumps(
+            {
+                "note": {
+                    "name": "Payment setup",
+                    "goal": "Add payment",
+                    "status": "needs_input",
+                    "needs_input": True,
+                    "start_url": "https://target.local/app",
+                }
+            }
+        ),
+    )
+    db_session.add(failed)
+    db_session.commit()
+
+    assert seed_workflow_tests(run.id) == 0
+    result = list_workflow_tests(run.id)
+    assert [(row["name"], row["crawl_status"]) for row in result["workflows"]] == [
+        ("Payment setup", "needs_input"),
+    ]
+    assert result["items"] == []
+    assert static.id not in {row["reached_page_id"] for row in result["workflows"]}
+
+
+def test_generic_forms_and_click_states_are_not_named_workflows(db_session):
+    run = _run(db_session)
+    admin = _page(
+        db_session,
+        run.id,
+        access=True,
+        url="https://target.local/admin/settings",
+        business_logic=True,
+        takes_input=True,
+    )
+    admin.state_label = "Admin settings form"
+    customer = _page(
+        db_session,
+        run.id,
+        url="https://target.local/customer/profile",
+        business_logic=True,
+        takes_input=True,
+    )
+    customer.state_label = "Customer profile form"
+    click = _page(
+        db_session,
+        run.id,
+        url="https://target.local/catalog",
+        steps=[{"kind": "click", "name": "Show products"}],
+    )
+    click.state_label = "Products panel"
+    db_session.add_all([admin, customer, click])
+    db_session.commit()
+
+    assert seed_workflow_tests(run.id) == 0
+    result = list_workflow_tests(run.id)
+    assert result["workflows"] == []
+    assert result["items"] == []
+    assert sum(result["totals"].values()) == 0
+    assert get_web_coverage_gaps(run.id)["workflow_remaining"] == 0
+
+    note = _note(db_session, run.id, customer, "Update customer profile")
+    assert seed_workflow_tests(run.id) > 0
+    result = list_workflow_tests(run.id)
+    assert [row["name"] for row in result["workflows"]] == ["Update customer profile"]
+    assert {item["workflow_key"] for item in result["items"]} == {f"note:{note.id}"}
+
+
+def test_retry_updates_latest_inventory_note_without_changing_identity(db_session):
+    run = _run(db_session)
+    page = _page(db_session, run.id)
+    first = ScanLog(
+        test_run_id=run.id,
+        run_kind="web",
+        phase="crawl_note",
+        data_json=json.dumps(
+            {"note": {"name": "Checkout", "status": "needs_input", "needs_input": True}}
+        ),
+    )
+    db_session.add(first)
+    db_session.commit()
+    _note(db_session, run.id, page, "Checkout", retry_of=first.id)
+    seed_workflow_tests(run.id)
+    result = list_workflow_tests(run.id)
+    assert len(result["workflows"]) == 1
+    assert result["workflows"][0]["workflow_key"] == f"note:{first.id}"
+    assert result["workflows"][0]["crawl_status"] == "reached"
+    assert all(item["workflow_key"] == f"note:{first.id}" for item in result["items"])
+
+
+def test_named_note_adopts_legacy_page_check_and_preserves_result(db_session):
+    run = _run(db_session)
+    page = _page(db_session, run.id, steps=[{"kind": "click", "name": "Open checkout"}])
+    page.state_label = "Checkout form"
+    db_session.add(page)
+    db_session.commit()
+    legacy = WorkflowCoverageItem(
+        test_run_id=run.id,
+        workflow_key=f"page:{page.id}",
+        reached_page_id=page.id,
+        reached_page_url=page.url,
+        name="Checkout form",
+        test_kind="sequence",
+        owasp_category="A04",
+        status="passed",
+        evidence_json=json.dumps({"observed_behavior": "Rejected"}),
+    )
+    stray = WorkflowCoverageItem(
+        test_run_id=run.id,
+        workflow_key=f"page:{page.id}",
+        reached_page_id=page.id,
+        reached_page_url=page.url,
+        name="Checkout form",
+        test_kind="access",
+        owasp_category="A01",
+    )
+    db_session.add_all([legacy, stray])
+    db_session.commit()
+    db_session.refresh(legacy)
+    assert seed_workflow_tests(run.id) == 0
+    hidden = list_workflow_tests(run.id)
+    assert hidden["items"] == []
+    assert sum(hidden["totals"].values()) == 0
+    assert remaining_workflow_tests(run.id) == []
+    assert get_web_coverage_gaps(run.id)["workflow_remaining"] == 0
+
+    note = _note(db_session, run.id, page, "Checkout form")
+    assert seed_workflow_tests(run.id) == 0
+    result = list_workflow_tests(run.id)
+    assert len(result["items"]) == 1
+    assert result["items"][0]["id"] == legacy.id
+    assert result["items"][0]["status"] == "passed"
+    assert result["items"][0]["workflow_key"] == f"note:{note.id}"
+    assert result["totals"]["not_started"] == 0
+    assert db_session.exec(
+        select(WorkflowCoverageItem).where(WorkflowCoverageItem.test_run_id == run.id)
+    ).all() == [legacy, stray]
+    assert len(result["workflows"]) == 1
+
+
+def test_two_named_workflows_on_one_page_keep_separate_checks(db_session):
+    run = _run(db_session)
+    page = _page(db_session, run.id, steps=[{"kind": "click", "name": "Open form"}])
+    page.state_label = "Account form"
+    db_session.add(page)
+    db_session.commit()
+    assert seed_workflow_tests(run.id) == 0
+    first = _note(db_session, run.id, page, "Update address")
+    second = _note(db_session, run.id, page, "Update phone")
+    assert seed_workflow_tests(run.id) == 2
+    result = list_workflow_tests(run.id)
+    assert {item["workflow_key"] for item in result["items"]} == {
+        f"note:{first.id}",
+        f"note:{second.id}",
+    }
+    assert {row["name"] for row in result["workflows"]} == {
+        "Update address",
+        "Update phone",
     }

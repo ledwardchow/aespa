@@ -517,7 +517,7 @@ start_crawl(run_id)
                  v.   Enqueue new URLs (in-scope, within depth/page limits)
                  vi.  Persist CrawledPage + PageLinks + TrafficEntries
        3. Extract TargetIntelItems (endpoints, forms, inputs, IDs, scripts, JWT hints)
-       4. Ask the crawler model about workflows suggested by the page inventory but not reached
+       4. List reached functions and ask the crawler model about workflows suggested by the page inventory
           • Try a few visible browser actions to reach them, except deletion
           • Save newly reached pages with replay steps and record workflow notes
           • Record deletion or blocked workflows without exercising them
@@ -535,21 +535,26 @@ shows a notice when a workflow needs input and has a Notifications subtab for
 workflows that stopped because the crawler lacked
 sample data or instructions. Users can supply test data there to continue one
 workflow. Submitting the data opens Workflows so the user can watch the retry.
-Successful, safe workflow notes also seed security checks. Each check belongs to
-the original note, so a retry updates the same workflow. A04 covers the sequence;
+The workflow inventory includes the latest named crawl note for each retry chain.
+Input fields, business-logic tags, and navigation clicks alone do not create workflows.
+Unreached workflows appear in coverage with crawl progress and no security checks.
+Reached named workflows seed security checks. Each check belongs to the original note, so
+a retry updates the same workflow. A04 covers the sequence;
 an authenticated or object-specific workflow also gets an A01 access check. The
 crawler reaching a workflow does not count as a security test.
 The retry keeps the same deletion checks and adds its result
 to the workflow notes. The retry status endpoint reports the current browser
 step, page path, completed actions, and final result. A completed retry clears the earlier notification. If
 the crawler needs more information, it adds a new notification with the specific
-request and the submitted instructions ready to edit. The user can also choose
-Generate for me on one notification, allowing the crawler to make up ordinary
-test values for that retry. Generated values are added to the editable
-instructions. The action guard checks the chosen control and its target for
-deletion, and the browser blocks DELETE requests and delete paths. Other state
-changes, including reviews and orders, are allowed. The crawler still requires
-user-provided payment details and secrets.
+request and the submitted instructions ready to edit. Ordinary workflows and retries generate missing sample values by default.
+Generated values are added to the editable instructions. Payment workflows do
+not generate data, and deletion workflows remain blocked. Payment details,
+existing passwords, verification codes, and API keys require supplied values.
+Clearly new passwords for test accounts can be generated. Account-opening and
+contact forms can use generated values without being classified as payments.
+The action guard checks the chosen control and its target, and the browser
+blocks DELETE requests and delete paths. Other ordinary state changes, such as
+submitting a review, are allowed.
 The Site saves the instructions and generated values only after the workflow is
 reached. Site
 configuration lists these saved workflows and lets the user edit or remove
@@ -571,7 +576,7 @@ By default, the crawler schedules an anonymous phase alongside the authenticated
 
 URL crawls can optionally use **Group similar pages** (`services/route_sampling.py`). It uses no site-specific rules.
 
-- **Routes.** Before adding links to the browser queue, the crawler groups them into routes by URL shape. A path segment or query value that contains digits, is 20 or more characters long, or joins three or more words is treated as changing (an ID or slug); other segments are fixed words. A route can vary one segment, every changing segment together (`/{slug}/p/{id}`, `/2024/10/23/{id}/{slug}`), or its ID-like query values (`?p=123`, `?page=7`). Path routes ignore the query string, so the same item linked with different tracking or sort values counts once. Single top-level pages are never grouped. Action words (account, admin, cart, checkout, login, search, new, edit, delete and similar) may be fixed parts of a route, such as `/admin/products/{slug}`, but never the part that varies; a URL ending in an action, such as `/admin/products/new` or `/orders/{id}/edit`, varies only its ID-like parts, so forms for different kinds of record are each visited. Fragment links count as the page they point into, as in the crawler.
+- **Routes.** Before adding links to the browser queue, the crawler groups them into routes by URL shape. A path segment or query value that contains digits, is 20 or more characters long, or joins three or more words is treated as changing (an ID or slug); other segments are fixed words. A route can vary one segment, every changing segment together (`/{slug}/p/{id}`, `/2024/10/23/{id}/{slug}`), or its ID-like query values (`?p=123`, `?page=7`). A path route may group links that have different query values, but each complete URL remains a separate member. Single top-level pages are never grouped. Action words (account, admin, cart, checkout, login, search, new, edit, delete and similar) may be fixed parts of a route, such as `/admin/products/{slug}`, but never the part that varies; a URL ending in an action, such as `/admin/products/new` or `/orders/{id}/edit`, varies only its ID-like parts, so forms for different kinds of record are each visited. The target inventory keeps query order, repeated and empty query values, trailing slashes, fragments, and explicit browser state keys.
 - **When a route forms.** Links are counted per route across the whole crawl. A route forms at 10 links, or at 2 when other routes of the same URL shape already add up to 10 links or one has formed. This lets a news site's many small sections join quickly.
 - **Examples.** The crawler holds the route's other links, and visits examples it has not already queued ahead of ordinary links. It starts with three spread-out examples, then two more. Among candidate routes of one shape, only the largest takes examples; the others wait for its decision.
 - **Comparing pages.** Pages are compared by layout: a bottom-k sketch (256 hashes) of the element tag, id and class-name tokens, with digits and hex runs normalised. The typical example is the one most similar to the rest. An example belongs with it when its similarity is at least 0.75 of the typical similarity, and at least 0.5. This adapts to sites whose pages of one template are 0.65 similar as well as to those at 0.95. A route is confirmed when at least 75% of five or more examples belong together. The others are reported as examples that looked different.
@@ -580,7 +585,15 @@ URL crawls can optionally use **Group similar pages** (`services/route_sampling.
 - **Accounts.** Each account compares its own examples and reuses another account's example URLs, needing three. Accounts may see different pages.
 - **Leftover checks.** When an account's queue empties, any check that cannot finish releases its held links, so links are never silently dropped.
 - **Saving state.** Sampler state, including 256-hash sketches only for undecided examples and templates, is saved on the run when a route's status changes, otherwise at most every five seconds and when the crawl ends.
-- **Results.** Confirmed routes are shown in the site map and listed in the scan's recon context, while scanning and coverage use the visited `CrawledPage` records. The default **Visit each URL** mode and Interactive SPA mode do not use this grouping.
+- **Results.** Confirmed routes are shown in the site map and listed in the scan's recon context. Grouping limits crawl visits and indexing only. The Test Lead can test other in-scope URLs and object IDs without first indexing every page, including records outside the crawl sample for access control, ownership, and business-logic checks. Matching layouts do not prove that records share access rules. Traffic and finding evidence retain the concrete URLs tested. Route-level coverage does not prove that every record in a group was tested. The default **Visit each URL** mode and Interactive SPA mode do not use this grouping.
+
+The exact link inventory lives in `DiscoveredTarget`, with link sightings in `TargetDiscovery` and direct responses in `TargetAccessObservation`. A link sighting records which account saw the link. It does not prove access or ownership. The crawler saves eligible links before sampling. Inventory reads use SQL filters and cursor paging rather than a fixed list in the lead prompt.
+
+Object checks use `ScanObligation` with an exact target, method, and ordered pair of accounts. A successful response under an identified account supplies the baseline for a comparison. The comparison keeps its own execution and evidence. Unknown access and missing ownership evidence remain inconclusive. Discovered links alone create no coverage work or page records.
+
+`web_workprogram.web_completion` counts applicable page checks and deliberately selected object checks. An exact object check attaches to a page check only when that page match is unambiguous. A selected check on an uncrawled target adds one separate unit. Pending child checks remain pending even when the page has an earlier covered result. Grouped rows are a display view and do not decide completion.
+
+Attack Surface expands each group into a searchable, paged list of exact links. OWASP Coverage expands selected object checks inside their route. Finding markers remain visible while other checks are pending. Saved crawl archives retain the inventory and provenance. Older archives cannot recover links that were never saved.
 
 Interactive mode also explores bounded, replayable browser workflows. It can
 select radio buttons, checkboxes, and select options, then follow controls that
@@ -1014,8 +1027,11 @@ Input-bearing A03 cells additionally persist class-level states in `test_classes
 - `get_web_coverage_matrix(run_id)` powers the coverage view inside the **Attack Surface & Coverage** tab (`GET /api/test-runs/{id}/coverage`).
 
 OWASP Coverage has **Pages** and **Workflows** tabs. The Pages tab keeps the
-page-by-category matrix and its existing percentage. The Workflows tab reads
-`WorkflowCoverageItem` rows from `GET /api/test-runs/{id}/workflow-coverage`.
+page-by-category matrix and progress from applicable page and selected object checks. The Workflows tab reads
+workflow inventory and `WorkflowCoverageItem` rows from
+`GET /api/test-runs/{id}/workflow-coverage`. Crawl progress is separate from
+security check status. Reaching a page confirms the function or state was
+observed, not that a transaction was completed or security was tested.
 The Test Lead records a workflow result with expected and observed behavior and
 scan traffic IDs. Full mode keeps an untested or inconclusive workflow check
 open; a concrete blocker can close the check without counting it as covered.

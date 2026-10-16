@@ -1,3 +1,4 @@
+import { fmtTime } from "../../shared/lib/dates.js";
 import { useHashTab } from "../../shared/navigation/useHashTab.js";
 
 import { SastAgentGroupView, SastAgentRoster } from "./SastAgentRoster.jsx";
@@ -11,15 +12,6 @@ const GROUP_TABS = [
   { key: "sink", label: "Sink", groupId: "sast-sink-workers" },
   { key: "validator", label: "Validators", groupId: "sast-validators" },
 ];
-
-export function formatTime(value) {
-  if (!value) return "—";
-  return new Date(value).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
 
 export function ActivityView({ logs, agentLog, scanRunning, runId, analysisMode }) {
   const groupTabs = GROUP_TABS.filter(
@@ -81,7 +73,7 @@ export function ActivityView({ logs, agentLog, scanRunning, runId, analysisMode 
         <div className="sast-activity-feed">
           {logs.map((item) => (
             <div className="sast-activity-entry" key={item.id}>
-              <time>{formatTime(item.created_at)}</time>
+              <time>{fmtTime(item.created_at)}</time>
               <span className="sast-activity-phase">{item.phase || "event"}</span>
               <span className="sast-activity-message">{item.message}</span>
             </div>

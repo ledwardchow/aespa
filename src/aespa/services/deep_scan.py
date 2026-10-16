@@ -24,10 +24,13 @@ from aespa.models import (
     DeepScanTask,
     DeepScanTaskFinding,
     DeepScanVariant,
+    DiscoveredTarget,
     ProbeExecution,
     ScanFinding,
+    ScannerSession,
     ScanObligation,
     Site,
+    TargetAccessObservation,
     TestRun,
     TrafficEntry,
 )
@@ -65,6 +68,7 @@ finding in this baseline step. Call done after the clean baseline is captured or
 specific blocker."""
 
 _TECHNIQUE_TO_ATTACK_CLASS = {
+    "idor": "idor",
     "auth_vs_unauth": "auth_bypass",
     "user_a_vs_user_b": "idor",
     "privilege_escalation": "auth_bypass",
@@ -418,6 +422,7 @@ def _persist_campaign(session: Session, run_id: int, campaign: dict) -> None:
         fingerprint=_fingerprint(
             campaign["task_kind"],
             campaign["route_template"],
+            campaign["target_url"],
             campaign["http_method"],
             campaign.get("lead_id"),
             campaign.get("workflow_test_id"),
@@ -451,6 +456,29 @@ def _persist_campaign(session: Session, run_id: int, campaign: dict) -> None:
                 **check,
             )
         )
+
+
+def _comparison_session_label(
+    session: Session, run_id: int, actor_key: str
+) -> str | None:
+    if actor_key == "anonymous":
+        return "anonymous"
+    if not actor_key.startswith("credential:"):
+        return None
+    try:
+        credential_id = int(actor_key.partition(":")[2])
+    except ValueError:
+        return None
+    candidates = session.exec(
+        select(ScannerSession)
+        .where(ScannerSession.test_run_id == run_id)
+        .where(ScannerSession.run_kind == "web")
+        .where(ScannerSession.credential_id == credential_id)
+        .where(ScannerSession.is_active.is_(True))
+        .where(ScannerSession.lifecycle_state.in_(("active", "verified")))
+        .order_by(ScannerSession.id)
+    ).all()
+    return candidates[0].label if candidates else None
 
 
 def seed_deep_tasks(run_id: int) -> int:
@@ -567,12 +595,48 @@ def seed_deep_tasks(run_id: int) -> int:
             )
             if not attack_class:
                 continue
-            target, route_template, page = _operation_for_obligation(
-                obligation, pages, traffic
-            )
-            identity = obligation.required_identity_comparison
+            if obligation.scope_kind == "object":
+                exact_target = session.get(DiscoveredTarget, obligation.target_id)
+                if exact_target is None:
+                    continue
+                identity = _comparison_session_label(
+                    session, run_id, obligation.comparison_actor_key or ""
+                )
+                if identity is None:
+                    continue
+                baseline_observation = session.get(
+                    TargetAccessObservation, obligation.baseline_observation_id
+                )
+                if (
+                    baseline_observation is None
+                    or baseline_observation.test_run_id != run_id
+                    or baseline_observation.target_id != exact_target.id
+                    or baseline_observation.method != obligation.http_method.upper()
+                    or baseline_observation.actor_key != obligation.baseline_actor_key
+                    or baseline_observation.result != "reached"
+                ):
+                    continue
+                baseline_traffic_id = (
+                    baseline_observation.source_id
+                    if baseline_observation.source_kind == "traffic"
+                    else None
+                )
+                if baseline_traffic_id is None:
+                    continue
+                target = exact_target.url
+                route_template = exact_target.route_pattern
+                page = _page_for_target(pages, target)
+            else:
+                target, route_template, page = _operation_for_obligation(
+                    obligation, pages, traffic
+                )
+                identity = obligation.required_identity_comparison
             priority = 9 if obligation.owasp_category in {"A01", "A03", "A07"} else 6
-            key = ("operation", obligation.http_method.upper(), route_template)
+            key = (
+                ("object", obligation.id)
+                if obligation.scope_kind == "object"
+                else ("operation", obligation.http_method.upper(), route_template)
+            )
             add_group(
                 key,
                 {
@@ -600,6 +664,17 @@ def seed_deep_tasks(run_id: int) -> int:
                     "hypothesis": (
                         f"Test {obligation.vulnerability_technique}. Use obligation_id="
                         f"{obligation.id} and OWASP category {obligation.owasp_category} on probes."
+                        + (
+                            f" Exact object {target}; method {obligation.http_method.upper()}; "
+                            f"baseline actor {obligation.baseline_actor_key}; "
+                            f"comparison actor {obligation.comparison_actor_key} using session {identity}; "
+                            f"state {exact_target.state_key!r}; body identity {obligation.body_identity}. "
+                            f"Retrieve baseline request {baseline_traffic_id} with context_tool "
+                            f'traffic_search args={{"traffic_id":{baseline_traffic_id}}}; '
+                            "reuse its exact request body for the comparison."
+                            if obligation.scope_kind == "object"
+                            else ""
+                        )
                     ),
                     "priority": priority,
                 },
@@ -788,13 +863,34 @@ def _seed_baseline_variants(run_id: int, *, reuse_captured: bool) -> int:
                 select(DeepScanVariant.id).where(DeepScanVariant.task_id == task.id)
             ).first():
                 continue
-            matches = [
-                row
-                for row in traffic
-                if (row.method or "GET").upper() == task.http_method.upper()
-                and _canonical_route(row.url) == task.route_template
-            ]
-            captured = matches[-1] if reuse_captured and matches else None
+            selected = (
+                session.get(ScanObligation, task.obligation_id)
+                if task.obligation_id
+                else None
+            )
+            if selected is not None and selected.scope_kind == "object":
+                observation = session.get(
+                    TargetAccessObservation, selected.baseline_observation_id
+                )
+                captured = (
+                    session.get(TrafficEntry, observation.source_id)
+                    if reuse_captured
+                    and observation is not None
+                    and observation.test_run_id == run_id
+                    and observation.source_kind == "traffic"
+                    and observation.target_id == selected.target_id
+                    and observation.actor_key == selected.baseline_actor_key
+                    and observation.result == "reached"
+                    else None
+                )
+            else:
+                matches = [
+                    row
+                    for row in traffic
+                    if (row.method or "GET").upper() == task.http_method.upper()
+                    and _canonical_route(row.url) == task.route_template
+                ]
+                captured = matches[-1] if reuse_captured and matches else None
             purpose = (
                 "Reuse the captured request as the tester baseline."
                 if captured
@@ -1342,6 +1438,140 @@ def _shared_ledger_brief(task_id: int) -> str:
     return "\n".join(lines) if len(lines) > 1 else "Shared tester ledger is empty."
 
 
+def _execution_scope(
+    session: Session,
+    task: DeepScanTask,
+    obligation: ScanObligation,
+    traffic: TrafficEntry,
+) -> tuple[int | None, str | None, str | None] | None:
+    from aespa.services.target_catalog import exact_url
+    from aespa.services.web_workprogram import _request_body_identity
+
+    if (
+        obligation.run_kind != "web"
+        or obligation.run_id != task.run_id
+        or traffic.test_run_id != task.run_id
+        or traffic.api_test_run_id is not None
+        or traffic.method.upper() != obligation.http_method.upper()
+    ):
+        return None
+    if obligation.scope_kind != "object":
+        try:
+            if exact_url(traffic.url) != exact_url(task.target_url):
+                return None
+        except ValueError:
+            return None
+        return None, None, None
+    target = session.get(DiscoveredTarget, obligation.target_id)
+    if target is None or target.test_run_id != task.run_id:
+        return None
+    try:
+        if exact_url(traffic.url) != target.url:
+            return None
+    except ValueError:
+        return None
+    if _request_body_identity(traffic.request_body) != obligation.body_identity:
+        return None
+    observation = session.exec(
+        select(TargetAccessObservation)
+        .where(TargetAccessObservation.test_run_id == task.run_id)
+        .where(TargetAccessObservation.target_id == target.id)
+        .where(TargetAccessObservation.source_kind == "traffic")
+        .where(TargetAccessObservation.source_id == traffic.id)
+        .where(TargetAccessObservation.method == obligation.http_method.upper())
+        .where(TargetAccessObservation.actor_key == obligation.comparison_actor_key)
+    ).first()
+    if observation is None:
+        return None
+    if target.state_key is not None:
+        page = session.get(CrawledPage, traffic.page_id) if traffic.page_id else None
+        if (
+            page is None
+            or page.test_run_id != task.run_id
+            or page.state_key != target.state_key
+            or exact_url(page.url) != target.url
+        ):
+            return None
+    identity = hashlib.sha256(
+        json.dumps(
+            [
+                obligation.http_method.upper(),
+                target.url,
+                target.state_identity,
+                obligation.body_identity,
+                obligation.comparison_actor_key,
+            ],
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return target.id, obligation.comparison_actor_key, identity
+
+
+def _record_check_execution(
+    session: Session,
+    task: DeepScanTask,
+    check: DeepScanCheck,
+    traffic_rows: list[TrafficEntry],
+    *,
+    outcome: str,
+    oracle: str,
+) -> bool:
+    if not check.obligation_id:
+        return False
+    obligation = session.get(ScanObligation, check.obligation_id)
+    if obligation is None:
+        return False
+    matched = False
+    for traffic in traffic_rows:
+        if traffic.owasp_category and traffic.owasp_category != check.owasp_category:
+            continue
+        scope = _execution_scope(session, task, obligation, traffic)
+        if scope is None:
+            continue
+        existing = session.exec(
+            select(ProbeExecution)
+            .where(ProbeExecution.run_kind == "web")
+            .where(ProbeExecution.run_id == task.run_id)
+            .where(ProbeExecution.obligation_id == obligation.id)
+            .where(ProbeExecution.traffic_id == traffic.id)
+        ).first()
+        target_id, actor_key, request_identity = scope
+        if existing is not None and (
+            obligation.scope_kind != "object"
+            or (
+                existing.target_id == target_id
+                and existing.acting_actor_key == actor_key
+                and existing.request_identity == request_identity
+            )
+        ):
+            matched = True
+            continue
+        execution = ProbeExecution(
+            run_kind="web",
+            run_id=task.run_id,
+            obligation_id=obligation.id,
+            traffic_id=traffic.id,
+            target_id=target_id,
+            acting_actor_key=actor_key,
+            request_identity=request_identity,
+            session_identity=traffic.session_label or check.session_label,
+            status_code=traffic.status,
+            response_time_ms=traffic.duration_ms,
+        )
+        session.add(execution)
+        session.flush()
+        session.add(
+            CoverageEvidence(
+                execution_id=execution.id,
+                observed_behavior=outcome[:2000],
+                evaluation_oracle=oracle,
+                outcome="finding" if check.finding_id else "inconclusive",
+            )
+        )
+        matched = True
+    return matched
+
+
 def _refresh_campaign_state(session: Session, task: DeepScanTask) -> None:
     variants = list(
         session.exec(
@@ -1375,6 +1605,49 @@ def _refresh_campaign_state(session: Session, task: DeepScanTask) -> None:
     for check in session.exec(
         select(DeepScanCheck).where(DeepScanCheck.task_id == task.id)
     ).all():
+        obligation = (
+            session.get(ScanObligation, check.obligation_id)
+            if check.obligation_id
+            else None
+        )
+        if obligation is not None and obligation.scope_kind == "object":
+            executions = session.exec(
+                select(ProbeExecution)
+                .where(ProbeExecution.run_kind == "web")
+                .where(ProbeExecution.run_id == task.run_id)
+                .where(ProbeExecution.obligation_id == obligation.id)
+                .where(ProbeExecution.target_id == obligation.target_id)
+                .where(
+                    ProbeExecution.acting_actor_key == obligation.comparison_actor_key
+                )
+            ).all()
+            direct = any(
+                execution.traffic_id is not None
+                and (traffic := session.get(TrafficEntry, execution.traffic_id))
+                is not None
+                and _execution_scope(session, task, obligation, traffic) is not None
+                for execution in executions
+            )
+            confirmed = session.exec(
+                select(ScanFinding.id)
+                .where(ScanFinding.test_run_id == task.run_id)
+                .where(ScanFinding.object_check_id == obligation.id)
+                .where(ScanFinding.validation_status == "confirmed")
+            ).first()
+            if confirmed is not None and direct:
+                check.status = "finding"
+                check.finding_id = confirmed
+                obligation.status = "finding"
+            elif direct:
+                check.status = "inconclusive"
+                obligation.status = "inconclusive"
+            else:
+                check.status = "queued"
+            check.outcome = task.outcome
+            check.updated_at = datetime.now(_UTC)
+            session.add(check)
+            session.add(obligation)
+            continue
         check.status = (
             "finding" if check.finding_id else ("failed" if failed else "complete")
         )
@@ -1582,44 +1855,14 @@ def _finish_variant(
             ]
         if variant.kind != "baseline":
             for check in assigned_checks:
-                if not check.obligation_id:
-                    continue
-                matching_traffic = [
-                    row
-                    for row in traffic_rows
-                    if not row.owasp_category
-                    or row.owasp_category == check.owasp_category
-                ]
-                for traffic in matching_traffic[:1]:
-                    execution = session.exec(
-                        select(ProbeExecution)
-                        .where(ProbeExecution.run_kind == "web")
-                        .where(ProbeExecution.run_id == task.run_id)
-                        .where(ProbeExecution.obligation_id == check.obligation_id)
-                        .where(ProbeExecution.traffic_id == traffic.id)
-                    ).first()
-                    if execution is None:
-                        execution = ProbeExecution(
-                            run_kind="web",
-                            run_id=task.run_id,
-                            obligation_id=check.obligation_id,
-                            traffic_id=traffic.id,
-                            session_identity=check.session_label,
-                            status_code=traffic.status,
-                            response_time_ms=traffic.duration_ms,
-                        )
-                        session.add(execution)
-                        session.flush()
-                        session.add(
-                            CoverageEvidence(
-                                execution_id=execution.id,
-                                observed_behavior=outcome[:2000],
-                                evaluation_oracle="deep_variant",
-                                outcome="finding"
-                                if check.finding_id
-                                else "inconclusive",
-                            )
-                        )
+                _record_check_execution(
+                    session,
+                    task,
+                    check,
+                    traffic_rows,
+                    outcome=outcome,
+                    oracle="deep_variant",
+                )
         variant.status = status
         variant.outcome = outcome[:4000]
         variant.error_message = error[:4000]
@@ -1880,35 +2123,23 @@ def _finish_task(
             else:
                 obligation = None
             if obligation is not None:
-                obligation.status = "finding" if check.finding_id else "inconclusive"
+                matched = _record_check_execution(
+                    session,
+                    task,
+                    check,
+                    traffic_rows,
+                    outcome=outcome,
+                    oracle="deep_worker",
+                )
+                if obligation.scope_kind == "object" and not matched:
+                    check.status = "queued"
+                    obligation.status = "queued"
+                else:
+                    obligation.status = (
+                        "finding" if check.finding_id else "inconclusive"
+                    )
                 obligation.updated_at = now
                 session.add(obligation)
-                matching_traffic = [
-                    traffic
-                    for traffic in traffic_rows
-                    if not traffic.owasp_category
-                    or traffic.owasp_category == check.owasp_category
-                ]
-                for traffic in matching_traffic[:1]:
-                    execution = ProbeExecution(
-                        run_kind="web",
-                        run_id=task.run_id,
-                        obligation_id=obligation.id,
-                        traffic_id=traffic.id,
-                        session_identity=check.session_label,
-                        status_code=traffic.status,
-                        response_time_ms=traffic.duration_ms,
-                    )
-                    session.add(execution)
-                    session.flush()
-                    session.add(
-                        CoverageEvidence(
-                            execution_id=execution.id,
-                            observed_behavior=outcome[:2000],
-                            evaluation_oracle="deep_worker",
-                            outcome="finding" if check.finding_id else "inconclusive",
-                        )
-                    )
         session.add(task)
         session.add(attempt)
         session.commit()
@@ -2190,6 +2421,7 @@ async def _run_deep_scan(run_id: int) -> None:
             if not _planning_is_complete(baseline)
             and variant_counts[baseline.task_id] == 1
         ]
+    session_svc.ensure_anonymous_session(run_id, source="deep_scan", run_kind="web")
     session_vault = session_svc.load_session_vault(run_id)
     scanner_svc._finding_hooks[run_id] = _make_web_post_finding_fn(run_id)
     events_svc.emit(
@@ -2223,6 +2455,72 @@ async def _run_deep_scan(run_id: int) -> None:
                 f"How it differs: {variant.difference}{campaign_checks}\n\n"
                 f"{_shared_ledger_brief(task.id)}"
             )
+            object_scope = None
+            object_session_label = None
+            object_required = False
+            if task.obligation_id is not None:
+                with Session(get_engine()) as scope_session:
+                    scoped_check = scope_session.get(ScanObligation, task.obligation_id)
+                    if scoped_check is not None and scoped_check.scope_kind == "object":
+                        object_required = True
+                        target = scope_session.get(
+                            DiscoveredTarget, scoped_check.target_id
+                        )
+                        baseline = scope_session.get(
+                            TargetAccessObservation,
+                            scoped_check.baseline_observation_id,
+                        )
+                        if target is not None and baseline is not None:
+                            object_scope = (scoped_check, target, baseline)
+                            dispatch_actor = (
+                                scoped_check.baseline_actor_key
+                                if variant.kind == "baseline"
+                                else scoped_check.comparison_actor_key
+                            )
+                            object_session_label = _comparison_session_label(
+                                scope_session, run_id, dispatch_actor or ""
+                            )
+            if object_required and object_scope is None:
+                _finish_variant(
+                    variant.id,
+                    attempt_id,
+                    status="failed",
+                    outcome="The selected object baseline is unavailable.",
+                )
+                continue
+            if object_scope is not None:
+                scoped_check, target, baseline = object_scope
+                variant_brief += (
+                    f"\nExact comparison: {scoped_check.http_method.upper()} {target.url}; "
+                    f"state {target.state_key!r}; baseline actor {scoped_check.baseline_actor_key}; "
+                    f"comparison actor {scoped_check.comparison_actor_key}; "
+                    f"body identity {scoped_check.body_identity}; "
+                    f"baseline traffic {baseline.source_id}."
+                )
+                selected_session = session_vault.get(object_session_label or "")
+                expected_credential_id = (
+                    int(dispatch_actor.partition(":")[2])
+                    if dispatch_actor and dispatch_actor.startswith("credential:")
+                    else None
+                )
+                if (
+                    selected_session is None
+                    or selected_session.get("credential_id") != expected_credential_id
+                    or (
+                        dispatch_actor == "anonymous"
+                        and selected_session.get("kind") != "anonymous"
+                    )
+                ):
+                    _finish_variant(
+                        variant.id,
+                        attempt_id,
+                        status="failed",
+                        outcome="The selected account has no active session in this web run.",
+                    )
+                    continue
+                worker_session_vault = {object_session_label: selected_session}
+            else:
+                worker_session_vault = session_vault
             handoff, _ = handoff_svc.create_or_get_handoff(
                 run_id=run_id,
                 run_kind="web",
@@ -2233,11 +2531,21 @@ async def _run_deep_scan(run_id: int) -> None:
                     f"{task.parameter or 'target'}|deep-task:{task.id}|"
                     f"variant:{variant.id}"
                 ),
-                session_label=task.session_label,
+                session_label=(
+                    object_session_label if object_scope else task.session_label
+                ),
                 priority=task.priority,
                 rationale=variant_brief,
                 dispatch_source="deep",
                 agent_id=agent_id,
+                method=task.http_method,
+                state_key=target.state_key if object_scope else None,
+                body_identity=scoped_check.body_identity if object_scope else None,
+                actor_key=scoped_check.baseline_actor_key if object_scope else None,
+                comparison_actor_key=(
+                    scoped_check.comparison_actor_key if object_scope else None
+                ),
+                evidence_observation_ids=((baseline.id,) if object_scope else ()),
             )
             with Session(get_engine()) as session:
                 stored = session.get(DeepScanTask, task.id)
@@ -2316,7 +2624,7 @@ async def _run_deep_scan(run_id: int) -> None:
                     attack_class="deep_campaign",
                     target_url=task.target_url,
                     rationale=variant_brief,
-                    session_vault=session_vault,
+                    session_vault=worker_session_vault,
                     llm_cfg=llm_cfg,
                     base_url=base_url,
                     scanner_policy=scanner_policy,
@@ -2324,7 +2632,9 @@ async def _run_deep_scan(run_id: int) -> None:
                     site_id=site_id,
                     target_page_id=task.page_id,
                     target_session_label=(
-                        _json_list(variant.identity_requirements_json)[0]
+                        object_session_label
+                        if object_scope
+                        else _json_list(variant.identity_requirements_json)[0]
                         if _json_list(variant.identity_requirements_json)
                         else None
                     ),

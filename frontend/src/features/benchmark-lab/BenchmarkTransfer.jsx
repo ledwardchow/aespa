@@ -42,7 +42,7 @@ export function BenchmarkTransfer({ onChange }) {
           disabled={busy}
           onClick={() => input.current?.click()}
         >
-          {busy ? "Importing..." : "Import benchmark data"}
+          {busy ? "Importing…" : "Import benchmark data"}
         </button>
         <input
           ref={input}

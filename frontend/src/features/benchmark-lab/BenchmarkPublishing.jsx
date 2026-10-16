@@ -233,7 +233,7 @@ export function BenchmarkPublishing({ mode = "publish", datasets = [], results =
               disabled={busy || !configured || chosen.length === 0}
               onClick={publish}
             >
-              {busy ? "Publishing..." : "Publish results"}
+              {busy ? "Publishing…" : "Publish results"}
             </button>
             <a className="btn secondary" href="#/extensions/aespa.benchmarking/settings">
               Connection settings

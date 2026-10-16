@@ -1,0 +1,7 @@
+{
+  "targetsEndpoint": "/api/test-runs/{run_id}/discovered-targets",
+  "targetsQuery": ["route_pattern", "search", "cursor", "limit"],
+  "targetsResponse": {"items":[{"id":1,"url":"https://shop.test/orders?id=101","state_key":null,"route_pattern":"https://shop.test/orders?id={id}","seen_by":[{"actor_key":"credential:1","label":"Alice"}],"crawled":true,"access":[{"actor_key":"credential:1","label":"Alice","result":"reached","method":"GET"}],"selected_checks":[{"id":1,"category":"A01","method":"GET","baseline_actor":"Alice","comparison_actor":"Bob","status":"queued","finding_ids":[],"reason":null}]}],"next_cursor":null,"total":200,"discovery_completeness":"recorded"},
+  "coverageExtension":{"completion":{"exercised_units":3,"applicable_units":6,"resolved_units":3,"target_met":false},"cellSelectedChecks":{"tested":3,"total":6,"unresolved":3,"items":[{"id":1,"target_id":1,"url":"https://shop.test/orders?id=101","state_key":null,"method":"GET","baseline_actor":"Alice","comparison_actor":"Bob","status":"queued","finding_ids":[],"reason":null,"crawled":true}]}},
+  "notes":["crawled means exact visited URL/state", "access is direct response evidence, seen_by is link visibility", "selected child counts differ from deduplicated root completion", "unselected inventory is outside all coverage denominators", "UI inline details only; retain existing finding markers and navigation"]
+}

@@ -25,6 +25,7 @@ export function WebRunAttackSurfaceTab({
   initialSubTab = "owasp",
 }) {
   const [summary, setSummary] = useState(null);
+  const [completion, setCompletion] = useState(null);
   const [subTab, setSubTab] = useHashTab(
     "subtab",
     ["owasp", "attack-surface", "workflows", "intelligence"],
@@ -37,13 +38,21 @@ export function WebRunAttackSurfaceTab({
   }, [workflowFocus?.sequence, setSubTab]);
 
   const load = useCallback(async () => {
-    const result = await webRunsApi.getReconSummary(runId);
-    setSummary(result);
-    onTotalChange(result?.route_count || result?.routes?.length || 0);
+    const [summaryResult, matrixResult] = await Promise.allSettled([
+      webRunsApi.getReconSummary(runId),
+      webRunsApi.getWebCoverageMatrix(runId),
+    ]);
+    if (summaryResult.status === "rejected") throw summaryResult.reason;
+    setSummary(summaryResult.value);
+    setCompletion(
+      matrixResult.status === "fulfilled" ? matrixResult.value?.completion || null : null,
+    );
+    onTotalChange(summaryResult.value?.route_count || summaryResult.value?.routes?.length || 0);
   }, [onTotalChange, runId]);
 
   useEffect(() => {
     setSummary(null);
+    setCompletion(null);
     onTotalChange(0);
   }, [onTotalChange, runId]);
 
@@ -113,6 +122,8 @@ export function WebRunAttackSurfaceTab({
         </div>
       ) : subTab === "attack-surface" ? (
         <AttackSurfacePanel
+          runId={runId}
+          completion={completion}
           summary={summary}
           routeGroups={summary?.route_groups || run?.route_groups}
         />

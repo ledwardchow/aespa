@@ -36,7 +36,7 @@ test("creates a SAST run from fields supplied by a source extension", async () =
   await user.selectOptions(await screen.findByLabelText("Source"), "aespa.githubrepository");
   await user.type(screen.getByLabelText(/Repository/), "acme/payments");
   await user.type(screen.getByLabelText(/Branch, tag, or commit/), "release/1");
-  await user.click(screen.getByRole("button", { name: "Create & Start Scan" }));
+  await user.click(screen.getByRole("button", { name: "Create and start scan" }));
 
   expect(sastRunsApi.createSastRunFromSource).toHaveBeenCalledWith(
     expect.objectContaining({
@@ -55,7 +55,7 @@ test("hides Deep mode and creates Light scans unless the experimental toggle is 
   await user.selectOptions(await screen.findByLabelText("Source"), "aespa.githubrepository");
   expect(screen.queryByLabelText("Analysis mode")).toBeNull();
   await user.type(screen.getByLabelText(/Repository/), "acme/payments");
-  await user.click(screen.getByRole("button", { name: "Create & Start Scan" }));
+  await user.click(screen.getByRole("button", { name: "Create and start scan" }));
 
   expect(sastRunsApi.createSastRunFromSource).toHaveBeenCalledWith(
     expect.objectContaining({ analysis_mode: "light" }),
@@ -69,7 +69,7 @@ test("offers Deep mode when the experimental toggle is on", async () => {
   await user.selectOptions(await screen.findByLabelText("Source"), "aespa.githubrepository");
   await user.selectOptions(screen.getByLabelText("Analysis mode"), "deep");
   await user.type(screen.getByLabelText(/Repository/), "acme/payments");
-  await user.click(screen.getByRole("button", { name: "Create & Start Scan" }));
+  await user.click(screen.getByRole("button", { name: "Create and start scan" }));
 
   expect(sastRunsApi.createSastRunFromSource).toHaveBeenCalledWith(
     expect.objectContaining({ analysis_mode: "deep" }),

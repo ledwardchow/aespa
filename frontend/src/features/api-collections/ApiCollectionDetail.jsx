@@ -192,19 +192,15 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
 
   // Readiness helpers
   const scoreColor = (score) =>
-    score >= 75
-      ? "var(--success,#22c55e)"
-      : score >= 40
-        ? "var(--warning-text,#d97706)"
-        : "var(--danger,#ef4444)";
-  const readinessLabel = (score) => (score >= 75 ? "Ready" : score >= 40 ? "Partial" : "Not Ready");
+    score >= 75 ? "var(--ok)" : score >= 40 ? "var(--warn)" : "var(--danger)";
+  const readinessLabel = (score) => (score >= 75 ? "Ready" : score >= 40 ? "Partial" : "Not ready");
   const prereqIcon = (ep) => {
     if (!ep.prereq_can_test)
       return (
         <span
           title="Cannot test — insufficient info"
           style={{
-            color: "var(--danger,#ef4444)",
+            color: "var(--danger)",
             fontSize: 14,
           }}
         >
@@ -216,7 +212,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
         <span
           title="Auth credentials missing"
           style={{
-            color: "var(--warning-text,#d97706)",
+            color: "var(--warn)",
             fontSize: 14,
           }}
         >
@@ -227,7 +223,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
       <span
         title="Ready to test"
         style={{
-          color: "var(--success,#22c55e)",
+          color: "var(--ok)",
           fontSize: 14,
         }}
       >
@@ -397,7 +393,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                         <span
                           style={{
                             fontSize: 13,
-                            color: "var(--fg)",
+                            color: "var(--text)",
                           }}
                         >
                           {readiness.overall.summary}
@@ -412,7 +408,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                           <strong
                             style={{
                               fontSize: 12,
-                              color: "var(--danger,#ef4444)",
+                              color: "var(--danger)",
                             }}
                           >
                             Blocking gaps
@@ -422,7 +418,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                               margin: "4px 0 0 18px",
                               padding: 0,
                               fontSize: 12,
-                              color: "var(--fg)",
+                              color: "var(--text)",
                             }}
                           >
                             {readiness.overall.blocking_gaps.map((g, i) => (
@@ -539,7 +535,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                                 </td>
                                 <td
                                   style={{
-                                    fontFamily: "var(--mono,monospace)",
+                                    fontFamily: "var(--mono)",
                                     fontSize: 12,
                                   }}
                                 >
@@ -555,7 +551,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                                 </td>
                                 <td
                                   style={{
-                                    fontFamily: "var(--mono,monospace)",
+                                    fontFamily: "var(--mono)",
                                     fontSize: 12,
                                     overflowWrap: "break-word",
                                     wordBreak: "break-all",
@@ -743,7 +739,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                               <td>{methodBadge(ep.method)}</td>
                               <td
                                 style={{
-                                  fontFamily: "var(--mono,monospace)",
+                                  fontFamily: "var(--mono)",
                                   fontSize: 12,
                                   overflowWrap: "break-word",
                                   wordBreak: "break-all",

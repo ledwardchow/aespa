@@ -1,0 +1,1171 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 550aa94..dc8f2ff 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -8,7 +8,7 @@ All pull requests merged to `main`, in reverse chronological order.
+ 
+ - **ChatGPT plan usage**: An optional extension estimates the API value of ChatGPT plan usage for the ChatGPT plan and Codex CLI providers. It tracks tokens used in AESPA and reads the plan's 5-hour and weekly usage percentages from the Codex CLI, including when a scan using either provider starts and ends. Readings where the percentage changed while AESPA used no tokens are left out. Stats → ChatGPT Plan Usage shows usage over time, estimated cost, and tokens per percentage point. Reading intervals are configurable. Usage outside AESPA affects the estimates; prices come from the Usage page.
+ 
+-- **Crawler workflows**: After the page crawl, AESPA tries to reach useful workflows it missed. Up to three workflows run at the same time, each in its own browser session with its own sign-in, so they don't share cookies or application state. When a workflow needs test data, a **Needs input** button appears at the top of the run on every tab. It opens a side panel where you can supply the data without leaving the tab you're on, and save successful instructions for later crawls. You can continue several workflows at once. Needs input names the field or option the crawler needs. To choose an option such as a payment method, name it as it appears on the page, for example "Pay by bank transfer". Reached workflows become checks in the Test Lead's coverage work and appear in the Workflows view of OWASP Coverage, laid out like the page table. The Pages and Workflows switch sits at the top of OWASP Coverage, and the Progress summary shows only on Pages because it counts page checks. Each workflow is checked for skipped or reordered steps. Depending on what it does, it can also be checked for access by another account, repeated or simultaneous submission, changed amounts or prices, cross-site request forgery, and sensitive changes made without signing in again. Full scans require each check to be tested or marked blocked with a reason.
++- **Crawler workflows**: After the page crawl, AESPA tries to reach useful workflows it missed. Up to three workflows run at the same time, each in its own browser session with its own sign-in, so they don't share cookies or application state. When a workflow needs test data, a **Needs input** button appears at the top of the run on every tab. It opens a side panel where you can supply the data without leaving the tab you're on, and save successful instructions for later crawls. You can continue several workflows at once. Needs input names the field or option the crawler needs. To choose an option such as a payment method, name it as it appears on the page, for example "Pay by bank transfer". All identified workflows appear in OWASP Coverage, including ones the crawler could not reach. Crawl progress has its own column. Reached functions get separate security checks; workflows awaiting a crawl show no completed checks. Workflows reached during the normal page crawl are included, and they do not raise a Needs input notice. The Pages and Workflows switch sits at the top of OWASP Coverage, and the Progress summary shows only on Pages because it counts page checks. Each workflow is checked for skipped or reordered steps. Depending on what it does, it can also be checked for access by another account, repeated or simultaneous submission, changed amounts or prices, cross-site request forgery, and sensitive changes made without signing in again. Full scans require each check to be tested or marked blocked with a reason.
+ 
+ - **Grouped page crawl**: The optional **Group similar pages** setting samples pages with similar layouts, such as products or articles, and groups them on the site map. This leaves more of the crawl budget for distinct site features. Sampling limits indexing only. The Test Lead can test other in-scope pages and records for access control, ownership, and other security checks without indexing the whole group. Results apply to the requests and records tested. The setting is off by default.
+ 
+diff --git a/alembic/versions/91c4b6e7a205_index_workflow_keys.py b/alembic/versions/91c4b6e7a205_index_workflow_keys.py
+new file mode 100644
+index 0000000..c91902a
+--- /dev/null
++++ b/alembic/versions/91c4b6e7a205_index_workflow_keys.py
+@@ -0,0 +1,78 @@
++"""Give workflow security checks a stable inventory key.
++
++Revision ID: 91c4b6e7a205
++Revises: 1ac6f6041728
++Create Date: 2026-10-16
++"""
++
++from __future__ import annotations
++
++import sqlalchemy as sa
++
++from alembic import op
++
++revision = "91c4b6e7a205"
++down_revision = "1ac6f6041728"
++branch_labels = None
++depends_on = None
++
++
++def upgrade() -> None:
++    bind = op.get_bind()
++    if bind.dialect.name == "sqlite":
++        with op.get_context().autocommit_block():
++            bind.exec_driver_sql("PRAGMA foreign_keys=OFF")
++    with op.batch_alter_table(
++        "workflow_coverage_item", recreate="always", reflect_kwargs={"resolve_fks": False}
++    ) as batch:
++        batch.alter_column("root_note_id", existing_type=sa.Integer(), nullable=True)
++        batch.alter_column("latest_note_id", existing_type=sa.Integer(), nullable=True)
++    if bind.dialect.name == "sqlite":
++        with op.get_context().autocommit_block():
++            bind.exec_driver_sql("PRAGMA foreign_keys=ON")
++    op.add_column(
++        "workflow_coverage_item",
++        sa.Column("workflow_key", sa.String(), nullable=False, server_default=""),
++    )
++    op.execute(
++        "UPDATE workflow_coverage_item SET workflow_key = 'note:' || root_note_id"
++    )
++    op.create_index(
++        "uq_workflow_coverage_item_run_key_kind",
++        "workflow_coverage_item",
++        ["test_run_id", "workflow_key", "test_kind"],
++        unique=True,
++    )
++    op.create_index(
++        "ix_workflow_coverage_item_workflow_key",
++        "workflow_coverage_item",
++        ["workflow_key"],
++    )
++
++
++def downgrade() -> None:
++    op.execute(
++        "UPDATE deep_scan_task SET workflow_test_id = NULL "
++        "WHERE workflow_test_id IN ("
++        "SELECT id FROM workflow_coverage_item WHERE root_note_id IS NULL)"
++    )
++    op.execute("DELETE FROM workflow_coverage_item WHERE root_note_id IS NULL")
++    op.drop_index(
++        "ix_workflow_coverage_item_workflow_key", table_name="workflow_coverage_item"
++    )
++    op.drop_index(
++        "uq_workflow_coverage_item_run_key_kind", table_name="workflow_coverage_item"
++    )
++    op.drop_column("workflow_coverage_item", "workflow_key")
++    bind = op.get_bind()
++    if bind.dialect.name == "sqlite":
++        with op.get_context().autocommit_block():
++            bind.exec_driver_sql("PRAGMA foreign_keys=OFF")
++    with op.batch_alter_table(
++        "workflow_coverage_item", recreate="always", reflect_kwargs={"resolve_fks": False}
++    ) as batch:
++        batch.alter_column("root_note_id", existing_type=sa.Integer(), nullable=False)
++        batch.alter_column("latest_note_id", existing_type=sa.Integer(), nullable=False)
++    if bind.dialect.name == "sqlite":
++        with op.get_context().autocommit_block():
++            bind.exec_driver_sql("PRAGMA foreign_keys=ON")
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 907b995..a3e2127 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -517,7 +517,7 @@ start_crawl(run_id)
+                  v.   Enqueue new URLs (in-scope, within depth/page limits)
+                  vi.  Persist CrawledPage + PageLinks + TrafficEntries
+        3. Extract TargetIntelItems (endpoints, forms, inputs, IDs, scripts, JWT hints)
+-       4. Ask the crawler model about workflows suggested by the page inventory but not reached
++       4. List reached functions and ask the crawler model about workflows suggested by the page inventory
+           • Try a few visible browser actions to reach them, except deletion
+           • Save newly reached pages with replay steps and record workflow notes
+           • Record deletion or blocked workflows without exercising them
+@@ -535,8 +535,11 @@ shows a notice when a workflow needs input and has a Notifications subtab for
+ workflows that stopped because the crawler lacked
+ sample data or instructions. Users can supply test data there to continue one
+ workflow. Submitting the data opens Workflows so the user can watch the retry.
+-Successful, safe workflow notes also seed security checks. Each check belongs to
+-the original note, so a retry updates the same workflow. A04 covers the sequence;
++The workflow inventory includes the latest crawl note for each retry chain and
++observed function pages with input or replay steps. Unreached workflows appear
++in coverage with crawl progress and no security checks. Reached functions seed
++security checks. Each check belongs to the original note or observed page, so
++a retry updates the same workflow. A04 covers the sequence;
+ an authenticated or object-specific workflow also gets an A01 access check. The
+ crawler reaching a workflow does not count as a security test.
+ The retry keeps the same deletion checks and adds its result
+@@ -1015,7 +1018,10 @@ Input-bearing A03 cells additionally persist class-level states in `test_classes
+ 
+ OWASP Coverage has **Pages** and **Workflows** tabs. The Pages tab keeps the
+ page-by-category matrix and its existing percentage. The Workflows tab reads
+-`WorkflowCoverageItem` rows from `GET /api/test-runs/{id}/workflow-coverage`.
++workflow inventory and `WorkflowCoverageItem` rows from
++`GET /api/test-runs/{id}/workflow-coverage`. Crawl progress is separate from
++security check status. Reaching a page confirms the function or state was
++observed, not that a transaction was completed or security was tested.
+ The Test Lead records a workflow result with expected and observed behavior and
+ scan traffic IDs. Full mode keeps an untested or inconclusive workflow check
+ open; a concrete blocker can close the check without counting it as covered.
+diff --git a/frontend/src/features/web-runs/AttackSurfacePanel.test.jsx b/frontend/src/features/web-runs/AttackSurfacePanel.test.jsx
+index 2f4a8e7..231ad28 100644
+--- a/frontend/src/features/web-runs/AttackSurfacePanel.test.jsx
++++ b/frontend/src/features/web-runs/AttackSurfacePanel.test.jsx
+@@ -184,4 +184,19 @@ describe("Workflow crawl notes", () => {
+     );
+     await waitFor(() => expect(document.activeElement?.id).toBe("workflow-input-11"));
+   });
++
++  it("does not notify for reached or superseded workflows", async () => {
++    vi.spyOn(webRunsApi, "getWorkflowNotes").mockResolvedValue({
++      notes: [
++        { id: 10, name: "Checkout", status: "crawled", needs_input: true },
++        { id: 11, name: "Old address", status: "needs_input", needs_input: true, superseded: true },
++        { id: 12, name: "Payment setup", status: "needs_input", needs_input: true },
++      ],
++    });
++    vi.spyOn(webRunsApi, "getWorkflowRetryStatus").mockResolvedValue({ status: "idle" });
++    render(<WebRunNotificationsTab runId={1} onViewWorkflow={() => {}} />);
++    expect(await screen.findByText("Payment setup")).toBeTruthy();
++    expect(screen.queryByText("Checkout")).toBeNull();
++    expect(screen.queryByText("Old address")).toBeNull();
++  });
+ });
+diff --git a/frontend/src/features/web-runs/TestRunDetail.jsx b/frontend/src/features/web-runs/TestRunDetail.jsx
+index 4a282c2..b0dd400 100644
+--- a/frontend/src/features/web-runs/TestRunDetail.jsx
++++ b/frontend/src/features/web-runs/TestRunDetail.jsx
+@@ -97,7 +97,11 @@ function TestRunContent({
+   }, [runId]);
+   usePolling(loadWorkflowNotes, { intervalMs: 5000 });
+   const waitingWorkflows = workflowNotes.filter(
+-    (note) => note.needs_input && !isRetryBusy(workflowRetries[note.id]),
++    (note) =>
++      note.needs_input &&
++      note.status !== "crawled" &&
++      !note.superseded &&
++      !isRetryBusy(workflowRetries[note.id]),
+   );
+   const viewWorkflow = (noteId) => {
+     setWorkflowInputOpen(false);
+diff --git a/frontend/src/features/web-runs/WebRunNotificationsTab.jsx b/frontend/src/features/web-runs/WebRunNotificationsTab.jsx
+index d1fd885..29e8f5d 100644
+--- a/frontend/src/features/web-runs/WebRunNotificationsTab.jsx
++++ b/frontend/src/features/web-runs/WebRunNotificationsTab.jsx
+@@ -84,7 +84,9 @@ export function WebRunNotificationsTab({
+     }
+   };
+ 
+-  const waiting = notes.filter((note) => note.needs_input);
++  const waiting = notes.filter(
++    (note) => note.needs_input && note.status !== "crawled" && !note.superseded,
++  );
+   const recentNotes = notes.filter(
+     (note) =>
+       ["submitting", "running", "error"].includes(retries[note.id]?.status) &&
+@@ -119,6 +121,8 @@ export function WebRunNotificationsTab({
+             const result = progress?.result_status;
+             const canProvideMore =
+               note.needs_input &&
++              note.status !== "crawled" &&
++              !note.superseded &&
+               !busy &&
+               !(progress?.status === "complete" && result === "crawled");
+             const expanded = note.id === openId;
+diff --git a/frontend/src/features/web-runs/WebRunWorkProgramTab.jsx b/frontend/src/features/web-runs/WebRunWorkProgramTab.jsx
+index 96a4ba5..98714e3 100644
+--- a/frontend/src/features/web-runs/WebRunWorkProgramTab.jsx
++++ b/frontend/src/features/web-runs/WebRunWorkProgramTab.jsx
+@@ -637,16 +637,27 @@ function workflowCellStatus(checks) {
+   return "skipped";
+ }
+ 
+-function groupWorkflowChecks(items) {
++function groupWorkflowChecks(items, workflows = []) {
+   const rows = new Map();
++  for (const workflow of workflows) {
++    rows.set(workflow.workflow_key, {
++      key: workflow.workflow_key,
++      name: workflow.name,
++      goal: workflow.goal,
++      url: workflow.url,
++      crawlStatus: workflow.crawl_status,
++      cells: {},
++    });
++  }
+   for (const item of items) {
+-    const key = item.root_note_id ?? `check-${item.id}`;
++    const key = item.workflow_key ?? item.root_note_id ?? `check-${item.id}`;
+     if (!rows.has(key)) {
+       rows.set(key, {
+         key,
+         name: item.name || item.goal || `Workflow ${item.id}`,
+         goal: item.goal && item.goal !== item.name ? item.goal : "",
+         url: item.reached_page_url || "",
++        crawlStatus: "reached",
+         cells: {},
+       });
+     }
+@@ -683,7 +694,7 @@ function WorkflowCoverageTable({ coverage, error, runId }) {
+     (item) => item.status === "passed" || item.status === "finding",
+   ).length;
+   const blocked = items.filter((item) => item.status === "blocked").length;
+-  const rows = groupWorkflowChecks(items);
++  const rows = groupWorkflowChecks(items, coverage.workflows || []);
+   const categories = [...new Set(items.map((item) => item.owasp_category || "Other"))].sort();
+   const legendTotals = {};
+   for (const item of items) {
+@@ -706,10 +717,8 @@ function WorkflowCoverageTable({ coverage, error, runId }) {
+           Could not refresh workflow coverage: {error}
+         </div>
+       )}
+-      {items.length === 0 ? (
+-        <div className="subtle workflow-coverage-empty">
+-          No workflow checks yet. Crawl a workflow to add checks.
+-        </div>
++      {rows.length === 0 ? (
++        <div className="subtle workflow-coverage-empty">No workflows identified yet.</div>
+       ) : (
+         <>
+           <div className="workflow-coverage-legend">
+@@ -727,6 +736,8 @@ function WorkflowCoverageTable({ coverage, error, runId }) {
+                   <th scope="col" className="workflow-coverage-name-col">
+                     Workflow
+                   </th>
++                  <th scope="col">Crawl progress</th>
++                  <th scope="col">Security testing</th>
+                   {categories.map((category) => (
+                     <th
+                       key={category}
+@@ -758,14 +769,43 @@ function WorkflowCoverageTable({ coverage, error, runId }) {
+                         </div>
+                       )}
+                     </td>
++                    <td className="workflow-coverage-cell">
++                      {row.crawlStatus === "reached"
++                        ? "Reached"
++                        : row.crawlStatus === "needs_input"
++                          ? "Needs input"
++                          : "Not reached"}
++                    </td>
++                    <td className="workflow-coverage-cell">
++                      {Object.values(row.cells).flat().length === 0
++                        ? row.crawlStatus === "reached"
++                          ? "Not started"
++                          : "Awaiting crawl"
++                        : `${
++                            Object.values(row.cells)
++                              .flat()
++                              .filter(
++                                (check) => check.status === "passed" || check.status === "finding",
++                              ).length
++                          } of ${Object.values(row.cells).flat().length} checks covered`}
++                    </td>
+                     {categories.map((category) => {
+                       const checks = row.cells[category];
+                       if (!checks) {
+                         return (
+                           <td key={category} className="workflow-coverage-cell">
+-                            <span className="cov-cell cov-na" title="Not applicable">
+-                              —
+-                            </span>
++                            {row.crawlStatus === "reached" ? (
++                              <span className="cov-cell cov-na" title="No check for this category">
++                                —
++                              </span>
++                            ) : (
++                              <span
++                                className="subtle"
++                                title="Security checks await a reached workflow"
++                              >
++                                Awaiting crawl
++                              </span>
++                            )}
+                           </td>
+                         );
+                       }
+diff --git a/frontend/src/features/web-runs/WebRunWorkProgramTab.test.jsx b/frontend/src/features/web-runs/WebRunWorkProgramTab.test.jsx
+index 40000f7..3862e86 100644
+--- a/frontend/src/features/web-runs/WebRunWorkProgramTab.test.jsx
++++ b/frontend/src/features/web-runs/WebRunWorkProgramTab.test.jsx
+@@ -68,7 +68,13 @@ test("shows separate workflow checks for workflows that reach the same page", as
+     within(panel)
+       .getAllByRole("columnheader")
+       .map((th) => th.textContent),
+-  ).toEqual(["Workflow", "A01Access Control", "A04Insecure Design"]);
++  ).toEqual([
++    "Workflow",
++    "Crawl progress",
++    "Security testing",
++    "A01Access Control",
++    "A04Insecure Design",
++  ]);
+ 
+   fireEvent.click(within(panel).getByRole("button", { name: "A04 Place an order: Passed" }));
+   expect(
+@@ -100,6 +106,29 @@ test("shows a workflow coverage load error in its tab", async () => {
+   );
+ });
+ 
++test("shows a workflow awaiting crawl with no security checks", async () => {
++  webRunsApi.getWebCoverageMatrix.mockResolvedValue({ seeded: true, pages: [], totals: {} });
++  webRunsApi.getWorkflowCoverage.mockResolvedValue({
++    items: [],
++    workflows: [
++      {
++        workflow_key: "note:24",
++        name: "Payment setup",
++        goal: "Add a payment method",
++        url: "https://shop.test/account",
++        crawl_status: "needs_input",
++      },
++    ],
++  });
++  render(<WebRunWorkProgramTab runId={9} run={{ name: "Shop" }} scanRunning={false} />);
++  fireEvent.click(screen.getByRole("tab", { name: "Workflows" }));
++  const panel = await screen.findByRole("tabpanel", { name: "Workflow coverage" });
++  expect(within(panel).getByText("Payment setup")).toBeTruthy();
++  expect(within(panel).getByText("Needs input")).toBeTruthy();
++  expect(within(panel).getByText("Awaiting crawl")).toBeTruthy();
++  expect(within(panel).queryByText("No workflows identified yet.")).toBeNull();
++});
++
+ test("page finding marker opens the filtered Findings tab", async () => {
+   webRunsApi.getWebCoverageMatrix.mockResolvedValue({
+     seeded: true,
+diff --git a/pyproject.toml b/pyproject.toml
+index 77a8673..a384abc 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,6 +1,6 @@
+ [project]
+ name = "aespa"
+-version = "0.7.20261016.2"
++version = "0.7.20261016.3"
+ description = "AI-Enabled Security Pentesting Agent"
+ authors = [
+     { name = "Edward Chow", email = "ledwardchow@users.noreply.github.com" }
+diff --git a/src/aespa/models.py b/src/aespa/models.py
+index 2e192f3..08bd336 100644
+--- a/src/aespa/models.py
++++ b/src/aespa/models.py
+@@ -7,6 +7,7 @@ from sqlalchemy import (
+     Boolean,
+     Column,
+     ForeignKey,
++    Index,
+     Integer,
+     LargeBinary,
+     String,
+@@ -1030,12 +1031,20 @@ class WorkflowCoverageItem(SQLModel, table=True):
+             "test_kind",
+             name="uq_workflow_coverage_item_run_note_kind",
+         ),
++        Index(
++            "uq_workflow_coverage_item_run_key_kind",
++            "test_run_id",
++            "workflow_key",
++            "test_kind",
++            unique=True,
++        ),
+     )
+ 
+     id: Optional[int] = Field(default=None, primary_key=True)
+     test_run_id: int = Field(sa_column=_run_identity_fk())
+-    root_note_id: int = Field(index=True)
+-    latest_note_id: int = Field(index=True)
++    workflow_key: str = Field(index=True)
++    root_note_id: Optional[int] = Field(default=None, index=True)
++    latest_note_id: Optional[int] = Field(default=None, index=True)
+     reached_page_id: Optional[int] = Field(default=None, foreign_key="crawled_page.id")
+     name: str
+     goal: str = Field(default="")
+diff --git a/src/aespa/services/crawl_workflows.py b/src/aespa/services/crawl_workflows.py
+index 47970e0..c90eb7c 100644
+--- a/src/aespa/services/crawl_workflows.py
++++ b/src/aespa/services/crawl_workflows.py
+@@ -56,6 +56,8 @@ _retry_results: dict[tuple[int, int], dict] = {}
+ 
+ 
+ def _needs_user_input(note: dict) -> bool:
++    if note.get("status") == "crawled":
++        return False
+     if "needs_input" in note:
+         return note["needs_input"] is True
+     return note.get("status") == "not_attempted" and bool(
+@@ -155,7 +157,11 @@ def _crawl_inventory(run_id: int) -> tuple[list[dict], dict[str, CrawledPage]]:
+             replay = {}
+         inventory.append(
+             {
++                "page_id": page.id,
+                 "url": page.url,
++                "state_label": page.state_label,
++                "state_kind": page.state_kind,
++                "has_business_logic": bool(page.has_business_logic),
+                 "title": (page.title or "")[:100],
+                 "purpose": (page.llm_context or "")[:230],
+                 "text": page_text,
+@@ -230,7 +236,17 @@ def _workflow_credential(
+     return None, bool(candidate_ids or start_page.req_auth)
+ 
+ 
+-def _prior_workflow_names(run_id: int) -> set[str]:
++def _workflow_identity(workflow: dict) -> tuple[str, str, str]:
++    from aespa.services.crawler import _norm
++
++    return (
++        str(workflow.get("name") or "").strip().casefold(),
++        _norm(str(workflow.get("start_url") or "")),
++        str(workflow.get("goal") or "").strip().casefold(),
++    )
++
++
++def _prior_workflow_identities(run_id: int) -> set[tuple[str, str, str]]:
+     with Session(get_engine()) as session:
+         rows = session.exec(
+             select(ScanLog.data_json)
+@@ -238,15 +254,15 @@ def _prior_workflow_names(run_id: int) -> set[str]:
+             .where(ScanLog.run_kind == "web")
+             .where(ScanLog.phase == "crawl_note")
+         )
+-        names = set()
++        identities = set()
+         for data_json in rows:
+             try:
+-                name = json.loads(data_json or "{}").get("note", {}).get("name")
++                note = json.loads(data_json or "{}").get("note", {})
+             except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+                 continue
+-            if isinstance(name, str) and name.strip():
+-                names.add(name.strip().casefold())
+-        return names
++            if isinstance(note, dict) and isinstance(note.get("name"), str):
++                identities.add(_workflow_identity(note))
++        return identities
+ 
+ 
+ def _saved_workflow_proposals(site: Site) -> list[dict]:
+@@ -283,13 +299,18 @@ async def _infer_workflows(
+     llm_cfg,
+     inventory: list[dict],
+     known_urls: set[str],
+-    prior_names: set[str] | None = None,
++    prior_identities: set[tuple[str, str, str]] | None = None,
+ ) -> list[dict]:
+     from aespa.services.crawler import _norm
+ 
+     prompt = (
+-        "You are reviewing a completed web crawl. Infer up to four useful application "
+-        "workflows that may exist but were not reached. Use only the page observations "
++        "You are reviewing a completed web crawl. List useful application functions "
++        "already reached, then all supported workflows that may exist but were not reached. "
++        "Include each distinct reached function or interactive state, even when several "
++        "share a URL. For a reached function, set reached_page_id to its page_id only "
++        "when the goal is already visible in that page's observations. If further "
++        "actions are needed to reach the goal, it has not been reached. "
++        "For an unreached workflow, set reached_page_id to null. Use only the page observations "
+         "below. Look past setup actions to a further page or function they may unlock. "
+         "For example, adding an item can be a step toward a checkout form; viewing the "
+         "form is the workflow goal. A workflow can require state changes such as adding "
+@@ -297,13 +318,14 @@ async def _infer_workflows(
+         "An interactive page with reached_from requires its recorded actions; "
+         "choose reached_from as start_url if you need to reproduce that state. "
+         "Do not repeat these already noted workflows: "
+-        f"{json.dumps(sorted(prior_names or set()))}. Do not invent a URL or claim "
++        f"{json.dumps(sorted(prior_identities or set()))}. Each entry contains its name, "
++        "starting URL, and goal. Do not invent a URL or claim "
+         "that an unseen page definitely exists. Pick an observed start_url. Mark a "
+         "workflow destructive only if reaching it requires deleting or removing "
+         "something. Other state changes, including submitting reviews and placing "
+         "orders, are allowed. "
+         'Return only JSON: {"workflows":[{"name":"...","start_url":"...",'
+-        '"goal":"...","reason":"visible evidence",'
++        '"goal":"...","reason":"visible evidence","reached_page_id":null,'
+         '"destructive":false}]}. Return an empty array if there is no evidence.\n'
+         + json.dumps(inventory, ensure_ascii=False)
+     )
+@@ -313,7 +335,10 @@ async def _infer_workflows(
+         raise ValueError("The workflow model did not return a workflow list")
+     proposals: list[dict] = []
+     seen: set[str] = set()
+-    for raw in workflows[:_MAX_WORKFLOWS]:
++    page_ids = {
++        page["page_id"] for page in inventory if isinstance(page.get("page_id"), int)
++    }
++    for raw in workflows:
+         if not isinstance(raw, dict):
+             continue
+         start_url = str(raw.get("start_url") or "")
+@@ -322,8 +347,21 @@ async def _infer_workflows(
+         reason = " ".join(str(raw.get("reason") or "").split())[:360]
+         if not name or not goal or not reason or _norm(start_url) not in known_urls:
+             continue
+-        key = name.casefold()
+-        if key in seen or key in (prior_names or set()):
++        page_id = raw.get("reached_page_id")
++        if page_id is not None and (
++            type(page_id) is not int or page_id not in page_ids
++        ):
++            continue
++        key = (
++            f"page:{page_id}:{name.casefold()}:{goal.casefold()}"
++            if page_id is not None
++            else f"unreached:{name.casefold()}:{_norm(start_url)}:{goal.casefold()}"
++        )
++        if key in seen or (
++            page_id is None
++            and _workflow_identity({"name": name, "start_url": start_url, "goal": goal})
++            in (prior_identities or set())
++        ):
+             continue
+         seen.add(key)
+         proposals.append(
+@@ -332,6 +370,8 @@ async def _infer_workflows(
+                 "start_url": start_url,
+                 "goal": goal,
+                 "reason": reason,
++                "reached_page_id": page_id,
++                "inferred": True,
+                 "destructive": bool(
+                     _DELETE_ACTION.search(f"{name} {goal}")
+                     or (raw.get("destructive") and _DELETE_ACTION.search(reason))
+@@ -1100,8 +1140,8 @@ async def explore_after_crawl(
+                 llm_cfg,
+                 inventory,
+                 set(known_pages),
+-                _prior_workflow_names(run_id)
+-                | {item["name"].casefold() for item in saved_workflows},
++                _prior_workflow_identities(run_id)
++                | {_workflow_identity(item) for item in saved_workflows},
+             )
+         except Exception as exc:
+             log.warning("Post-crawl workflow inference failed: %s", exc)
+@@ -1109,6 +1149,53 @@ async def explore_after_crawl(
+                 raise
+             inferred = []
+         proposals = saved_workflows + inferred
++        with Session(get_engine()) as session:
++            reached = {
++                (
++                    note.get("page_id"),
++                    str(note.get("name") or "").casefold(),
++                    str(note.get("goal") or "").casefold(),
++                )
++                for note in list_workflow_notes(session, run_id)
++                if note.get("status") == "crawled"
++            }
++        pending = []
++        inferred_to_explore = 0
++        for workflow in proposals:
++            page_id = workflow.get("reached_page_id")
++            if page_id is None:
++                if workflow.get("inferred") and inferred_to_explore >= _MAX_WORKFLOWS:
++                    _record_note(
++                        run_id,
++                        workflow,
++                        "not_attempted",
++                        [],
++                        "Not tried because the workflow exploration limit was reached.",
++                    )
++                else:
++                    pending.append(workflow)
++                    if workflow.get("inferred"):
++                        inferred_to_explore += 1
++            elif (
++                page_id,
++                workflow["name"].casefold(),
++                workflow["goal"].casefold(),
++            ) not in reached:
++                _record_note(
++                    run_id,
++                    workflow,
++                    "crawled",
++                    [],
++                    "Reached during the page crawl.",
++                    url=next(
++                        page["url"] for page in inventory if page["page_id"] == page_id
++                    ),
++                    page_id=page_id,
++                )
++                reached.add(
++                    (page_id, workflow["name"].casefold(), workflow["goal"].casefold())
++                )
++        proposals = pending
+     if not proposals:
+         return
+ 
+diff --git a/src/aespa/services/workflow_workprogram.py b/src/aespa/services/workflow_workprogram.py
+index da9a70c..ebb6227 100644
+--- a/src/aespa/services/workflow_workprogram.py
++++ b/src/aespa/services/workflow_workprogram.py
+@@ -145,6 +145,67 @@ def _reached_page(note: dict, pages: list[CrawledPage]) -> CrawledPage | None:
+     return matches[0] if len(matches) == 1 else None
+ 
+ 
++def _observed_function(page: CrawledPage) -> bool:
++    if not page.in_scope or page.status != "crawled":
++        return False
++    if page.state_kind == "interactive" and page.state_label and _replay_steps(page):
++        return True
++    return bool(page.has_business_logic and page.takes_input)
++
++
++def _workflow_inventory(notes: list[dict], pages: list[CrawledPage]) -> list[dict]:
++    by_id = {note["id"]: note for note in notes}
++    latest: dict[int, dict] = {}
++    reached: dict[int, CrawledPage] = {}
++    referenced_pages: set[int] = set()
++    for note in notes:
++        root = _root_note_id(note, by_id)
++        latest[root] = note
++        if note.get("status") == "crawled":
++            page = _reached_page(note, pages)
++            if page is not None:
++                referenced_pages.add(page.id)
++                reached[root] = page
++
++    workflows = []
++    for root, note in latest.items():
++        page = reached.get(root)
++        workflows.append(
++            {
++                "workflow_key": f"note:{root}",
++                "root_note_id": root,
++                "latest_note_id": note["id"],
++                "name": str(note.get("name") or "Workflow")[:100],
++                "goal": str(note.get("goal") or "")[:220],
++                "url": page.url
++                if page
++                else str(note.get("start_url") or note.get("url") or ""),
++                "reached_page_id": page.id if page else None,
++                "crawl_status": "reached"
++                if page
++                else "needs_input"
++                if note.get("needs_input")
++                else "not_reached",
++            }
++        )
++    for page in pages:
++        if page.id in referenced_pages or not _observed_function(page):
++            continue
++        workflows.append(
++            {
++                "workflow_key": f"page:{page.id}",
++                "root_note_id": None,
++                "latest_note_id": None,
++                "name": str(page.state_label or page.title or page.url)[:100],
++                "goal": "",
++                "url": page.url,
++                "reached_page_id": page.id,
++                "crawl_status": "reached",
++            }
++        )
++    return workflows
++
++
+ def seed_workflow_tests(run_id: int) -> int:
+     """Add checks for reached workflows, preserving results across resume/retry."""
+     with Session(get_engine()) as session:
+@@ -156,14 +217,14 @@ def seed_workflow_tests(run_id: int) -> int:
+             session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id))
+         )
+         existing = {
+-            (item.root_note_id, item.test_kind): item
++            (item.workflow_key, item.test_kind): item
+             for item in session.exec(
+                 select(WorkflowCoverageItem).where(
+                     WorkflowCoverageItem.test_run_id == run_id
+                 )
+             )
+         }
+-        latest: dict[int, tuple[dict, CrawledPage]] = {}
++        latest: dict[str, tuple[dict, CrawledPage, int | None]] = {}
+         for note in notes:
+             if note.get("status") != "crawled" or note.get("destructive"):
+                 continue
+@@ -171,8 +232,16 @@ def seed_workflow_tests(run_id: int) -> int:
+             if page is None:
+                 continue
+             root = _root_note_id(note, by_id)
+-            if root not in latest or note["id"] > latest[root][0]["id"]:
+-                latest[root] = (note, page)
++            key = f"note:{root}"
++            if key not in latest or note["id"] > latest[key][0]["id"]:
++                latest[key] = (note, page, root)
++        for workflow in _workflow_inventory(notes, pages):
++            if not workflow["workflow_key"].startswith("page:"):
++                continue
++            page = next(
++                page for page in pages if page.id == workflow["reached_page_id"]
++            )
++            latest[workflow["workflow_key"]] = (workflow, page, None)
+ 
+         max_traffic_id = (
+             session.exec(
+@@ -183,15 +252,26 @@ def seed_workflow_tests(run_id: int) -> int:
+             or 0
+         )
+         created = 0
+-        for root_id, (note, page) in latest.items():
++        for workflow_key, (note, page, root_id) in latest.items():
+             for test_kind, category in _workflow_checks(note, page):
+-                key = (root_id, test_kind)
++                key = (workflow_key, test_kind)
+                 item = existing.get(key)
++                if item is None and root_id is not None:
++                    item = existing.pop((f"page:{page.id}", test_kind), None)
++                    if item is not None:
++                        item.workflow_key = workflow_key
++                        item.root_note_id = root_id
++                        item.latest_note_id = note["id"]
++                        item.name = str(note.get("name") or item.name)[:100]
++                        item.goal = str(note.get("goal") or item.goal)[:220]
++                        session.add(item)
++                        existing[key] = item
+                 if item is None:
+                     item = WorkflowCoverageItem(
+                         test_run_id=run_id,
++                        workflow_key=workflow_key,
+                         root_note_id=root_id,
+-                        latest_note_id=note["id"],
++                        latest_note_id=note.get("id"),
+                         reached_page_id=page.id,
+                         name=str(note.get("name") or page.state_label or "Workflow")[
+                             :100
+@@ -205,7 +285,7 @@ def seed_workflow_tests(run_id: int) -> int:
+                     session.add(item)
+                     created += 1
+                     continue
+-                if item.latest_note_id != note["id"]:
++                if item.latest_note_id != note.get("id"):
+                     # A new replay state needs a new test. Re-seeding the same
+                     # crawl or resuming a scan leaves established evidence intact.
+                     if item.reached_page_id != page.id:
+@@ -214,7 +294,7 @@ def seed_workflow_tests(run_id: int) -> int:
+                         item.evidence_json = "{}"
+                         item.finding_id = None
+                         item.crawl_traffic_max_id = max_traffic_id
+-                    item.latest_note_id = note["id"]
++                    item.latest_note_id = note.get("id")
+                     item.reached_page_id = page.id
+                     item.reached_page_url = page.url
+                     item.name = str(note.get("name") or item.name)[:100]
+@@ -227,11 +307,16 @@ def seed_workflow_tests(run_id: int) -> int:
+ 
+ def list_workflow_tests(run_id: int) -> dict:
+     with Session(get_engine()) as session:
++        notes = list_workflow_notes(session, run_id)
++        pages = list(
++            session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id))
++        )
++        workflows = _workflow_inventory(notes, pages)
+         rows = list(
+             session.exec(
+                 select(WorkflowCoverageItem)
+                 .where(WorkflowCoverageItem.test_run_id == run_id)
+-                .order_by(WorkflowCoverageItem.root_note_id, WorkflowCoverageItem.id)
++                .order_by(WorkflowCoverageItem.id)
+             )
+         )
+         totals = {
+@@ -254,6 +339,7 @@ def list_workflow_tests(run_id: int) -> dict:
+             items.append(
+                 {
+                     "id": row.id,
++                    "workflow_key": row.workflow_key,
+                     "root_note_id": row.root_note_id,
+                     "latest_note_id": row.latest_note_id,
+                     "reached_page_id": row.reached_page_id,
+@@ -276,7 +362,12 @@ def list_workflow_tests(run_id: int) -> dict:
+                     "finding_ids": [row.finding_id] if row.finding_id else [],
+                 }
+             )
+-        return {"run_id": run_id, "items": items, "totals": totals}
++        return {
++            "run_id": run_id,
++            "items": items,
++            "workflows": workflows,
++            "totals": totals,
++        }
+ 
+ 
+ def remaining_workflow_tests(run_id: int) -> list[dict]:
+diff --git a/tests/infra/test_db_migration.py b/tests/infra/test_db_migration.py
+index 04a4f6f..a2ba533 100644
+--- a/tests/infra/test_db_migration.py
++++ b/tests/infra/test_db_migration.py
+@@ -193,7 +193,7 @@ def test_llm_rate_limit_migration_recovers_after_partial_application():
+                 for row in conn.execute(text("PRAGMA table_info(llm_provider_config)"))
+             }
+ 
+-        assert version == "1ac6f6041728"
++        assert version == "91c4b6e7a205"
+         assert limits == (120_000, 60)
+         assert "max_tpm" not in provider_columns
+         assert "max_rpm" not in provider_columns
+@@ -1136,7 +1136,7 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
+         assert "dast_max_concurrent_llm_requests" in scanner_policy_columns
+         assert "sast_max_concurrent_llm_requests" in scanner_policy_columns
+         assert was_pre_alembic is False
+-        assert version == "1ac6f6041728"
++        assert version == "91c4b6e7a205"
+     finally:
+         engine.dispose()
+ 
+@@ -1178,7 +1178,7 @@ def test_deep_task_finding_timestamp_is_added_and_backfilled():
+ 
+         assert "created_at" in columns
+         assert created_at is not None
+-        assert version == "1ac6f6041728"
++        assert version == "91c4b6e7a205"
+     finally:
+         engine.dispose()
+ 
+@@ -1487,7 +1487,7 @@ def test_legacy_db_with_run_identity_but_no_systems_tables_gets_new_schema():
+         assert was_pre_alembic is True
+         # ...including the follow-up migration's column.
+         assert "interrupted_stage" in campaign_columns
+-        assert version == "1ac6f6041728"
++        assert version == "91c4b6e7a205"
+     finally:
+         engine.dispose()
+ 
+@@ -1565,7 +1565,7 @@ def test_current_db_with_systems_tables_stamps_head_without_recreating():
+                 text("SELECT version_num FROM alembic_version")
+             ).scalar()
+ 
+-        assert version == "1ac6f6041728"
++        assert version == "91c4b6e7a205"
+     finally:
+         SQLModel.metadata.drop_all(engine)
+         engine.dispose()
+diff --git a/tests/services/test_crawl_workflows.py b/tests/services/test_crawl_workflows.py
+index b26f822..c4f5f17 100644
+--- a/tests/services/test_crawl_workflows.py
++++ b/tests/services/test_crawl_workflows.py
+@@ -67,6 +67,143 @@ def test_inferred_workflow_must_start_on_an_observed_page(monkeypatch):
+     assert proposals[1]["destructive"] is False
+ 
+ 
++def test_inference_keeps_distinct_reached_states_and_validates_page_ids(monkeypatch):
++    async def fake_completion(_config, _prompt):
++        return json.dumps(
++            {
++                "workflows": [
++                    {
++                        "name": "Checkout",
++                        "start_url": "https://shop.test/app",
++                        "goal": "Open checkout",
++                        "reason": "Observed form",
++                        "reached_page_id": 11,
++                    },
++                    {
++                        "name": "Checkout",
++                        "start_url": "https://shop.test/app",
++                        "goal": "Review order",
++                        "reason": "Observed state",
++                        "reached_page_id": 12,
++                    },
++                    {
++                        "name": "Unknown",
++                        "start_url": "https://shop.test/app",
++                        "goal": "Unknown",
++                        "reason": "Invalid page",
++                        "reached_page_id": 99,
++                    },
++                ]
++            }
++        )
++
++    monkeypatch.setattr(crawl_workflows.llm_svc, "plain_completion", fake_completion)
++    proposals = asyncio.run(
++        crawl_workflows._infer_workflows(
++            object(),
++            [
++                {"page_id": 11, "url": "https://shop.test/app"},
++                {"page_id": 12, "url": "https://shop.test/app"},
++            ],
++            {"https://shop.test/app"},
++        )
++    )
++    assert [proposal["reached_page_id"] for proposal in proposals] == [11, 12]
++
++
++def test_inference_keeps_different_goals_with_the_same_name_and_start(monkeypatch):
++    workflows = [
++        {
++            "name": "Account settings",
++            "start_url": "https://shop.test/account",
++            "goal": goal,
++            "reason": "The account page offers this action",
++        }
++        for goal in ("Change email", "Change password")
++    ]
++
++    async def completion(_config, _prompt):
++        return json.dumps({"workflows": workflows})
++
++    monkeypatch.setattr(crawl_workflows.llm_svc, "plain_completion", completion)
++
++    async def infer(prior=None):
++        return await crawl_workflows._infer_workflows(
++            object(),
++            [{"url": "https://shop.test/account"}],
++            {"https://shop.test/account"},
++            prior,
++        )
++
++    assert [item["goal"] for item in asyncio.run(infer())] == [
++        "Change email",
++        "Change password",
++    ]
++    prior = {crawl_workflows._workflow_identity(workflows[0])}
++    assert [item["goal"] for item in asyncio.run(infer(prior))] == ["Change password"]
++
++
++def test_reached_note_never_requests_input():
++    assert (
++        crawl_workflows._needs_user_input({"status": "crawled", "needs_input": True})
++        is False
++    )
++
++
++def test_reached_inference_is_recorded_without_opening_browser(monkeypatch):
++    notes = []
++    page = CrawledPage(id=42, test_run_id=999, url="https://shop.test/app")
++    monkeypatch.setattr(
++        crawl_workflows,
++        "_crawl_inventory",
++        lambda _run_id: ([{"page_id": 42, "url": page.url}], {page.url: page}),
++    )
++    monkeypatch.setattr(
++        crawl_workflows, "_prior_workflow_identities", lambda _run_id: set()
++    )
++    monkeypatch.setattr(crawl_workflows, "_saved_workflow_proposals", lambda _site: [])
++    monkeypatch.setattr(
++        crawl_workflows, "list_workflow_notes", lambda _session, _id: []
++    )
++
++    async def infer(*_args):
++        return [
++            {
++                "name": "Write review",
++                "goal": "Open review editor",
++                "reason": "Observed form",
++                "start_url": page.url,
++                "reached_page_id": 42,
++                "destructive": False,
++            }
++        ]
++
++    monkeypatch.setattr(crawl_workflows, "_infer_workflows", infer)
++    monkeypatch.setattr(
++        crawl_workflows,
++        "_record_note",
++        lambda *args, **kwargs: notes.append((args, kwargs)),
++    )
++    asyncio.run(
++        crawl_workflows.explore_after_crawl(
++            999,
++            llm_cfg=object(),
++            site=SimpleNamespace(base_url="https://shop.test"),
++            creds=[],
++            shared=object(),
++            max_pages=10,
++            browser_engine="chromium",
++            browser_visible=False,
++            pw_proxy={},
++            global_http_header={},
++        )
++    )
++    assert len(notes) == 1
++    assert notes[0][0][2] == "crawled"
++    assert notes[0][1]["page_id"] == 42
++    assert notes[0][1].get("needs_input", False) is False
++
++
+ def test_workflow_reuses_saved_account_after_credential_ids_change():
+     page = CrawledPage(
+         test_run_id=298,
+@@ -897,7 +1034,9 @@ def test_crawl_note_appears_in_attack_surface(isolated_db_engine):
+             )
+         )
+         session.commit()
+-        assert crawl_workflows._prior_workflow_names(run.id) == {"checkout"}
++        assert crawl_workflows._prior_workflow_identities(run.id) == {
++            ("checkout", "/", "")
++        }
+         summary = recon_summary.build_recon_summary(run.id, session=session)
+ 
+     assert len(summary["crawl_notes"]) == 1
+diff --git a/tests/services/test_workflow_workprogram.py b/tests/services/test_workflow_workprogram.py
+index 370c65d..7067fb2 100644
+--- a/tests/services/test_workflow_workprogram.py
++++ b/tests/services/test_workflow_workprogram.py
+@@ -293,3 +293,126 @@ def test_sensitive_signed_in_workflow_gets_every_check_except_tampering(db_sessi
+         "csrf",
+         "reauth",
+     }
++
++
++def test_inventory_includes_unreached_notes_and_distinct_observed_states(db_session):
++    run = _run(db_session)
++    first = _page(
++        db_session, run.id, url="https://target.local/app", steps=[{"kind": "click"}]
++    )
++    second = _page(
++        db_session, run.id, url="https://target.local/app", steps=[{"kind": "click"}]
++    )
++    static = _page(
++        db_session, run.id, state_kind="url", url="https://target.local/help"
++    )
++    first.state_label = "Review editor"
++    second.state_label = "Checkout form"
++    db_session.add(first)
++    db_session.add(second)
++    db_session.add(static)
++    failed = ScanLog(
++        test_run_id=run.id,
++        run_kind="web",
++        phase="crawl_note",
++        data_json=json.dumps(
++            {
++                "note": {
++                    "name": "Payment setup",
++                    "goal": "Add payment",
++                    "status": "needs_input",
++                    "needs_input": True,
++                    "start_url": "https://target.local/app",
++                }
++            }
++        ),
++    )
++    db_session.add(failed)
++    db_session.commit()
++
++    assert seed_workflow_tests(run.id) == 2
++    result = list_workflow_tests(run.id)
++    assert [(row["name"], row["crawl_status"]) for row in result["workflows"]] == [
++        ("Payment setup", "needs_input"),
++        ("Review editor", "reached"),
++        ("Checkout form", "reached"),
++    ]
++    assert {item["workflow_key"] for item in result["items"]} == {
++        f"page:{first.id}",
++        f"page:{second.id}",
++    }
++    assert all(item["workflow_key"] != f"note:{failed.id}" for item in result["items"])
++    assert static.id not in {row["reached_page_id"] for row in result["workflows"]}
++
++
++def test_retry_updates_latest_inventory_note_without_changing_identity(db_session):
++    run = _run(db_session)
++    page = _page(db_session, run.id)
++    first = ScanLog(
++        test_run_id=run.id,
++        run_kind="web",
++        phase="crawl_note",
++        data_json=json.dumps(
++            {"note": {"name": "Checkout", "status": "needs_input", "needs_input": True}}
++        ),
++    )
++    db_session.add(first)
++    db_session.commit()
++    _note(db_session, run.id, page, "Checkout", retry_of=first.id)
++    seed_workflow_tests(run.id)
++    result = list_workflow_tests(run.id)
++    assert len(result["workflows"]) == 1
++    assert result["workflows"][0]["workflow_key"] == f"note:{first.id}"
++    assert result["workflows"][0]["crawl_status"] == "reached"
++    assert all(item["workflow_key"] == f"note:{first.id}" for item in result["items"])
++
++
++def test_inferred_note_adopts_observed_page_check_and_preserves_result(db_session):
++    run = _run(db_session)
++    page = _page(db_session, run.id, steps=[{"kind": "click", "name": "Open checkout"}])
++    page.state_label = "Checkout form"
++    db_session.add(page)
++    db_session.commit()
++    assert seed_workflow_tests(run.id) == 1
++    item = list_workflow_tests(run.id)["items"][0]
++    traffic = TrafficEntry(
++        test_run_id=run.id, source="httpx", method="POST", url=page.url
++    )
++    db_session.add(traffic)
++    db_session.commit()
++    record_workflow_test(
++        run.id,
++        item["id"],
++        status="passed",
++        attempted_sequence=["Skip checkout step"],
++        expected_behavior="Rejected",
++        observed_behavior="Rejected",
++        evidence_traffic_ids=[traffic.id],
++    )
++    note = _note(db_session, run.id, page, "Checkout form")
++    assert seed_workflow_tests(run.id) == 0
++    result = list_workflow_tests(run.id)
++    assert len(result["items"]) == 1
++    assert result["items"][0]["id"] == item["id"]
++    assert result["items"][0]["status"] == "passed"
++    assert result["items"][0]["workflow_key"] == f"note:{note.id}"
++    assert len(result["workflows"]) == 1
++
++
++def test_two_named_workflows_on_one_page_keep_separate_checks(db_session):
++    run = _run(db_session)
++    page = _page(db_session, run.id, steps=[{"kind": "click", "name": "Open form"}])
++    page.state_label = "Account form"
++    db_session.add(page)
++    db_session.commit()
++    assert seed_workflow_tests(run.id) == 1
++    first = _note(db_session, run.id, page, "Update address")
++    second = _note(db_session, run.id, page, "Update phone")
++    assert seed_workflow_tests(run.id) == 1
++    result = list_workflow_tests(run.id)
++    assert {item["workflow_key"] for item in result["items"]} == {
++        f"note:{first.id}", f"note:{second.id}"
++    }
++    assert {row["name"] for row in result["workflows"]} == {
++        "Update address", "Update phone"
++    }
+diff --git a/uv.lock b/uv.lock
+index 878f672..984cee7 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -8,7 +8,7 @@ resolution-markers = [
+ 
+ [[package]]
+ name = "aespa"
+-version = "0.7.20261016.2"
++version = "0.7.20261016.3"
+ source = { editable = "." }
+ dependencies = [
+     { name = "alembic" },

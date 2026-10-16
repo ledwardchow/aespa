@@ -36,7 +36,7 @@ export function BenchmarkModelSettings({ models, settings, onChange }) {
             setSaved(false);
           }}
         >
-          <option value="">Choose a model...</option>
+          <option value="">Choose a model…</option>
           {models.map((model) => (
             <option key={model.id} value={model.id}>
               {model.name}
@@ -46,7 +46,7 @@ export function BenchmarkModelSettings({ models, settings, onChange }) {
       </label>
       <div className="form-actions">
         <button className="btn primary" disabled={busy || !modelId}>
-          {busy ? "Saving..." : "Save benchmark model"}
+          {busy ? "Saving…" : "Save benchmark model"}
         </button>
         {saved && (
           <span className="field-hint" role="status">

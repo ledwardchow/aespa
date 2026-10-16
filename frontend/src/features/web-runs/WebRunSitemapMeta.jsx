@@ -275,11 +275,11 @@ export function WebRunSitemapMeta({
               fontWeight: 600,
               color:
                 activeCount > 0
-                  ? "var(--warning, #f59e0b)"
+                  ? "var(--warn)"
                   : queuedCount > 0
                     ? "var(--text, #e5e7eb)"
                     : (run.llm_completed || 0) > 0 || completedNodes.length > 0
-                      ? "var(--success, #10b981)"
+                      ? "var(--ok)"
                       : "var(--muted)",
             }}
           >

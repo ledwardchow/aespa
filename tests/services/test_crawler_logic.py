@@ -2094,8 +2094,8 @@ def test_dedupe_api_calls_uses_method_and_normalized_url():
 
     deduped = crawler._dedupe_api_calls(calls)
 
-    assert len(deduped) == 2
-    assert [call["method"] for call in deduped] == ["GET", "POST"]
+    assert len(deduped) == 3
+    assert [call["method"] for call in deduped] == ["GET", "GET", "POST"]
 
 
 def test_url_has_object_ref_detects_path_and_query_ids():

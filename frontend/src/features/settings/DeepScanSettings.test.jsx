@@ -37,7 +37,7 @@ test("uses the shared settings card and save states", async () => {
   fireEvent.change(screen.getByLabelText("Concurrent planner calls"), {
     target: { value: "3" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Save Deep Scan Settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save Deep Scan settings" }));
 
   await waitFor(() =>
     expect(settingsApi.upsertDeepScanConfig).toHaveBeenCalledWith({

@@ -1,0 +1,14 @@
+{
+  "command": "uv run --offline aespa",
+  "health_status": 200,
+  "stayed_running": true,
+  "version": {
+    "version": "0.7.20261016.8",
+    "username": null
+  },
+  "before_revision": "91c4b6e7a205",
+  "after_revision": "45623834b15e",
+  "quick_check": "ok",
+  "foreign_key_violations": 0,
+  "database": "private copied user database"
+}

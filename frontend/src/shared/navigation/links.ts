@@ -6,6 +6,8 @@ export function runHref(
   tab?: string,
   references: {
     finding?: string;
+    finding_ids?: string;
+    from?: "coverage" | "workflows";
     lead?: string;
     coverage_cells?: string;
     coverage_category?: string;

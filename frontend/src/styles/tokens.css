@@ -18,6 +18,8 @@
   --ok: #3fcf70;
   --ok-bg: rgba(63, 207, 112, 0.1);
   --warn: #f5a623;
+  --hover: rgba(255, 255, 255, 0.04);
+  --mono: ui-monospace, "SF Mono", monospace;
   --coverage-not-started: #374151;
   --coverage-in-progress: #1e3a5f;
   --coverage-covered: #14532d;

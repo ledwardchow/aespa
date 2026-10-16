@@ -163,7 +163,7 @@ export function CrawlerSettings() {
               )}
             </div>
             <button type="submit" className="btn" disabled={saving}>
-              {saving ? "Saving…" : "Save Crawler Settings"}
+              {saving ? "Saving…" : "Save crawler settings"}
             </button>
           </div>
         </form>

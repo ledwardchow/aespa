@@ -33,6 +33,7 @@ import { WebRunSitemapGraph } from "./WebRunSitemapGraph.jsx";
 import { WebRunCrawlProgress } from "./WebRunCrawlProgress.jsx";
 import { WebRunHeader } from "./WebRunHeader.jsx";
 import { WorkflowInputDrawer } from "./WorkflowInputDrawer.jsx";
+import { isRetryBusy, retriesByNote } from "./workflowRetries.js";
 import { WebRunSastLeadsTab } from "../../shared/leads/RunLeadsTab.jsx";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
@@ -54,6 +55,8 @@ function TestRunContent({
   showTeamScan = false,
   initialTab,
   initialFindingRef,
+  findingIds,
+  coverageReturn,
   initialLeadRef,
   initialTrafficCoverage,
 }) {
@@ -78,7 +81,7 @@ function TestRunContent({
   const [guidedLoginErrors, setGuidedLoginErrors] = useState([]);
   const [entraPrompts, setEntraPrompts] = useState([]);
   const [workflowNotes, setWorkflowNotes] = useState([]);
-  const [workflowRetryStatus, setWorkflowRetryStatus] = useState({ status: "idle" });
+  const [workflowRetries, setWorkflowRetries] = useState({});
   const [notificationFocus, setNotificationFocus] = useState(0);
   const [focusedNotificationId, setFocusedNotificationId] = useState(null);
   const [workflowFocus, setWorkflowFocus] = useState(null);
@@ -90,16 +93,15 @@ function TestRunContent({
       webRunsApi.getWorkflowRetryStatus(runId),
     ]);
     setWorkflowNotes(result?.notes || []);
-    setWorkflowRetryStatus(retry || { status: "idle" });
+    setWorkflowRetries(retriesByNote(retry));
   }, [runId]);
   usePolling(loadWorkflowNotes, { intervalMs: 5000 });
   const waitingWorkflows = workflowNotes.filter(
     (note) =>
       note.needs_input &&
-      !(
-        workflowRetryStatus.note_id === note.id &&
-        ["submitting", "running"].includes(workflowRetryStatus.status)
-      ),
+      note.status !== "crawled" &&
+      !note.superseded &&
+      !isRetryBusy(workflowRetries[note.id]),
   );
   const viewWorkflow = (noteId) => {
     setWorkflowInputOpen(false);
@@ -522,7 +524,7 @@ function TestRunContent({
         runId={runId}
         onClose={closeWorkflowInput}
         onNotesChange={setWorkflowNotes}
-        onRetryStatusChange={setWorkflowRetryStatus}
+        onRetryStatusChange={setWorkflowRetries}
         onViewWorkflow={viewWorkflow}
         focusedNoteId={focusedNotificationId}
         focusSequence={notificationFocus}
@@ -675,6 +677,8 @@ function TestRunContent({
             run={run}
             siteName={siteName}
             initialFindingRef={initialFindingRef}
+            findingIds={findingIds}
+            coverageReturn={coverageReturn}
             thinkingStatus={thinkingStatus}
             thinkingStopRequested={thinkingStopRequested}
             aliceIsThinking={aliceIsThinking}
@@ -689,7 +693,7 @@ function TestRunContent({
           runId={runId}
           workflowFocus={workflowFocus}
           onWorkflowNotesChange={setWorkflowNotes}
-          onWorkflowRetryStatusChange={setWorkflowRetryStatus}
+          onWorkflowRetryStatusChange={setWorkflowRetries}
           onOpenWorkflowNotification={openWorkflowInput}
           run={run}
           active={activeTab === "attack"}

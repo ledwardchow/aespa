@@ -1,0 +1,14 @@
+- [x] Reproduce it yourself on the matching surface via the driver skill (Non-negotiables), even when a debug or instrumentation protocol says to ask the user to reproduce. Ask the user only with a stated, specific reason the control surface cannot reach the target, and only after driving it as far as it goes. If it won't reproduce directly, synthesize the trigger, tighten conditions, or instrument until it fires.
+  - The generated Test Lead context contains an explicit instruction to test only example pages. The regression test will reproduce that output.
+- [x] Binary-search the cause. Form the candidate hypotheses, then rule them out until one survives. Seed them with `how` over the affected subsystem and the **why** skill for regression history. Each pass, take the split that cuts the most remaining problem space, get runtime evidence, eliminate. When program state is unclear, add instrumentation or logging and read it as the code runs. Don't guess. Drive a long or stubborn hunt with Claude Code's `loop` skill. Confirm the surviving *mechanism* with runtime evidence before the step-3 architect/interrogate fan-out.
+  - Grouping affects the opening context. HTTP and browser scan tools already accept targets outside crawled page records. No change to crawl sampling is needed.
+- [x] Plan the fix. If it crosses a function boundary, `architect` first. Delegate implementation to a subagent using your configured bug-fix model (default in poteto-mode's Models section) with a specific scope.
+  - Keep route-group metadata as crawl observations. Change the standing instruction and add context-output regression assertions. No signatures or data models change.
+- [x] Verify on the same surface. The original repro now passes. "Inconclusive" or wrong-surface is not a pass. Flag it. Unit tests show branch behavior, not bug absence.
+  - Check generated Test Lead context and route-sampling tests. Live model behavior is outside this check.
+- [x] Stage the commits so the failing repro lands before the fix in git history. See the **tdd** skill for the failing-test-first cadence when the bug has a cheap local test path. Skip it when the test would be expensive, integration-heavy, or unclear.
+  - skip: Keep changes uncommitted in the shared working tree with unrelated work. Run the regression before and after the fix.
+- [x] Run **Opening a PR**.
+  - skip: This request concerns a local behavior correction in a working tree with unrelated changes. No publishing requested.
+
+Verification completed. The context regression failed before the prompt change and passed afterward. In the shared working tree, 13 recon-context tests and 100 route-sampling, web-coverage, and scope tests passed. Ruff lint, formatting checks, and git diff --check passed. No live model scan ran. Temporary implementation worktree archived after copying and verifying its two changed files.

@@ -225,7 +225,7 @@ export function DeepScanSettings() {
               )}
             </div>
             <button type="submit" className="btn" disabled={saving}>
-              {saving ? "Saving…" : "Save Deep Scan Settings"}
+              {saving ? "Saving…" : "Save Deep Scan settings"}
             </button>
           </div>
         </form>

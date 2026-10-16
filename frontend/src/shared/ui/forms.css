@@ -466,7 +466,7 @@ legend {
 }
 .site-details-toggle:hover {
   border-color: var(--border);
-  background: var(--surface-2);
+  background: var(--panel-2);
   color: var(--text);
 }
 .site-details-toggle:focus-visible {
@@ -598,7 +598,7 @@ legend {
 }
 .alert.notice.error {
   border-color: rgba(224, 92, 92, 0.45);
-  border-left: 3px solid var(--danger, #e05c5c);
+  border-left: 3px solid var(--danger);
 }
 .alert.notice.success {
   border-color: rgba(72, 187, 120, 0.4);

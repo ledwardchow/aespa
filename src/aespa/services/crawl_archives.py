@@ -11,21 +11,25 @@ from sqlmodel import Session, select
 from aespa.models import (
     AgentLog,
     CrawledPage,
+    DiscoveredTarget,
     PageCredentialView,
     PageLink,
     PageOwaspTest,
     ScanLog,
     ScannerSession,
     Site,
+    TargetAccessObservation,
+    TargetDiscovery,
     TargetIntelItem,
     TestRun,
     TestRunStatus,
     TrafficEntry,
 )
 from aespa.services import recon_summary as recon_summary_svc
+from aespa.services import target_catalog
 
 _CRAWL_ARCHIVE_FORMAT = "aespa-crawl-export"
-_CRAWL_ARCHIVE_VERSION = 1
+_CRAWL_ARCHIVE_VERSION = 2
 
 
 class ArchiveError(ValueError):
@@ -123,6 +127,7 @@ def build_archive(session: Session, run: TestRun) -> dict:
         },
         "crawl": {
             "route_groups": json.loads(run.route_groups_json or "[]"),
+            "discovery_completeness": run.discovery_completeness,
             "progress": {
                 "per_user_progress": run.per_user_progress,
                 "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -131,7 +136,47 @@ def build_archive(session: Session, run: TestRun) -> dict:
                 else None,
             },
             "pages": [
-                {field: getattr(page, field) for field in page_fields} for page in pages
+                {"archive_id": page.id, **{field: getattr(page, field) for field in page_fields}}
+                for page in pages
+            ],
+            "actors": [
+                {"archive_id": cred.id, "username": cred.username, "label": cred.label}
+                for cred in site.credentials
+            ],
+            "discovered_targets": [
+                {
+                    "archive_id": target.id,
+                    "url": target.url,
+                    "state_key": target.state_key,
+                    "route_pattern": target.route_pattern,
+                    "discoveries": [
+                        {
+                            "source_page_id": sighting.source_page_id,
+                            "source_state_key": sighting.source_state_key,
+                            "actor_key": sighting.actor_key,
+                            "source_kind": sighting.source_kind,
+                            "source_ref": sighting.source_ref,
+                        }
+                        for sighting in session.exec(
+                            select(TargetDiscovery).where(TargetDiscovery.target_id == target.id)
+                        )
+                    ],
+                    "access": [
+                        {
+                            "source_kind": observation.source_kind,
+                            "source_id": observation.source_id,
+                            "method": observation.method,
+                            "actor_key": observation.actor_key,
+                            "result": observation.result,
+                        }
+                        for observation in session.exec(
+                            select(TargetAccessObservation).where(TargetAccessObservation.target_id == target.id)
+                        )
+                    ],
+                }
+                for target in session.exec(
+                    select(DiscoveredTarget).where(DiscoveredTarget.test_run_id == run.id)
+                )
             ],
             "links": [
                 {
@@ -201,6 +246,7 @@ def build_archive(session: Session, run: TestRun) -> dict:
             ],
             "traffic": [
                 {
+                    "archive_id": entry.id,
                     "source": entry.source,
                     "method": entry.method,
                     "url": entry.url,
@@ -289,7 +335,7 @@ def build_archive(session: Session, run: TestRun) -> dict:
 def validate_archive(payload: object, site_base_url: str) -> dict:
     if not isinstance(payload, dict) or payload.get("format") != _CRAWL_ARCHIVE_FORMAT:
         raise ArchiveError(status=400, message="Not an AESPA crawl export file")
-    if payload.get("version") != _CRAWL_ARCHIVE_VERSION:
+    if payload.get("version") not in {1, _CRAWL_ARCHIVE_VERSION}:
         raise ArchiveError(status=400, message="Unsupported crawl export version")
     source = payload.get("source")
     crawl = payload.get("crawl")
@@ -314,6 +360,8 @@ def restore_archive_records(
 ) -> dict[str, CrawledPage]:
     pages_by_identity: dict[str, CrawledPage] = {}
     pages_by_url: dict[str, CrawledPage] = {}
+    pages_by_archive_id: dict[int, CrawledPage] = {}
+    traffic_by_archive_id: dict[int, TrafficEntry] = {}
     allowed_page_fields = {
         "url",
         "state_key",
@@ -360,6 +408,8 @@ def restore_archive_records(
             session.flush()
             pages_by_identity[page_identity] = page
             pages_by_url.setdefault(page.url, page)
+            if isinstance(item.get("archive_id"), int):
+                pages_by_archive_id[item["archive_id"]] = page
 
         for item in crawl.get("links", []):
             if not isinstance(item, dict) or not isinstance(
@@ -456,8 +506,7 @@ def restore_archive_records(
                 or not isinstance(item.get("url"), str)
             ):
                 continue
-            session.add(
-                TrafficEntry(
+            traffic_row = TrafficEntry(
                     test_run_id=run_id,
                     **{
                         key: item.get(key)
@@ -488,7 +537,103 @@ def restore_archive_records(
                     ),
                     session_label=item.get("session_label"),
                 )
-            )
+            session.add(traffic_row)
+            session.flush()
+            if isinstance(item.get("archive_id"), int):
+                traffic_by_archive_id[item["archive_id"]] = traffic_row
+
+        source_actors = {
+            item.get("archive_id"): item
+            for item in crawl.get("actors", [])
+            if isinstance(item, dict) and isinstance(item.get("archive_id"), int)
+        }
+        source_username_counts: dict[str, int] = {}
+        for actor in source_actors.values():
+            username = actor.get("username")
+            if isinstance(username, str):
+                source_username_counts[username] = source_username_counts.get(username, 0) + 1
+        destination_by_username: dict[str, list] = {}
+        for credential in site.credentials:
+            destination_by_username.setdefault(credential.username, []).append(credential)
+
+        def remap_actor(value: str) -> str:
+            if value == "anonymous" or value.startswith("unknown:"):
+                return value
+            if value.startswith("credential:"):
+                try:
+                    old_id = int(value.partition(":")[2])
+                except ValueError:
+                    return f"unknown:archive:{value}"
+                archived = source_actors.get(old_id)
+                username = archived.get("username") if archived else None
+                candidates = destination_by_username.get(username, [])
+                if len(candidates) == 1 and source_username_counts.get(username, 0) == 1:
+                    return target_catalog.actor_key(candidates[0].id)
+                return f"unknown:archive:credential:{old_id}"
+            return f"unknown:archive:{value}"
+
+        for item in crawl.get("discovered_targets", []):
+            if not isinstance(item, dict) or not isinstance(item.get("url"), str):
+                continue
+            for sighting in item.get("discoveries", []):
+                if not isinstance(sighting, dict):
+                    continue
+                source_page = pages_by_archive_id.get(sighting.get("source_page_id"))
+                target_catalog.record_discoveries(
+                    run_id,
+                    [item["url"]],
+                    source=target_catalog.DiscoverySource(
+                        source_page.id if source_page else None,
+                        sighting.get("source_state_key"),
+                        remap_actor(str(sighting.get("actor_key") or "unknown:archive")),
+                        sighting.get("source_kind") or "archive",
+                        sighting.get("source_ref"),
+                    ),
+                    state_key=item.get("state_key"),
+                    session=session,
+                )
+            if not item.get("discoveries"):
+                target_catalog.record_discoveries(
+                    run_id, [item["url"]],
+                    source=target_catalog.DiscoverySource(None, None, "unknown:archive", "archive"),
+                    state_key=item.get("state_key"), session=session,
+                )
+            target = session.exec(
+                select(DiscoveredTarget)
+                .where(DiscoveredTarget.test_run_id == run_id)
+                .where(DiscoveredTarget.url == target_catalog.exact_url(item["url"]))
+                .where(DiscoveredTarget.state_identity == target_catalog.state_identity(item.get("state_key")))
+            ).one()
+            if isinstance(item.get("route_pattern"), str) and item["route_pattern"]:
+                target.route_pattern = item["route_pattern"]
+                session.add(target)
+            for access in item.get("access", []):
+                if not isinstance(access, dict) or access.get("source_kind") != "traffic":
+                    continue
+                traffic_row = traffic_by_archive_id.get(access.get("source_id"))
+                if traffic_row is None or target_catalog.exact_url(traffic_row.url) != target.url:
+                    continue
+                session.add(TargetAccessObservation(
+                    test_run_id=run_id, target_id=target.id,
+                    method=traffic_row.method.upper(), actor_key=remap_actor(str(access.get("actor_key") or "unknown:archive")),
+                    source_kind="traffic", source_id=traffic_row.id,
+                    result="unknown",
+                ))
+
+        if not crawl.get("discovered_targets"):
+            for page in (pages_by_archive_id or pages_by_url).values():
+                target_catalog.record_discoveries(
+                    run_id, [page.url],
+                    source=target_catalog.DiscoverySource(page.id, page.state_key, "unknown:archive", "archive"),
+                    state_key=page.state_key, session=session,
+                )
+            for item in crawl.get("target_intelligence", []):
+                if isinstance(item, dict) and item.get("source") == "dom_link" and item.get("value"):
+                    target_catalog.record_discoveries(
+                        run_id, [item["value"]],
+                        source=target_catalog.DiscoverySource(None, None, "unknown:archive", "archive"),
+                        session=session,
+                    )
         for item in crawl.get("scanner_sessions", []):
             if not isinstance(item, dict) or not isinstance(item.get("label"), str):
                 continue
@@ -667,6 +812,11 @@ def import_into_run(
     groups = crawl.get("route_groups", [])
     run.route_groups_json = json.dumps(groups if isinstance(groups, list) else [])
     run.route_sampling_state_json = "{}"
+    run.discovery_completeness = (
+        crawl.get("discovery_completeness")
+        if crawl.get("discovery_completeness") in {"recorded", "incomplete", "legacy_unknown"}
+        else "legacy_unknown"
+    )
     run.crawl_started_once = True
     pages_by_url = restore_archive_records(session, run.id, crawl, site)
     return finish_archive_import(session, run, crawl, pages_by_url)

@@ -49,6 +49,7 @@ from aespa.models import (
     DeepScanTask,
     DeepScanTaskFinding,
     DeepScanVariant,
+    DiscoveredTarget,
     LeadTargetMapping,
     PageCredentialView,
     PageLink,
@@ -79,6 +80,8 @@ from aespa.models import (
     ScanLog,
     ScannerSession,
     ScanObligation,
+    TargetAccessObservation,
+    TargetDiscovery,
     TargetIntelItem,
     TestRun,
     TrafficEntry,
@@ -290,6 +293,24 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
             session.delete(evidence)
     for execution in executions:
         session.delete(execution)
+    session.flush()
+    for obligation in session.exec(
+        select(ScanObligation)
+        .where(ScanObligation.run_kind == "web")
+        .where(ScanObligation.run_id == run_id)
+    ).all():
+        session.delete(obligation)
+    session.flush()
+    for row in session.exec(select(TargetAccessObservation).where(TargetAccessObservation.test_run_id == run_id)).all():
+        session.delete(row)
+    for row in session.exec(select(TargetDiscovery).where(TargetDiscovery.test_run_id == run_id)).all():
+        session.delete(row)
+    session.flush()
+    for target in session.exec(
+        select(DiscoveredTarget).where(DiscoveredTarget.test_run_id == run_id)
+    ).all():
+        session.delete(target)
+    session.flush()
 
     # Findings and page workprogram cells must go before crawled pages because
     # both carry page references.
@@ -349,12 +370,6 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         .where(PhaseCheckpoint.run_id == run_id)
     ).all():
         session.delete(checkpoint)
-    for obligation in session.exec(
-        select(ScanObligation)
-        .where(ScanObligation.run_kind == "web")
-        .where(ScanObligation.run_id == run_id)
-    ).all():
-        session.delete(obligation)
 
     # Retired task-queue tables may still exist in upgraded databases even
     # though their ORM models are no longer part of the application.

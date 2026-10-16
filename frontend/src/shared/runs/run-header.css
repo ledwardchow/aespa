@@ -59,7 +59,7 @@
   letter-spacing: 0.5px;
 }
 .run-stat-edit-field input {
-  background: var(--input);
+  background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 5px;
   color: var(--text);

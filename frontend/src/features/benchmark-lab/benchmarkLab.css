@@ -411,7 +411,7 @@
   text-transform: capitalize;
 }
 .benchmark-metric-table td {
-  font-family: var(--mono-font, monospace);
+  font-family: var(--mono);
   font-size: 11px;
   text-align: right;
 }

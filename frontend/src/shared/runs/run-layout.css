@@ -95,7 +95,7 @@
 .traffic-filter {
   flex: 1;
   max-width: 320px;
-  background: var(--input);
+  background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
@@ -122,7 +122,7 @@
   gap: 12px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-2, var(--panel));
+  background: var(--panel);
   flex-wrap: wrap;
 }
 .traffic-filter-panel-title {
@@ -209,7 +209,7 @@
 }
 .traffic-row td {
   padding: 5px 10px;
-  border-bottom: 1px solid var(--border-subtle, var(--border));
+  border-bottom: 1px solid var(--border);
   white-space: nowrap;
   vertical-align: middle;
 }
@@ -229,7 +229,7 @@
   padding: 4px 8px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--surface);
+  background: var(--panel);
   font-size: 11px;
 }
 .tr-num {
@@ -1010,7 +1010,7 @@
 }
 
 .llm-queue-item-url {
-  font-family: var(--font-mono);
+  font-family: var(--mono);
   font-size: 11px;
   color: var(--text);
   overflow: hidden;
@@ -1544,7 +1544,7 @@
   cursor: pointer;
 }
 .saved-crawl-option:hover:not(:disabled) {
-  background: var(--surface-2);
+  background: var(--panel-2);
   border-color: var(--border);
 }
 .saved-crawl-option:disabled {
@@ -1665,7 +1665,7 @@
   overflow-x: hidden;
   overflow-y: auto;
   border-right: 1px solid var(--border);
-  background: var(--bg-2, var(--panel));
+  background: var(--panel);
 }
 .sitemap-side-panel[hidden] {
   display: none;
@@ -1788,7 +1788,7 @@
   flex: none;
   width: 32px;
   border-right: 1px solid var(--border);
-  background: var(--bg-2, var(--panel));
+  background: var(--panel);
 }
 .sitemap-side-rail-button {
   display: flex;
@@ -1806,7 +1806,7 @@
 }
 .sitemap-side-rail-button:hover {
   color: var(--text);
-  background: var(--hover, rgba(255, 255, 255, 0.04));
+  background: var(--hover);
 }
 .sitemap-side-rail-button:focus-visible {
   outline: 2px solid var(--accent);

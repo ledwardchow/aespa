@@ -1,15 +1,10 @@
+import { fmtTime } from "../../shared/lib/dates.js";
+
 export function buildAgentsFromLog(rows) {
   const map = new Map();
   for (const r of rows) {
     const id = r.agent_id;
-    const ts = r.created_at
-      ? new Date(r.created_at).toLocaleTimeString("en-US", {
-          hour12: false,
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        })
-      : "--:--:--";
+    const ts = fmtTime(r.created_at, "--:--:--");
     const existing = map.get(id) || {
       id,
       name: r.role || id,

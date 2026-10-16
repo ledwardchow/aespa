@@ -134,7 +134,7 @@ export function CompletedScanBenchmarks({
             disabled={busy}
             onChange={(event) => setDatasetId(event.target.value)}
           >
-            <option value="">Select a saved file...</option>
+            <option value="">Select a saved file…</option>
             {datasets.map((dataset) => (
               <option key={dataset.id} value={dataset.id}>
                 {dataset.label ? `${dataset.label} (${dataset.name})` : dataset.name} (
@@ -165,7 +165,7 @@ export function CompletedScanBenchmarks({
           className="btn primary"
           disabled={busy || !defaultModel || !datasetId || !selectedRuns.length}
         >
-          {busy ? "Working..." : `Benchmark ${selectedRuns.length} selected scans`}
+          {busy ? "Working…" : `Benchmark ${selectedRuns.length} selected scans`}
         </button>
         {!!selectedRuns.length && !datasetId && (
           <p className="subtle">Pick a ground truth file above to turn this on.</p>

@@ -208,6 +208,24 @@ def test_update_api_finding_edits_status_severity_and_text(client):
     assert data["owasp_api_category"] == "API5"
 
 
+def test_delete_api_findings_by_title_keeps_other_findings(client):
+    cid = _make_collection(client)
+    run = _make_run(client, cid)
+    _import_finding(client, run["id"], "Leaky finding")
+    _import_finding(client, run["id"], "Other finding")
+
+    r = client.delete(
+        f"/api/api-test-runs/{run['id']}/findings", params={"title": "Leaky finding"}
+    )
+    assert r.status_code == 204
+
+    titles = [
+        f["title"]
+        for f in client.get(f"/api/api-test-runs/{run['id']}/findings").json()
+    ]
+    assert titles == ["Other finding"]
+
+
 def test_update_api_finding_unknown_id_404(client):
     cid = _make_collection(client)
     run = _make_run(client, cid)

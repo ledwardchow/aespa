@@ -10,6 +10,8 @@ export type Route = {
   modelName?: string;
   extensionId?: string;
   findingRef?: string;
+  findingIds?: number[];
+  coverageReturn?: "owasp" | "workflows";
   leadRef?: string;
   trafficCoverage?: {
     cellIds: number[];
@@ -31,6 +33,21 @@ export function parseRoute(hash = "#/"): Route {
   const routeHash = rawRouteHash.replace(/^#\/applications(?=\/|$)/, "#/systems");
   const query = new URLSearchParams(queryString);
   const findingRef = cleanReference(query.get("finding"));
+  const findingIds = [
+    ...new Set(
+      (query.get("finding_ids") || "")
+        .split(",")
+        .filter((value) => /^[1-9]\d*$/.test(value))
+        .map(Number)
+        .filter(Number.isSafeInteger),
+    ),
+  ];
+  const coverageReturn =
+    query.get("from") === "workflows"
+      ? "workflows"
+      : query.get("from") === "coverage"
+        ? "owasp"
+        : undefined;
   const leadRef = cleanReference(query.get("lead"));
   const cellIds = (query.get("coverage_cells") || "")
     .split(",")
@@ -59,7 +76,15 @@ export function parseRoute(hash = "#/"): Route {
   if ((m = routeHash.match(/^#\/apis\/(\d+)$/))) return { name: "api-detail", id: +m[1] };
   if (routeHash === "#/apis") return { name: "api-list" };
   if ((m = routeHash.match(/^#\/api-runs\/(\d+)\/([a-z]+)$/)))
-    return { name: "api-run-detail", id: +m[1], tab: m[2], findingRef, trafficCoverage };
+    return {
+      name: "api-run-detail",
+      id: +m[1],
+      tab: m[2],
+      findingRef,
+      findingIds: findingIds.length ? findingIds : undefined,
+      coverageReturn,
+      trafficCoverage,
+    };
   if ((m = routeHash.match(/^#\/api-runs\/(\d+)$/)))
     return { name: "api-run-detail", id: +m[1], findingRef };
   if (routeHash === "#/sast-runs/new") return { name: "sast-run-new" };
@@ -76,6 +101,8 @@ export function parseRoute(hash = "#/"): Route {
       id: +m[1],
       tab: m[2],
       findingRef,
+      findingIds: findingIds.length ? findingIds : undefined,
+      coverageReturn,
       leadRef,
       trafficCoverage,
     };

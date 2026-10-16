@@ -32,7 +32,14 @@ const API_RUN_TABS = [
 // Reuse the same alice session management infrastructure as TestRunDetail but
 // bound to the /api/api-test-runs/{id}/* alias routes.
 
-export function ApiTestRunDetail({ runId, initialTab, initialFindingRef, initialTrafficCoverage }) {
+export function ApiTestRunDetail({
+  runId,
+  initialTab,
+  initialFindingRef,
+  findingIds,
+  coverageReturn,
+  initialTrafficCoverage,
+}) {
   const [run, setRun] = useState(null);
   const [error, setError] = useState(null);
   const [scanStatus, setScanStatus] = useState(null);
@@ -151,7 +158,7 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef, initial
   };
   const onDelete = async () => {
     if (!run) return;
-    if (!confirm(`Delete test run "${run.name}"?`)) return;
+    if (!confirm(`Delete run "${run.name}"?`)) return;
     try {
       await apiRunsApi.deleteApiRun(runId);
       nav(`#/apis/${run.collection_id}`);
@@ -278,6 +285,8 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef, initial
             scanRunning={scanRunning}
             run={run}
             initialFindingRef={initialFindingRef}
+            findingIds={findingIds}
+            coverageReturn={coverageReturn}
           />
         )}
         {tab === "leads" && <ApiRunLeadsTab runId={runId} scanRunning={scanRunning} />}

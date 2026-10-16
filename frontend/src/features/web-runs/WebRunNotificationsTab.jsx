@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
+import { anyRetryBusy, isRetryBusy, mergeRetries, retriesByNote } from "./workflowRetries.js";
 
 export function WebRunNotificationsTab({
   runId,
@@ -11,10 +12,9 @@ export function WebRunNotificationsTab({
   focusSequence,
 }) {
   const [notes, setNotes] = useState([]);
-  const [retryStatus, setRetryStatus] = useState({ status: "idle" });
+  const [retries, setRetries] = useState({});
   const [drafts, setDrafts] = useState({});
   const [saveToSite, setSaveToSite] = useState({});
-  const [error, setError] = useState("");
   const [expandedId, setExpandedId] = useState(null);
   const [loading, setLoading] = useState(true);
   const requestVersion = useRef(0);
@@ -30,23 +30,16 @@ export function WebRunNotificationsTab({
     if (version !== requestVersion.current) return;
     setNotes(result?.notes || []);
     onNotesChange?.(result?.notes || []);
-    setRetryStatus((current) => {
-      if (status?.status === "idle" && current.status === "submitting") return current;
-      if (status?.status === "idle" && current.status === "running") {
-        return {
-          ...current,
-          status: "error",
-          error: "Workflow progress was lost. Check Workflows for a saved result.",
-        };
-      }
-      return status || { status: "idle" };
-    });
-    onRetryStatusChange?.(status || { status: "idle" });
+    setRetries((current) => mergeRetries(current, retriesByNote(status)));
     setLoading(false);
-  }, [runId, onNotesChange, onRetryStatusChange]);
+  }, [runId, onNotesChange]);
+
+  useEffect(() => {
+    onRetryStatusChange?.(retries);
+  }, [retries, onRetryStatusChange]);
 
   usePolling(load, {
-    intervalMs: ["submitting", "running"].includes(retryStatus.status) ? 1000 : 15000,
+    intervalMs: anyRetryBusy(retries) ? 1000 : 15000,
   });
 
   useEffect(() => {
@@ -65,8 +58,9 @@ export function WebRunNotificationsTab({
     const instructions = (drafts[note.id] ?? note.instructions ?? "").trim();
     if (!instructions && !generateSampleData) return;
     requestVersion.current += 1;
-    setError("");
-    setRetryStatus({
+    const setProgress = (progress) =>
+      setRetries((current) => ({ ...current, [note.id]: progress }));
+    setProgress({
       status: "submitting",
       note_id: note.id,
       message: generateSampleData ? "Starting with generated test data" : "Starting the workflow",
@@ -82,25 +76,23 @@ export function WebRunNotificationsTab({
         Boolean(saveToSite[note.id]),
         generateSampleData,
       );
-      setRetryStatus(status);
-      onRetryStatusChange?.(status);
+      setProgress(status);
       onViewWorkflow(note.id);
     } catch (cause) {
       const message = cause.message || "Could not continue this workflow.";
-      setError(message);
-      setRetryStatus({ status: "error", note_id: note.id, error: message });
-      onRetryStatusChange?.({ status: "error", note_id: note.id, error: message });
+      setProgress({ status: "error", note_id: note.id, error: message });
     }
   };
 
-  const waiting = notes.filter((note) => note.needs_input);
-  const recentNote = notes.find((note) => note.id === retryStatus.note_id);
-  const visibleNotes =
-    recentNote &&
-    ["submitting", "running", "error"].includes(retryStatus.status) &&
-    !waiting.some((note) => note.id === recentNote.id)
-      ? [recentNote, ...waiting]
-      : waiting;
+  const waiting = notes.filter(
+    (note) => note.needs_input && note.status !== "crawled" && !note.superseded,
+  );
+  const recentNotes = notes.filter(
+    (note) =>
+      ["submitting", "running", "error"].includes(retries[note.id]?.status) &&
+      !waiting.some((item) => item.id === note.id),
+  );
+  const visibleNotes = [...recentNotes, ...waiting];
   const openId = visibleNotes.some((note) => note.id === expandedId)
     ? expandedId
     : visibleNotes.some((note) => note.id === focusedNoteId)
@@ -119,17 +111,18 @@ export function WebRunNotificationsTab({
           <span className="workflow-notification-count">{visibleNotes.length} waiting</span>
         ) : null}
       </div>
-      {error && !recentNote ? <p className="notice error">{error}</p> : null}
       {loading ? (
         <p className="subtle">Loading workflows…</p>
       ) : visibleNotes.length ? (
         <div className="workflow-input-list">
           {visibleNotes.map((note) => {
-            const progress = retryStatus.note_id === note.id ? retryStatus : null;
-            const busy = progress && ["submitting", "running"].includes(progress.status);
+            const progress = retries[note.id] || null;
+            const busy = isRetryBusy(progress);
             const result = progress?.result_status;
             const canProvideMore =
               note.needs_input &&
+              note.status !== "crawled" &&
+              !note.superseded &&
               !busy &&
               !(progress?.status === "complete" && result === "crawled");
             const expanded = note.id === openId;
@@ -206,10 +199,7 @@ export function WebRunNotificationsTab({
                       <button
                         type="button"
                         className="btn sm"
-                        disabled={
-                          ["submitting", "running"].includes(retryStatus.status) ||
-                          !(drafts[note.id] ?? note.instructions ?? "").trim()
-                        }
+                        disabled={!(drafts[note.id] ?? note.instructions ?? "").trim()}
                         onClick={() => continueWorkflow(note)}
                       >
                         Continue workflow
@@ -218,7 +208,6 @@ export function WebRunNotificationsTab({
                       <button
                         type="button"
                         className="btn sm secondary"
-                        disabled={["submitting", "running"].includes(retryStatus.status)}
                         onClick={() => continueWorkflow(note, true)}
                       >
                         Generate for me

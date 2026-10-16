@@ -338,7 +338,7 @@ export function SpecialistAgentSettings() {
               )}
             </div>
             <button type="submit" className="btn" disabled={saving}>
-              {saving ? "Saving…" : "Save Specialist Settings"}
+              {saving ? "Saving…" : "Save specialist settings"}
             </button>
           </div>
         </form>

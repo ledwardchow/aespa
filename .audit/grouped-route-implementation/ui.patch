@@ -1,0 +1,1363 @@
+--- a/frontend/src/features/web-runs/AttackSurfacePanel.jsx
++++ b/frontend/src/features/web-runs/AttackSurfacePanel.jsx
+@@ -39,7 +39,7 @@
+   );
+ }
+ 
+-export function AttackSurfacePanel({ summary, routeGroups = [] }) {
++export function AttackSurfacePanel({ summary, routeGroups = [], runId, completion }) {
+   const [expanded, setExpanded] = useState({
+     meta: true,
+     groups: true,
+@@ -92,7 +92,12 @@
+           <span>Parameters</span>
+         </div>
+         <div className="surface-summary-card">
+-          <strong>{coverage.completion_percent || 0}%</strong>
++          <strong>
++            {completion
++              ? Math.round((100 * completion.resolved_units) / (completion.applicable_units || 1))
++              : coverage.completion_percent || 0}
++            %
++          </strong>
+           <span>Coverage resolved</span>
+         </div>
+       </div>
+@@ -106,9 +111,9 @@
+           onToggle={toggle}
+         >
+           <p className="subtle surface-section-note">
+-            Only a few pages of each route were visited. Testing and coverage use these pages.
++            The crawl sampled pages from each route. Other found links remain available for testing.
+           </p>
+-          <RouteGroupsTable groups={routeGroups} />
++          <RouteGroupsTable groups={routeGroups} runId={runId} />
+         </Section>
+       ) : null}
+ 
+--- a/frontend/src/features/web-runs/AttackSurfacePanel.test.jsx
++++ b/frontend/src/features/web-runs/AttackSurfacePanel.test.jsx
+@@ -9,6 +9,22 @@
+ afterEach(() => vi.restoreAllMocks());
+ 
+ describe("Workflow crawl notes", () => {
++  it("uses root completion for the attack surface headline", () => {
++    render(
++      <AttackSurfacePanel
++        summary={{ routes: [], coverage: { completion_percent: 100 } }}
++        completion={{
++          exercised_units: 1,
++          applicable_units: 2,
++          resolved_units: 0,
++          target_met: false,
++        }}
++      />,
++    );
++    expect(screen.getByText("0%")).toBeTruthy();
++    expect(screen.queryByText("100%")).toBeNull();
++  });
++
+   it("shows workflows in their own panel", () => {
+     const summary = {
+       routes: [],
+--- a/frontend/src/features/web-runs/RouteGroupLinks.jsx
++++ b/frontend/src/features/web-runs/RouteGroupLinks.jsx
+@@ -0,0 +1,167 @@
++import { useEffect, useState } from "react";
++import { getDiscoveredTargets } from "../../shared/api/webRuns.js";
++
++function actorLabels(actors) {
++  return actors?.length
++    ? actors.map((actor) => actor.label || "Unknown account").join(", ")
++    : "Unknown";
++}
++
++function accessText(observations) {
++  return observations?.length
++    ? observations
++        .map((item) => `${item.label || "Unknown account"}: ${item.method} ${item.result}`)
++        .join("; ")
++    : "No direct access observed";
++}
++
++export function RouteGroupLinks({ runId, routePattern }) {
++  const [input, setInput] = useState("");
++  const [search, setSearch] = useState("");
++  const [cursors, setCursors] = useState([null]);
++  const [page, setPage] = useState(0);
++  const [result, setResult] = useState(null);
++  const [selectedId, setSelectedId] = useState(null);
++  const [error, setError] = useState("");
++  const [loading, setLoading] = useState(true);
++
++  useEffect(() => {
++    if (input.trim() === search) return undefined;
++    const timer = setTimeout(() => {
++      setSearch(input.trim());
++      setCursors([null]);
++      setPage(0);
++      setSelectedId(null);
++    }, 250);
++    return () => clearTimeout(timer);
++  }, [input, search]);
++
++  useEffect(() => {
++    let cancelled = false;
++    setLoading(true);
++    setError("");
++    getDiscoveredTargets(runId, { routePattern, search, cursor: cursors[page] })
++      .then((data) => {
++        if (!cancelled) {
++          setResult(data);
++          setSelectedId(null);
++        }
++      })
++      .catch((requestError) => {
++        if (!cancelled) setError(requestError.message);
++      })
++      .finally(() => {
++        if (!cancelled) setLoading(false);
++      });
++    return () => {
++      cancelled = true;
++    };
++  }, [runId, routePattern, search, cursors, page]);
++
++  const items = result?.items || [];
++  const selected = items.find((item) => item.id === selectedId);
++  const offset = page * 50;
++  const next = () => {
++    if (!result?.next_cursor) return;
++    setCursors((previous) => [...previous.slice(0, page + 1), result.next_cursor]);
++    setPage(page + 1);
++  };
++
++  return (
++    <div className="route-links" aria-label={`Links for ${routePattern}`}>
++      <label className="route-links-search">
++        Find a link or account
++        <input
++          type="search"
++          value={input}
++          onChange={(event) => setInput(event.target.value)}
++          placeholder="URL or account"
++        />
++      </label>
++      {result?.discovery_completeness && result.discovery_completeness !== "recorded" ? (
++        <p className="subtle">Older crawl data may have missing links.</p>
++      ) : null}
++      {error ? <div role="alert">Could not load links: {error}</div> : null}
++      {loading ? <div className="subtle">Loading links…</div> : null}
++      {!loading && !error ? (
++        <>
++          <div className="route-links-scroll">
++            <table className="surface-route-table route-links-table">
++              <thead>
++                <tr>
++                  <th>URL</th>
++                  <th>Link seen by</th>
++                  <th>Crawled</th>
++                  <th>Access observed</th>
++                </tr>
++              </thead>
++              <tbody>
++                {items.map((item) => (
++                  <tr key={item.id}>
++                    <td>
++                      <button
++                        type="button"
++                        className="route-links-url mono"
++                        onClick={() => setSelectedId(selectedId === item.id ? null : item.id)}
++                        aria-expanded={selectedId === item.id}
++                      >
++                        {item.url}
++                        {item.state_key ? ` (${item.state_key})` : ""}
++                      </button>
++                    </td>
++                    <td>{actorLabels(item.seen_by)}</td>
++                    <td>{item.crawled ? "Yes" : "No"}</td>
++                    <td>{accessText(item.access)}</td>
++                  </tr>
++                ))}
++                {!items.length ? (
++                  <tr>
++                    <td colSpan={4}>No matching links</td>
++                  </tr>
++                ) : null}
++              </tbody>
++            </table>
++          </div>
++          <div className="route-links-pages">
++            <span>
++              {items.length ? `${offset + 1}-${offset + items.length}` : 0} of {result?.total ?? 0}{" "}
++              links
++            </span>
++            <div>
++              <button
++                type="button"
++                className="btn sm"
++                disabled={page === 0}
++                onClick={() => setPage(page - 1)}
++              >
++                Previous
++              </button>{" "}
++              <button
++                type="button"
++                className="btn sm"
++                disabled={!result?.next_cursor}
++                onClick={next}
++              >
++                Next
++              </button>
++            </div>
++          </div>
++          {selected ? (
++            <div className="route-links-detail" aria-label="Link details">
++              <strong className="mono">{selected.url}</strong>
++              {selected.state_key ? <div>State: {selected.state_key}</div> : null}
++              <div>Link seen by: {actorLabels(selected.seen_by)}</div>
++              <div>Crawled: {selected.crawled ? "Yes" : "No"}</div>
++              <div>Access observed: {accessText(selected.access)}</div>
++              <div>
++                {selected.selected_checks?.length
++                  ? `${selected.selected_checks.length} security checks selected`
++                  : "No security check selected"}
++              </div>
++            </div>
++          ) : null}
++        </>
++      ) : null}
++    </div>
++  );
++}
+--- a/frontend/src/features/web-runs/RouteGroupLinks.test.jsx
++++ b/frontend/src/features/web-runs/RouteGroupLinks.test.jsx
+@@ -0,0 +1,102 @@
++import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
++import { beforeEach, expect, test, vi } from "vitest";
++import * as webRunsApi from "../../shared/api/webRuns.js";
++import { RouteGroupsTable } from "./RouteGroupsPanel.jsx";
++
++vi.mock("../../shared/api/webRuns.js", () => ({ getDiscoveredTargets: vi.fn() }));
++
++beforeEach(() => vi.clearAllMocks());
++
++test("opens a group and pages exact links without treating a sighting as access", async () => {
++  const pattern = "https://shop.test/orders?id={id}";
++  webRunsApi.getDiscoveredTargets
++    .mockResolvedValueOnce({
++      items: [
++        {
++          id: 1,
++          url: "https://shop.test/orders?id=101&tag=a&tag=b",
++          state_key: null,
++          seen_by: [{ label: "Alice" }],
++          crawled: false,
++          access: [],
++          selected_checks: [],
++        },
++      ],
++      next_cursor: "after-101",
++      total: 200,
++      discovery_completeness: "recorded",
++    })
++    .mockResolvedValueOnce({
++      items: [
++        {
++          id: 2,
++          url: "https://shop.test/orders?id=202",
++          state_key: "tab:details",
++          seen_by: [{ label: "Bob" }],
++          crawled: true,
++          access: [{ label: "Bob", method: "GET", result: "reached" }],
++          selected_checks: [{ id: 10 }],
++        },
++      ],
++      next_cursor: null,
++      total: 200,
++      discovery_completeness: "recorded",
++    });
++
++  render(
++    <RouteGroupsTable
++      runId={7}
++      groups={[{ label: "Orders", route_pattern: pattern, links_seen: 200, pages_sampled: 5 }]}
++    />,
++  );
++  expect(webRunsApi.getDiscoveredTargets).not.toHaveBeenCalled();
++  fireEvent.click(screen.getByRole("button", { name: "View links" }));
++  const links = await screen.findByLabelText(`Links for ${pattern}`);
++  expect(webRunsApi.getDiscoveredTargets).toHaveBeenCalledWith(7, {
++    routePattern: pattern,
++    search: "",
++    cursor: null,
++  });
++  expect(within(links).getByText("No direct access observed")).toBeTruthy();
++  fireEvent.click(
++    within(links).getByRole("button", { name: "https://shop.test/orders?id=101&tag=a&tag=b" }),
++  );
++  expect(within(links).getByText("No security check selected")).toBeTruthy();
++  fireEvent.click(within(links).getByRole("button", { name: "Next" }));
++  await waitFor(() =>
++    expect(webRunsApi.getDiscoveredTargets).toHaveBeenLastCalledWith(7, {
++      routePattern: pattern,
++      search: "",
++      cursor: "after-101",
++    }),
++  );
++  expect(await within(links).findByText("Bob: GET reached")).toBeTruthy();
++  expect(within(links).getByRole("button", { name: /orders\?id=202/ })).toBeTruthy();
++});
++
++test("searches the selected route from its first cursor", async () => {
++  const pattern = "https://shop.test/orders?id={id}";
++  webRunsApi.getDiscoveredTargets.mockResolvedValue({
++    items: [],
++    next_cursor: null,
++    total: 0,
++    discovery_completeness: "recorded",
++  });
++  render(
++    <RouteGroupsTable
++      runId={7}
++      groups={[{ label: "Orders", route_pattern: pattern, links_seen: 200, pages_sampled: 5 }]}
++    />,
++  );
++  fireEvent.click(screen.getByRole("button", { name: "View links" }));
++  fireEvent.change(await screen.findByPlaceholderText("URL or account"), {
++    target: { value: "id=202" },
++  });
++  await waitFor(() =>
++    expect(webRunsApi.getDiscoveredTargets).toHaveBeenCalledWith(7, {
++      routePattern: pattern,
++      search: "id=202",
++      cursor: null,
++    }),
++  );
++});
+--- a/frontend/src/features/web-runs/RouteGroupsPanel.jsx
++++ b/frontend/src/features/web-runs/RouteGroupsPanel.jsx
+@@ -1,4 +1,6 @@
+ import { SidePanelSection } from "./SitemapSidePanel.jsx";
++import { Fragment, useState } from "react";
++import { RouteGroupLinks } from "./RouteGroupLinks.jsx";
+ 
+ function routePath(url) {
+   return String(url || "").replace(/^[a-z]+:\/\/[^/]+/i, "") || "/";
+@@ -18,7 +20,7 @@
+   const totals = routeGroupTotals(groups);
+   return (
+     `${groups.length} ${groups.length === 1 ? "route" : "routes"} · ` +
+-    `${totals.links} links found · ${totals.visited} pages visited`
++    `${totals.links} links found · ${totals.visited} pages crawled`
+   );
+ }
+ 
+@@ -31,7 +33,7 @@
+         {routePath(group.route_pattern)}
+       </span>
+       <span className="route-group-counts">
+-        {group.links_seen} links found · {group.pages_sampled} visited
++        {group.links_seen} links found · {group.pages_sampled} crawled
+         {group.examples_different ? (
+           <span className="route-group-different">
+             {" "}
+@@ -66,10 +68,10 @@
+     <SidePanelSection
+       id="route-groups"
+       title="Grouped pages"
+-      count={`${groups.length} ${groups.length === 1 ? "route" : "routes"} · ${totals.visited} visited`}
++      count={`${groups.length} ${groups.length === 1 ? "route" : "routes"} · ${totals.visited} crawled`}
+     >
+       <p className="route-groups-note">
+-        Only a few pages of each route were visited. Testing uses these pages.
++        The crawl sampled pages from each route. Other found links remain available for testing.
+       </p>
+       {groups.map((group) => (
+         <RouteGroupTile key={group.route_pattern} group={group} onSelectExample={onSelectExample} />
+@@ -78,7 +80,8 @@
+   );
+ }
+ 
+-export function RouteGroupsTable({ groups = [] }) {
++export function RouteGroupsTable({ groups = [], runId }) {
++  const [expandedRoute, setExpandedRoute] = useState(null);
+   return (
+     <div className="surface-route-table-wrap">
+       <table className="surface-route-table">
+@@ -87,33 +90,54 @@
+             <th>Pages</th>
+             <th>Route</th>
+             <th>Links found</th>
+-            <th>Pages visited</th>
++            <th>Crawled</th>
++            <th>Links</th>
+           </tr>
+         </thead>
+         <tbody>
+           {groups.map((group) => (
+-            <tr key={group.route_pattern}>
+-              <td>{group.label}</td>
+-              <td>
+-                <span className="mono surface-route-url" title={group.route_pattern}>
+-                  {routePath(group.route_pattern)}
+-                </span>
+-              </td>
+-              <td>{group.links_seen}</td>
+-              <td>
+-                {group.pages_sampled}
+-                {group.examples_different ? (
+-                  <span className="subtle surface-route-note">
+-                    {group.examples_different} looked different
++            <Fragment key={group.route_pattern}>
++              <tr>
++                <td>{group.label}</td>
++                <td>
++                  <span className="mono surface-route-url" title={group.route_pattern}>
++                    {routePath(group.route_pattern)}
+                   </span>
+-                ) : null}
+-                {(group.example_urls || []).map((url) => (
+-                  <span key={url} className="mono subtle surface-route-note" title={url}>
+-                    {routePath(url)}
+-                  </span>
+-                ))}
+-              </td>
+-            </tr>
++                </td>
++                <td>{group.links_seen}</td>
++                <td>
++                  {group.pages_sampled}
++                  {group.examples_different ? (
++                    <span className="subtle surface-route-note">
++                      {group.examples_different} looked different
++                    </span>
++                  ) : null}
++                </td>
++                <td>
++                  {runId ? (
++                    <button
++                      type="button"
++                      className="route-links-toggle"
++                      aria-expanded={expandedRoute === group.route_pattern}
++                      onClick={() =>
++                        setExpandedRoute(
++                          expandedRoute === group.route_pattern ? null : group.route_pattern,
++                        )
++                      }
++                    >
++                      {expandedRoute === group.route_pattern ? "Hide links" : "View links"}
++                    </button>
++                  ) : null}
++                </td>
++              </tr>
++              {expandedRoute === group.route_pattern ? (
++                <tr className="route-links-expanded">
++                  <td colSpan={5}>
++                    <RouteGroupLinks runId={runId} routePattern={group.route_pattern} />
++                  </td>
++                </tr>
++              ) : null}
++            </Fragment>
+           ))}
+         </tbody>
+       </table>
+--- a/frontend/src/features/web-runs/WebRunAttackSurfaceTab.jsx
++++ b/frontend/src/features/web-runs/WebRunAttackSurfaceTab.jsx
+@@ -25,6 +25,7 @@
+   initialSubTab = "owasp",
+ }) {
+   const [summary, setSummary] = useState(null);
++  const [completion, setCompletion] = useState(null);
+   const [subTab, setSubTab] = useHashTab(
+     "subtab",
+     ["owasp", "attack-surface", "workflows", "intelligence"],
+@@ -37,13 +38,21 @@
+   }, [workflowFocus?.sequence, setSubTab]);
+ 
+   const load = useCallback(async () => {
+-    const result = await webRunsApi.getReconSummary(runId);
+-    setSummary(result);
+-    onTotalChange(result?.route_count || result?.routes?.length || 0);
++    const [summaryResult, matrixResult] = await Promise.allSettled([
++      webRunsApi.getReconSummary(runId),
++      webRunsApi.getWebCoverageMatrix(runId),
++    ]);
++    if (summaryResult.status === "rejected") throw summaryResult.reason;
++    setSummary(summaryResult.value);
++    setCompletion(
++      matrixResult.status === "fulfilled" ? matrixResult.value?.completion || null : null,
++    );
++    onTotalChange(summaryResult.value?.route_count || summaryResult.value?.routes?.length || 0);
+   }, [onTotalChange, runId]);
+ 
+   useEffect(() => {
+     setSummary(null);
++    setCompletion(null);
+     onTotalChange(0);
+   }, [onTotalChange, runId]);
+ 
+@@ -113,6 +122,8 @@
+         </div>
+       ) : subTab === "attack-surface" ? (
+         <AttackSurfacePanel
++          runId={runId}
++          completion={completion}
+           summary={summary}
+           routeGroups={summary?.route_groups || run?.route_groups}
+         />
+--- a/frontend/src/features/web-runs/WebRunWorkProgramTab.jsx
++++ b/frontend/src/features/web-runs/WebRunWorkProgramTab.jsx
+@@ -1,5 +1,5 @@
+ import * as webRunsApi from "../../shared/api/webRuns.js";
+-import { useState, useEffect, useCallback } from "react";
++import { Fragment, useState, useEffect, useCallback, useRef } from "react";
+ import { OWASP_WEB_LABELS } from "./coverageLabels.js";
+ import { OWASP_WEB_SHORT } from "../../shared/runs/coverage.js";
+ import { OWASP_WEB_CATEGORIES } from "../../shared/runs/webCoverage.js";
+@@ -31,17 +31,20 @@
+   const [selectedCell, setSelectedCell] = useState(null);
+   const [seedMsg, setSeedMsg] = useState(null);
+   const [enforce, setEnforce] = useState(null); // latest enforce_progress event
+-  const loadMatrix = useCallback(
+-    () =>
+-      webRunsApi
+-        .getWebCoverageMatrix(runId)
+-        .then((m) => {
+-          setMatrix(m);
+-          setLoading(false);
+-        })
+-        .catch(() => setLoading(false)),
+-    [runId],
+-  );
++  const matrixRequest = useRef(0);
++  const loadMatrix = useCallback(() => {
++    const request = ++matrixRequest.current;
++    return webRunsApi
++      .getWebCoverageMatrix(runId)
++      .then((m) => {
++        if (request !== matrixRequest.current) return;
++        setMatrix(m);
++        setLoading(false);
++      })
++      .catch(() => {
++        if (request === matrixRequest.current) setLoading(false);
++      });
++  }, [runId]);
+   const loadWorkflowCoverage = useCallback(
+     () =>
+       webRunsApi
+@@ -62,7 +65,7 @@
+     }
+   }, [reloadKey, loadMatrix, loadWorkflowCoverage]);
+ 
+-  // SSE live updates — mirrors ApiRunWorkProgramTab.
++  // Reload the complete matrix because a single child update cannot settle its siblings.
+   useEventStream(
+     `/api/test-runs/${runId}/events`,
+     {
+@@ -70,57 +73,7 @@
+         try {
+           const d = JSON.parse(ev.data);
+           if (d.type === "coverage_update") {
+-            setMatrix((prev) => {
+-              if (!prev) return prev;
+-              return {
+-                ...prev,
+-                pages: prev.pages.map((pg) => {
+-                  if (!pg.page_ids.includes(d.page_id) && pg.page_id !== d.page_id) return pg;
+-                  const cells = {
+-                    ...pg.cells,
+-                  };
+-                  const existing = cells[d.owasp_category] || {
+-                    status: "not_started",
+-                    finding_ids: [],
+-                  };
+-                  const fids = [...(existing.finding_ids || [])];
+-                  if (d.finding_id && !fids.includes(d.finding_id)) fids.push(d.finding_id);
+-                  cells[d.owasp_category] = {
+-                    ...existing,
+-                    status: d.status,
+-                    finding_ids: fids,
+-                    test_classes: d.test_class
+-                      ? {
+-                          ...(existing.test_classes || {}),
+-                          [d.test_class]: {
+-                            ...(existing.test_classes?.[d.test_class] || {}),
+-                            status: d.status,
+-                          },
+-                        }
+-                      : existing.test_classes,
+-                  };
+-                  if (d.owasp_category === "A03" && d.test_class) {
+-                    const classKey = `A03:${d.test_class}`;
+-                    const classCell = cells[classKey] || {
+-                      status: "not_started",
+-                      finding_ids: [],
+-                    };
+-                    const classFids = [...(classCell.finding_ids || [])];
+-                    if (d.finding_id && !classFids.includes(d.finding_id))
+-                      classFids.push(d.finding_id);
+-                    cells[classKey] = {
+-                      ...classCell,
+-                      status: d.status,
+-                      finding_ids: classFids,
+-                    };
+-                  }
+-                  return {
+-                    ...pg,
+-                    cells,
+-                  };
+-                }),
+-              };
+-            });
++            loadMatrix();
+           } else if (d.type === "enforce_progress") {
+             setEnforce(d);
+             if (d.phase === "complete") {
+@@ -183,8 +136,11 @@
+     }));
+   const totals = matrix?.column_totals || matrix?.totals || {};
+   const totalCells = Object.values(totals).reduce((a, b) => a + b, 0);
+-  const coveredCount = (totals.covered || 0) + (totals.finding || 0) + (totals.skipped || 0);
+-  const pct = totalCells > 0 ? Math.round((coveredCount / totalCells) * 100) : 0;
++  const coveredCount =
++    matrix?.completion?.exercised_units ??
++    (totals.covered || 0) + (totals.finding || 0) + (totals.skipped || 0);
++  const applicableCount = matrix?.completion?.applicable_units ?? totalCells;
++  const pct = applicableCount > 0 ? Math.round((coveredCount / applicableCount) * 100) : 0;
+   const effectiveCoverageMode = matrix?.coverage_mode || run?.coverage_mode || "track";
+   return (
+     <div
+@@ -240,7 +196,8 @@
+                 mode={effectiveCoverageMode}
+                 percent={pct}
+                 covered={coveredCount}
+-                total={totalCells}
++                total={applicableCount}
++                unitLabel={matrix?.completion ? "units" : "cells"}
+                 live={scanRunning}
+                 enforce={enforce}
+               />
+@@ -385,197 +342,184 @@
+                     </thead>
+                     <tbody>
+                       {matrix.pages.map((pg) => (
+-                        <tr
+-                          key={pg.page_id}
+-                          style={{
+-                            borderBottom: "1px solid var(--border)",
+-                          }}
+-                        >
+-                          <td
++                        <Fragment key={pg.page_id}>
++                          <tr
+                             style={{
+-                              padding: "4px 8px",
++                              borderBottom: "1px solid var(--border)",
+                             }}
+                           >
+-                            {pg.state_kind === "interactive" && pg.state_label && (
++                            <td
++                              style={{
++                                padding: "4px 8px",
++                              }}
++                            >
++                              {pg.state_kind === "interactive" && pg.state_label && (
++                                <div
++                                  style={{
++                                    fontWeight: 600,
++                                  }}
++                                >
++                                  {pg.state_label}
++                                </div>
++                              )}
+                               <div
++                                className="mono"
+                                 style={{
+-                                  fontWeight: 600,
++                                  fontSize: 11,
++                                  wordBreak: "break-all",
+                                 }}
++                                title={pg.url}
+                               >
+-                                {pg.state_label}
++                                {pg.url}
+                               </div>
+-                            )}
+-                            <div
+-                              className="mono"
+-                              style={{
+-                                fontSize: 11,
+-                                wordBreak: "break-all",
+-                              }}
+-                              title={pg.url}
+-                            >
+-                              {pg.url}
+-                            </div>
+-                            {pg.title && pg.title !== pg.state_label && (
+-                              <div
+-                                style={{
+-                                  fontSize: 10,
+-                                  color: "var(--muted)",
+-                                }}
+-                              >
+-                                {pg.title}
+-                              </div>
+-                            )}
+-                          </td>
+-                          {columns.map((column) => {
+-                            const cat = column.key;
+-                            const cell = pg.cells?.[cat];
+-                            if (!cell)
++                              {pg.title && pg.title !== pg.state_label && (
++                                <div
++                                  style={{
++                                    fontSize: 10,
++                                    color: "var(--muted)",
++                                  }}
++                                >
++                                  {pg.title}
++                                </div>
++                              )}
++                            </td>
++                            {columns.map((column) => {
++                              const cat = column.key;
++                              const cell = pg.cells?.[cat];
++                              if (!cell)
++                                return (
++                                  <td
++                                    key={cat}
++                                    style={{
++                                      textAlign: "center",
++                                      padding: "2px 4px",
++                                    }}
++                                  >
++                                    <span className="cov-cell cov-na" title="N/A">
++                                      —
++                                    </span>
++                                  </td>
++                                );
++                              const fids = cell.finding_ids || [];
++                              const checks = cell.selected_checks;
++                              const classEntries = Object.entries(cell.test_classes || {});
++                              const classSummary = classEntries
++                                .map(([name, state]) => `${name}: ${state.status || "not_started"}`)
++                                .join("\n");
++                              const isSelected =
++                                selectedCell?.page_id === pg.page_id && selectedCell?.cat === cat;
+                               return (
+                                 <td
+                                   key={cat}
++                                  className="coverage-traffic-cell"
+                                   style={{
+                                     textAlign: "center",
+                                     padding: "2px 4px",
++                                    cursor: "pointer",
+                                   }}
++                                  title={`Show traffic for ${cat} on ${pg.url}`}
++                                  onClick={() =>
++                                    nav(
++                                      runHref({ runKind: "web", runId }, "traffic", {
++                                        coverage_cells: (cell.cell_ids || []).join(","),
++                                        coverage_category: column.category,
++                                        test_class: column.test_class || undefined,
++                                      }),
++                                    )
++                                  }
+                                 >
+-                                  <span className="cov-cell cov-na" title="N/A">
+-                                    —
++                                  <span
++                                    className={
++                                      "cov-cell cov-" +
++                                      cell.status.replace("_", "-") +
++                                      (isSelected ? " selected" : "") +
++                                      (fids.length ? " has-findings" : "")
++                                    }
++                                    title={
++                                      cat +
++                                      ": " +
++                                      cell.status +
++                                      (fids.length
++                                        ? " (" +
++                                          fids.length +
++                                          " finding" +
++                                          (fids.length > 1 ? "s" : "") +
++                                          ""
++                                        : "") +
++                                      ")\n" +
++                                      pg.url +
++                                      (classSummary ? "\n\nTest classes:\n" + classSummary : "")
++                                    }
++                                    style={{
++                                      cursor:
++                                        fids.length || classEntries.length ? "pointer" : "default",
++                                    }}
++                                    onClick={(event) => {
++                                      event.stopPropagation();
++                                      if (fids.length) {
++                                        nav(
++                                          runHref({ runKind: "web", runId }, "findings", {
++                                            finding_ids: fids.join(","),
++                                            from: "coverage",
++                                          }),
++                                        );
++                                      } else if (classEntries.length || checks?.total) {
++                                        setSelectedCell(
++                                          isSelected
++                                            ? null
++                                            : {
++                                                page_id: pg.page_id,
++                                                cat,
++                                                label: column.label,
++                                              },
++                                        );
++                                      }
++                                    }}
++                                  >
++                                    {fids.length > 0 ? fids.length : ""}
+                                   </span>
++                                  {checks?.total ? (
++                                    <button
++                                      type="button"
++                                      className="coverage-check-toggle"
++                                      aria-expanded={isSelected}
++                                      onClick={(event) => {
++                                        event.stopPropagation();
++                                        setSelectedCell(
++                                          isSelected
++                                            ? null
++                                            : { page_id: pg.page_id, cat, label: column.label },
++                                        );
++                                      }}
++                                    >
++                                      {checks.tested} / {checks.total} tested
++                                      {checks.unresolved ? (
++                                        <span>{checks.unresolved} pending</span>
++                                      ) : null}
++                                    </button>
++                                  ) : null}
+                                 </td>
+                               );
+-                            const fids = cell.finding_ids || [];
+-                            const classEntries = Object.entries(cell.test_classes || {});
+-                            const classSummary = classEntries
+-                              .map(([name, state]) => `${name}: ${state.status || "not_started"}`)
+-                              .join("\n");
+-                            const isSelected =
+-                              selectedCell?.page_id === pg.page_id && selectedCell?.cat === cat;
+-                            return (
+-                              <td
+-                                key={cat}
+-                                className="coverage-traffic-cell"
+-                                style={{
+-                                  textAlign: "center",
+-                                  padding: "2px 4px",
+-                                  cursor: "pointer",
+-                                }}
+-                                title={`Show traffic for ${cat} on ${pg.url}`}
+-                                onClick={() =>
+-                                  nav(
+-                                    runHref({ runKind: "web", runId }, "traffic", {
+-                                      coverage_cells: (cell.cell_ids || []).join(","),
+-                                      coverage_category: column.category,
+-                                      test_class: column.test_class || undefined,
+-                                    }),
+-                                  )
+-                                }
+-                              >
+-                                <span
+-                                  className={
+-                                    "cov-cell cov-" +
+-                                    cell.status.replace("_", "-") +
+-                                    (isSelected ? " selected" : "") +
+-                                    (fids.length ? " has-findings" : "")
+-                                  }
+-                                  title={
+-                                    cat +
+-                                    ": " +
+-                                    cell.status +
+-                                    (fids.length
+-                                      ? " (" +
+-                                        fids.length +
+-                                        " finding" +
+-                                        (fids.length > 1 ? "s" : "") +
+-                                        ""
+-                                      : "") +
+-                                    ")\n" +
+-                                    pg.url +
+-                                    (classSummary ? "\n\nTest classes:\n" + classSummary : "")
+-                                  }
+-                                  style={{
+-                                    cursor:
+-                                      fids.length || classEntries.length ? "pointer" : "default",
+-                                  }}
+-                                  onClick={(event) => {
+-                                    event.stopPropagation();
+-                                    if (fids.length) {
+-                                      nav(
+-                                        runHref({ runKind: "web", runId }, "findings", {
+-                                          finding_ids: fids.join(","),
+-                                          from: "coverage",
+-                                        }),
+-                                      );
+-                                    } else if (classEntries.length) {
+-                                      setSelectedCell(
+-                                        isSelected
+-                                          ? null
+-                                          : {
+-                                              page_id: pg.page_id,
+-                                              cat,
+-                                              label: column.label,
+-                                              url: pg.url,
+-                                              testClasses: cell.test_classes || {},
+-                                            },
+-                                      );
+-                                    }
+-                                  }}
+-                                >
+-                                  {fids.length > 0 ? fids.length : ""}
+-                                </span>
++                            })}
++                          </tr>
++                          {selectedCell?.page_id === pg.page_id ? (
++                            <tr className="coverage-check-expanded">
++                              <td colSpan={columns.length + 1}>
++                                <SelectedCoverageDetails
++                                  runId={runId}
++                                  page={pg}
++                                  column={columns.find((column) => column.key === selectedCell.cat)}
++                                  cell={pg.cells?.[selectedCell.cat]}
++                                  onClose={() => setSelectedCell(null)}
++                                />
+                               </td>
+-                            );
+-                          })}
+-                        </tr>
++                            </tr>
++                          ) : null}
++                        </Fragment>
+                       ))}
+                     </tbody>
+                   </table>
+                 </div>
+-
+-                {selectedCell && (
+-                  <div
+-                    style={{
+-                      marginTop: 12,
+-                      padding: 12,
+-                      background: "var(--surface)",
+-                      border: "1px solid var(--border)",
+-                      borderRadius: 6,
+-                    }}
+-                  >
+-                    <div
+-                      style={{
+-                        display: "flex",
+-                        justifyContent: "space-between",
+-                        marginBottom: 8,
+-                      }}
+-                    >
+-                      <b
+-                        style={{
+-                          fontSize: 13,
+-                        }}
+-                      >
+-                        {selectedCell.cat}{" "}
+-                        {selectedCell.label || OWASP_WEB_LABELS[selectedCell.cat] || ""} —{" "}
+-                        {selectedCell.url}
+-                      </b>
+-                      <button className="btn ghost sm" onClick={() => setSelectedCell(null)}>
+-                        ✕
+-                      </button>
+-                    </div>
+-                    {Object.keys(selectedCell.testClasses || {}).length > 0 && (
+-                      <div className="surface-chip-list" style={{ marginBottom: 8 }}>
+-                        {Object.entries(selectedCell.testClasses).map(([name, state]) => (
+-                          <span
+-                            key={name}
+-                            className={`surface-status status-${state.status || "not_started"}`}
+-                          >
+-                            {name.replace(/_/g, " ")}:{" "}
+-                            {(state.status || "not_started").replace(/_/g, " ")}
+-                          </span>
+-                        ))}
+-                      </div>
+-                    )}
+-                  </div>
+-                )}
+               </>
+             )}
+           </div>
+@@ -583,6 +527,94 @@
+       {coverageTab === "workflows" && (
+         <WorkflowCoverageTable coverage={workflowCoverage} error={workflowError} runId={runId} />
+       )}
++    </div>
++  );
++}
++
++function SelectedCoverageDetails({ runId, page, column, cell, onClose }) {
++  const checks = cell?.selected_checks;
++  return (
++    <div className="coverage-check-details" aria-label="Selected security checks">
++      <div className="coverage-check-heading">
++        <div>
++          <strong>
++            {column?.category || column?.key} {column?.label || "Security checks"}
++          </strong>
++          <div className="mono">{page.url}</div>
++        </div>
++        <button type="button" className="btn ghost sm" onClick={onClose}>
++          Close
++        </button>
++      </div>
++      {checks ? (
++        <>
++          <div className="subtle">
++            {checks.tested} of {checks.total} selected checks tested
++            {checks.unresolved ? `, ${checks.unresolved} pending` : ""}
++          </div>
++          <div className="coverage-check-list-scroll">
++            <table className="coverage-check-list">
++              <thead>
++                <tr>
++                  <th>Record</th>
++                  <th>Accounts compared</th>
++                  <th>Crawled</th>
++                  <th>Result</th>
++                </tr>
++              </thead>
++              <tbody>
++                {(checks.items || []).map((item) => (
++                  <tr key={item.id}>
++                    <td>
++                      <div className="mono">{item.url}</div>
++                      {item.state_key ? <div>State: {item.state_key}</div> : null}
++                      <span className="method-badge">{item.method}</span>
++                    </td>
++                    <td>
++                      {item.baseline_actor || "Unknown"} → {item.comparison_actor || "Unknown"}
++                    </td>
++                    <td>{item.crawled ? "Yes" : "No"}</td>
++                    <td>
++                      <span>
++                        {item.status === "queued"
++                          ? "Pending"
++                          : (item.status || "Unknown").replace(/_/g, " ")}
++                      </span>
++                      {item.reason ? <div className="subtle">{item.reason}</div> : null}
++                      {item.finding_ids?.length ? (
++                        <button
++                          type="button"
++                          className="coverage-check-finding"
++                          onClick={() =>
++                            nav(
++                              runHref({ runKind: "web", runId }, "findings", {
++                                finding_ids: item.finding_ids.join(","),
++                                from: "coverage",
++                              }),
++                            )
++                          }
++                        >
++                          {item.finding_ids.length} finding
++                          {item.finding_ids.length === 1 ? "" : "s"}
++                        </button>
++                      ) : null}
++                    </td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        </>
++      ) : null}
++      {Object.keys(cell?.test_classes || {}).length ? (
++        <div className="surface-chip-list coverage-check-classes">
++          {Object.entries(cell.test_classes).map(([name, state]) => (
++            <span key={name} className={`surface-status status-${state.status || "not_started"}`}>
++              {name.replace(/_/g, " ")}: {(state.status || "not_started").replace(/_/g, " ")}
++            </span>
++          ))}
++        </div>
++      ) : null}
+     </div>
+   );
+ }
+--- a/frontend/src/features/web-runs/WebRunWorkProgramTab.test.jsx
++++ b/frontend/src/features/web-runs/WebRunWorkProgramTab.test.jsx
+@@ -1,6 +1,7 @@
+ import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+ import { beforeEach, expect, test, vi } from "vitest";
+ import * as webRunsApi from "../../shared/api/webRuns.js";
++import { useEventStream } from "../../shared/hooks/useEventStream.js";
+ import { WebRunWorkProgramTab } from "./WebRunWorkProgramTab.jsx";
+ 
+ vi.mock("../../shared/api/webRuns.js", () => ({
+@@ -178,3 +179,82 @@
+   fireEvent.click(screen.getByRole("tab", { name: "Pages" }));
+   expect(await screen.findByText("Page progress")).toBeTruthy();
+ });
++
++test("keeps a finding visible while another selected access check is pending", async () => {
++  const matrix = {
++    seeded: true,
++    columns: [{ key: "A01", category: "A01", label: "Access Control" }],
++    completion: { exercised_units: 1, applicable_units: 2, resolved_units: 1, target_met: false },
++    column_totals: { finding: 1 },
++    pages: [
++      {
++        page_id: 3,
++        page_ids: [3, 4],
++        url: "https://shop.test/orders?id={id}",
++        cells: {
++          A01: {
++            status: "finding",
++            finding_ids: [31],
++            cell_ids: [8],
++            selected_checks: {
++              tested: 1,
++              total: 2,
++              unresolved: 1,
++              items: [
++                {
++                  id: 1,
++                  url: "https://shop.test/orders?id=101",
++                  method: "GET",
++                  baseline_actor: "Alice",
++                  comparison_actor: "Bob",
++                  status: "finding",
++                  finding_ids: [31],
++                  crawled: true,
++                },
++                {
++                  id: 2,
++                  url: "https://shop.test/orders?id=202",
++                  method: "GET",
++                  baseline_actor: "Bob",
++                  comparison_actor: "Alice",
++                  status: "queued",
++                  finding_ids: [],
++                  crawled: false,
++                },
++              ],
++            },
++          },
++        },
++      },
++    ],
++  };
++  webRunsApi.getWebCoverageMatrix.mockResolvedValue(matrix);
++  webRunsApi.getWorkflowCoverage.mockResolvedValue({ items: [] });
++  const { container } = render(
++    <WebRunWorkProgramTab runId={7} run={{ name: "Shop" }} scanRunning />,
++  );
++  expect(await screen.findByText("50% coverage (1/2 units)")).toBeTruthy();
++  fireEvent.click(screen.getByRole("button", { name: /1 \/ 2 tested/ }));
++  const detail = screen.getByLabelText("Selected security checks");
++  expect(within(detail).getByText("1 of 2 selected checks tested, 1 pending")).toBeTruthy();
++  expect(within(detail).getByText("https://shop.test/orders?id=202")).toBeTruthy();
++  expect(within(detail).getByText("Bob → Alice")).toBeTruthy();
++  expect(within(detail).getByText("Pending")).toBeTruthy();
++  const callsBefore = webRunsApi.getWebCoverageMatrix.mock.calls.length;
++  useEventStream.mock.calls
++    .at(-1)[1]
++    .onMessage({
++      data: JSON.stringify({
++        type: "coverage_update",
++        page_id: 3,
++        owasp_category: "A01",
++        status: "finding",
++      }),
++    });
++  await waitFor(() =>
++    expect(webRunsApi.getWebCoverageMatrix.mock.calls.length).toBeGreaterThan(callsBefore),
++  );
++  expect(screen.getByText("1 pending")).toBeTruthy();
++  fireEvent.click(container.querySelector(".cov-cell.has-findings"));
++  expect(window.location.hash).toContain("finding_ids=31");
++});
+--- a/frontend/src/features/web-runs/attack-surface.css
++++ b/frontend/src/features/web-runs/attack-surface.css
+@@ -779,6 +779,63 @@
+ .surface-route-table tbody tr:hover {
+   background: var(--panel-2);
+ }
++.route-links-expanded > td {
++  background: var(--panel);
++  padding: 12px !important;
++}
++.route-links {
++  min-width: 0;
++  max-width: 100%;
++}
++.route-links-toggle,
++.route-links-url {
++  border: 0;
++  padding: 0;
++  background: none;
++  color: var(--accent);
++  cursor: pointer;
++  text-align: left;
++}
++.route-links-url {
++  overflow-wrap: anywhere;
++}
++.route-links-search {
++  display: flex;
++  flex-direction: column;
++  gap: 5px;
++  max-width: 360px;
++  margin-bottom: 10px;
++}
++.route-links-scroll {
++  max-width: 100%;
++  overflow-x: auto;
++}
++.route-links-table {
++  min-width: 700px;
++}
++.route-links-table td:first-child {
++  max-width: 380px;
++}
++.route-links-pages {
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++  gap: 12px;
++  margin-top: 10px;
++  flex-wrap: wrap;
++}
++.route-links-detail {
++  display: grid;
++  gap: 4px;
++  margin-top: 10px;
++  padding: 10px;
++  border: 1px solid var(--border);
++  border-radius: 6px;
++  overflow-wrap: anywhere;
++}
++.route-links-detail strong {
++  font-size: 12px;
++}
+ .surface-route-url {
+   display: block;
+   max-width: 360px;
+--- a/frontend/src/shared/api/webRuns.js
++++ b/frontend/src/shared/api/webRuns.js
+@@ -2,6 +2,13 @@
+ import { req } from "./request.ts";
+ 
+ export const getWebCoverageMatrix = (id) => req(`/api/test-runs/${id}/coverage`);
++
++export const getDiscoveredTargets = (id, { routePattern, search = "", cursor, limit = 50 }) => {
++  const params = new URLSearchParams({ route_pattern: routePattern, limit: String(limit) });
++  if (search) params.set("search", search);
++  if (cursor) params.set("cursor", cursor);
++  return req(`/api/test-runs/${id}/discovered-targets?${params}`);
++};
+ 
+ export const getWorkflowCoverage = (id) => req(`/api/test-runs/${id}/workflow-coverage`);
+ 
+--- a/frontend/src/shared/runs/coverage.css
++++ b/frontend/src/shared/runs/coverage.css
+@@ -70,6 +70,72 @@
+ 
+ .coverage-matrix td.coverage-traffic-cell:hover {
+   background: color-mix(in srgb, var(--accent) 9%, transparent);
++}
++.coverage-check-toggle {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  gap: 2px;
++  margin: 4px auto 0;
++  padding: 2px;
++  border: 0;
++  background: none;
++  color: var(--accent);
++  font-size: 10px;
++  cursor: pointer;
++}
++.coverage-check-toggle span {
++  color: var(--muted);
++}
++.coverage-matrix .coverage-check-expanded > td {
++  padding: 12px;
++  white-space: normal;
++  background: var(--panel);
++}
++.coverage-check-details {
++  min-width: 0;
++  text-align: left;
++}
++.coverage-check-heading {
++  display: flex;
++  justify-content: space-between;
++  gap: 12px;
++  margin-bottom: 8px;
++}
++.coverage-check-heading .mono {
++  overflow-wrap: anywhere;
++}
++.coverage-check-list-scroll {
++  max-width: 100%;
++  overflow-x: auto;
++  margin-top: 10px;
++}
++.coverage-check-list {
++  width: 100%;
++  min-width: 650px;
++  border-collapse: collapse;
++}
++.coverage-check-list th,
++.coverage-check-list td {
++  padding: 7px;
++  border-bottom: 1px solid var(--border);
++  vertical-align: top;
++  text-align: left;
++}
++.coverage-check-list .mono {
++  overflow-wrap: anywhere;
++}
++.coverage-check-finding {
++  display: block;
++  margin-top: 4px;
++  border: 0;
++  padding: 0;
++  background: none;
++  color: var(--accent);
++  cursor: pointer;
++}
++.coverage-check-classes {
++  margin-top: 10px;
+ }
+ 
+ /* Coverage cell pill */
+--- a/frontend/src/shared/ui/CoverageStatusBadges.jsx
++++ b/frontend/src/shared/ui/CoverageStatusBadges.jsx
+@@ -1,4 +1,12 @@
+-export function CoverageStatusBadges({ mode = "track", percent, covered, total, live, enforce }) {
++export function CoverageStatusBadges({
++  mode = "track",
++  percent,
++  covered,
++  total,
++  live,
++  enforce,
++  unitLabel = "cells",
++}) {
+   const modeLabel =
+     mode === "enforce"
+       ? "Full"
+@@ -17,7 +25,7 @@
+         {modeLabel} mode
+       </span>
+       <span className="badge neutral">
+-        {percent}% coverage ({covered}/{total} cells)
++        {percent}% coverage ({covered}/{total} {unitLabel})
+       </span>
+       {live && <span className="badge warning">● Live</span>}
+       {enforce && enforce.phase !== "complete" && (

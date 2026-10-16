@@ -1,5 +1,9 @@
 import { FindingFileControls } from "../../shared/findings/FindingFileControls.tsx";
 import { FindingsList } from "../../shared/findings/FindingsList.tsx";
+import {
+  CoverageFindingsFilter,
+  filterCoverageFindings,
+} from "../../shared/findings/CoverageFindingsFilter.jsx";
 import { useFindingEditor } from "../../shared/findings/useFindingEditor.ts";
 import * as apiRunsApi from "../../shared/api/apiRuns.js";
 import { ALICE_DEDUP_DIRECTIVE } from "../../shared/findings/reviewDirective.js";
@@ -13,9 +17,18 @@ import {
 import { downloadTextFile } from "../../shared/lib/download.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 import { Notice, PageError } from "../../shared/ui/Notice.jsx";
+import { runHref } from "../../shared/navigation/links.ts";
 
-export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }) {
+export function ApiRunFindingsTab({
+  runId,
+  scanRunning,
+  run,
+  initialFindingRef,
+  findingIds,
+  coverageReturn,
+}) {
   const [findings, setFindings] = useState([]);
+  const visibleFindings = filterCoverageFindings(findings, findingIds);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [message, setMessage] = useState(null);
@@ -177,6 +190,17 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
       setError(err.message);
     }
   };
+  const onDeleteApiFindingGroup = async (title) => {
+    if (!confirm(`Delete all instances of "${title}"?`)) return false;
+    try {
+      await apiRunsApi.deleteApiFindingGroup(runId, title);
+      setFindings((prev) => prev.filter((f) => f.title !== title));
+      return true;
+    } catch (err) {
+      setError(err.message);
+      return false;
+    }
+  };
   const editor = useFindingEditor({
     runId,
     runKind: "api",
@@ -210,7 +234,7 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
           <div className="findings-status-summary">
             {scanRunning && <span className="badge warning">Scan running…</span>}
             <span className="badge neutral">
-              {findings.length} finding{findings.length !== 1 ? "s" : ""}
+              {visibleFindings.length} finding{visibleFindings.length !== 1 ? "s" : ""}
             </span>
             {dedupeBusy && (
               <span className="val-status-badge val-running dedupe-status">
@@ -219,51 +243,67 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
               </span>
             )}
           </div>
-          <div className="findings-actions">
-            <button className="btn secondary sm" onClick={load}>
-              Refresh
-            </button>
-            <FindingFileControls
-              hasFindings={findings.length > 0}
-              onExport={onExportFindingsMarkdown}
-              onImport={onImportFindingsFile}
-            />
-            {findings.length > 0 && (
-              <button
-                className="btn secondary sm"
-                disabled={dedupeBusy || scanRunning}
-                onClick={onDeduplicateFindings}
-              >
-                {dedupeBusy && <span className="inline-spinner"></span>}
-                {dedupeBusy ? "Reviewing…" : "Review with AI"}
+          {!findingIds?.length && (
+            <div className="findings-actions">
+              <button className="btn secondary sm" onClick={load}>
+                Refresh
               </button>
-            )}
-            {findings.length > 0 && (
-              <button
-                className="btn danger-outline sm"
-                disabled={clearBusy}
-                onClick={onClearFindings}
-              >
-                {clearBusy ? "Clearing…" : "Clear all"}
-              </button>
-            )}
-          </div>
+              <FindingFileControls
+                hasFindings={findings.length > 0}
+                onExport={onExportFindingsMarkdown}
+                onImport={onImportFindingsFile}
+              />
+              {findings.length > 0 && (
+                <button
+                  className="btn secondary sm"
+                  disabled={dedupeBusy || scanRunning}
+                  onClick={onDeduplicateFindings}
+                >
+                  {dedupeBusy && <span className="inline-spinner"></span>}
+                  {dedupeBusy ? "Reviewing…" : "Review with AI"}
+                </button>
+              )}
+              {findings.length > 0 && (
+                <button
+                  className="btn danger-outline sm"
+                  disabled={clearBusy}
+                  onClick={onClearFindings}
+                >
+                  {clearBusy ? "Clearing…" : "Clear all"}
+                </button>
+              )}
+            </div>
+          )}
         </div>
+        <CoverageFindingsFilter
+          runKind="api"
+          runId={runId}
+          findingIds={findingIds}
+          coverageReturn={coverageReturn}
+          visibleCount={visibleFindings.length}
+        />
         <FindingsList
-          findings={findings}
+          findings={visibleFindings}
           runKind="api"
           findingHref={(reference) =>
-            `#/api-runs/${runId}/findings?finding=${encodeURIComponent(reference)}`
+            runHref({ runKind: "api", runId }, "findings", {
+              finding: reference,
+              finding_ids: findingIds?.join(","),
+              from: findingIds?.length ? "coverage" : undefined,
+            })
           }
           editor={editor}
           emptyMessage={
-            scanRunning
-              ? "Scan in progress — findings will appear here as they are discovered."
-              : "No findings yet. Start a scan to test this API collection."
+            findingIds?.length
+              ? "No matching findings remain for this coverage cell."
+              : scanRunning
+                ? "Scan running… findings will appear here."
+                : "No findings yet. Start a scan to begin."
           }
           initialFindingRef={initialFindingRef}
           collapseToken={collapseToken}
           onDeleteFinding={onDeleteApiFinding}
+          onDeleteGroup={findingIds?.length ? undefined : onDeleteApiFindingGroup}
         />
       </div>
     </>
