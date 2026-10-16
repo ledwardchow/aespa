@@ -4,7 +4,7 @@ import { usePolling } from "../../shared/hooks/usePolling.js";
 import { truncUrl } from "../../shared/lib/urls.js";
 import { anyRetryBusy, isRetryBusy, mergeRetries, retriesByNote } from "./workflowRetries.js";
 
-function statusLabel(note) {
+export function statusLabel(note) {
   if (note.status === "crawled") return "Crawled";
   if (note.needs_input || note.status === "needs_input") return "Needs input";
   if (note.status === "not_attempted") return (note.steps || []).length ? "Stopped" : "Not tried";

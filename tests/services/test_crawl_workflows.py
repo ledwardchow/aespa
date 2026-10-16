@@ -1939,6 +1939,143 @@ def test_workflows_run_at_once_in_separate_browser_sessions(monkeypatch):
     ]
 
 
+def test_inferred_workflows_after_payment_and_delete_are_all_tried(monkeypatch):
+    import playwright.async_api
+
+    from aespa.services import crawler
+
+    url = "https://shop.test/account"
+    start_page = SimpleNamespace(
+        id=5, replay_credential_id=None, accessible_by="[]", req_auth=False
+    )
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_crawl_inventory",
+        lambda _run_id: ([{"url": url}], {crawler._norm(url): start_page}),
+    )
+    monkeypatch.setattr(crawl_workflows, "_saved_workflow_proposals", lambda _site: [])
+    monkeypatch.setattr(
+        crawl_workflows, "_prior_workflow_identities", lambda _run_id: set()
+    )
+    monkeypatch.setattr(crawl_workflows, "list_workflow_notes", lambda *_args: [])
+    monkeypatch.setattr(
+        crawl_workflows, "_historical_credential_usernames", lambda _run_id: {}
+    )
+    workflows = [
+        {
+            "name": name,
+            "goal": goal,
+            "reason": "Observed in crawl",
+            "start_url": url,
+            "inferred": True,
+            "destructive": destructive,
+        }
+        for name, goal, destructive in (
+            ("Make payment", "Pay for an order", False),
+            ("Delete address", "Remove an address", True),
+            *((f"Workflow {index}", "Update account", False) for index in range(6)),
+        )
+    ]
+
+    async def infer(*_args):
+        return workflows
+
+    class Page:
+        def __init__(self):
+            self.url = url
+
+        async def goto(self, target, **_kwargs):
+            self.url = target
+
+    class Context:
+        async def route(self, *_args):
+            pass
+
+        async def new_page(self):
+            return Page()
+
+        async def close(self):
+            pass
+
+    class Browser:
+        async def new_context(self, **_kwargs):
+            return Context()
+
+        async def close(self):
+            pass
+
+    class Playwright:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+    async def launch(*_args, **_kwargs):
+        return Browser()
+
+    async def no_wait(*_args, **_kwargs):
+        pass
+
+    async def decide(*_args, **_kwargs):
+        return {"action": "stop", "reason": "Nothing more to do."}
+
+    notes = []
+    monkeypatch.setattr(crawl_workflows, "_infer_workflows", infer)
+    monkeypatch.setattr(playwright.async_api, "async_playwright", Playwright)
+    monkeypatch.setattr(crawl_workflows, "launch_playwright_browser", launch)
+    monkeypatch.setattr(crawl_workflows, "playwright_user_agent", lambda _b: "test")
+    monkeypatch.setattr(
+        crawl_workflows, "protect_playwright_context", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        crawl_workflows.traffic_svc, "setup_playwright_logging", lambda *a, **k: None
+    )
+    monkeypatch.setattr(crawler, "_wait_for_content_settle", no_wait)
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_observe",
+        lambda _page: no_wait(),
+    )
+    monkeypatch.setattr(crawl_workflows, "_decide_with_corrections", decide)
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_record_note",
+        lambda _run_id, workflow, status, *_args, **_kwargs: notes.append(
+            (workflow["name"], status)
+        ),
+    )
+
+    asyncio.run(
+        crawl_workflows.explore_after_crawl(
+            9_733,
+            llm_cfg=object(),
+            site=SimpleNamespace(base_url="https://shop.test", login_url=""),
+            creds=[],
+            shared=None,
+            max_pages=10,
+            browser_engine="chromium",
+            browser_visible=False,
+            pw_proxy={},
+            global_http_header={},
+        )
+    )
+    statuses = dict(notes)
+    assert statuses["Make payment"] == "needs_input"
+    assert statuses["Delete address"] == "not_attempted"
+    assert [statuses[f"Workflow {index}"] for index in range(6)] == ["not_reached"] * 6
+    assert [workflow["generate_sample_data"] for workflow in workflows] == [
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+    ]
+
+
 def test_payment_and_delete_workflows_stop_before_browser_actions(monkeypatch):
     import playwright.async_api
 

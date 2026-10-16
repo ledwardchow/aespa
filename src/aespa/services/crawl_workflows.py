@@ -31,7 +31,6 @@ from aespa.services import traffic as traffic_svc
 
 log = logging.getLogger("aespa.crawl_workflows")
 
-_MAX_WORKFLOWS = 4
 _MAX_ACTIONS = 7
 _MAX_RETRY_ACTIONS = 18
 _MAX_DECISION_CORRECTIONS = 2
@@ -1241,22 +1240,10 @@ async def explore_after_crawl(
                 if note.get("status") == "crawled"
             }
         pending = []
-        inferred_to_explore = 0
         for workflow in proposals:
             page_id = workflow.get("reached_page_id")
             if page_id is None:
-                if workflow.get("inferred") and inferred_to_explore >= _MAX_WORKFLOWS:
-                    _record_note(
-                        run_id,
-                        workflow,
-                        "not_attempted",
-                        [],
-                        "Not tried because the workflow exploration limit was reached.",
-                    )
-                else:
-                    pending.append(workflow)
-                    if workflow.get("inferred"):
-                        inferred_to_explore += 1
+                pending.append(workflow)
             elif (
                 page_id,
                 workflow["name"].casefold(),

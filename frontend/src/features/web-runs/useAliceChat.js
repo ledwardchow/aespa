@@ -1,4 +1,5 @@
 import * as webRunsApi from "../../shared/api/webRuns.js";
+import { parseDate } from "../../shared/lib/dates.js";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 import {
@@ -123,7 +124,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
           _aliceServerLoaded.current = true;
           return;
         }
-        const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
+        const serverUpdatedAt = data.updated_at ? parseDate(data.updated_at).getTime() : 0;
         const localSavedAt = parseInt(
           localStorage.getItem(`alice_chats_${runId}_savedAt`) || "0",
           10,

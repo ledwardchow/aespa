@@ -217,7 +217,7 @@ export function WebRunHeader({
             <label
               className="subtle"
               style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}
-              title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: test every applicable page × category obligation. Deep: use a persistent tester queue and attack workers. Team: run independent Standard Test Leads followed by a coverage and chain review. SAST Validate: validate only imported SAST leads."
+              title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: run every applicable test on every page. Deep: use a persistent tester queue and attack workers. Team: run independent Standard Test Leads followed by a coverage and chain review. SAST Validate: validate only imported SAST leads."
             >
               Scan mode:
               <select

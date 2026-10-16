@@ -1,4 +1,4 @@
-import { FindingFileControls } from "../../shared/findings/FindingFileControls.tsx";
+import { FindingsMoreMenu } from "../../shared/findings/FindingsMoreMenu.tsx";
 import { FindingsList } from "../../shared/findings/FindingsList.tsx";
 import {
   CoverageFindingsFilter,
@@ -57,6 +57,24 @@ export function WebRunFindingsTab({
     setError: onError,
   });
   const visibleFindings = filterCoverageFindings(findings, findingIds);
+  const onClearFindings = async () => {
+    if (
+      !confirm(
+        "Clear all findings and reset page scan status?\nThis lets you re-run the scanner on the same crawl.",
+      )
+    )
+      return;
+    setClearBusy("findings");
+    setClearError(null);
+    try {
+      await webRunsApi.clearFindings(runId);
+      setFindings([]);
+    } catch (e) {
+      setClearError(e.message);
+    } finally {
+      setClearBusy("");
+    }
+  };
   return (
     <>
       {importMessage && (
@@ -124,11 +142,6 @@ export function WebRunFindingsTab({
           </div>
           {!findingIds?.length && (
             <div className="findings-actions">
-              <FindingFileControls
-                hasFindings={findings.length > 0}
-                onExport={onExportFindingsMarkdown}
-                onImport={onImportFindingsFile}
-              />
               {findings.length > 0 && (
                 <button
                   className="btn sm"
@@ -153,32 +166,13 @@ export function WebRunFindingsTab({
                   {dedupeBusy ? "Reviewing…" : "Review with AI"}
                 </button>
               )}
-              {findings.length > 0 && (
-                <button
-                  className="btn danger-outline sm"
-                  disabled={clearBusy === "findings"}
-                  onClick={async () => {
-                    if (
-                      !confirm(
-                        "Clear all findings and reset page scan status?\nThis lets you re-run the scanner on the same crawl.",
-                      )
-                    )
-                      return;
-                    setClearBusy("findings");
-                    setClearError(null);
-                    try {
-                      await webRunsApi.clearFindings(runId);
-                      setFindings([]);
-                    } catch (e) {
-                      setClearError(e.message);
-                    } finally {
-                      setClearBusy("");
-                    }
-                  }}
-                >
-                  {clearBusy === "findings" ? "Clearing…" : "Clear all"}
-                </button>
-              )}
+              <FindingsMoreMenu
+                hasFindings={findings.length > 0}
+                onExport={onExportFindingsMarkdown}
+                onImport={onImportFindingsFile}
+                clearBusy={clearBusy === "findings"}
+                onClear={onClearFindings}
+              />
             </div>
           )}
         </div>
