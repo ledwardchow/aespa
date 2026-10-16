@@ -2,6 +2,12 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## Unreleased
+
+### Updates
+
+- **Finding review after web scans**: AESPA reviews batches of findings concurrently, up to the saved DAST LLM request limit. Failed requests and missing verdicts leave the affected findings unvalidated.
+
 ## [PR #283] October 16 - Workflow detection, grouped page routes
 
 ### New features

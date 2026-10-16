@@ -37,3 +37,7 @@ saml.b64
 
 # Local JavaScript dependencies and caches
 node_modules/
+
+# Local agent plans and verification output
+.audit/
+.claude/settings.local.json

@@ -1132,7 +1132,7 @@ Validation outcomes:
 
 ### Post-scan review (Reporting agent)
 
-After the dynamic scan loop ends, a final **Reporting agent** pass (`_run_post_scan_llm_review`) reviews all `unvalidated` findings created in the current run in batches of 10. Findings where the evidence is too vague, the payload is reflected as plain text without execution, or the response status contradicts the claim are moved to `low_confidence`. This is a lightweight pre-screen; per-finding adversarial validation runs separately.
+After the dynamic scan loop ends, a final **Reporting agent** pass (`_run_post_scan_llm_review`) reviews all `unvalidated` findings created in the current run in batches of 10. Batches run concurrently up to the saved DAST LLM request limit. A failed batch leaves its findings unvalidated, and all batch calls settle before the review finishes. Findings where the evidence is too vague, the payload is reflected as plain text without execution, or the response status contradicts the claim are moved to `low_confidence`. Per-finding validation runs separately.
 
 ### Recon summary
 

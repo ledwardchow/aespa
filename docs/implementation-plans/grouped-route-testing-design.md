@@ -205,7 +205,7 @@ Use service tests with an in-memory database and no live LLM calls. The live fix
 
 Production uses `DiscoveredTarget`, `TargetDiscovery`, and `TargetAccessObservation` for retained links. `ScanObligation` and `ProbeExecution` carry exact object scope and actor pairs. The discovered-target context query and `select_object_check` tool allow testing without creating synthetic crawled pages. Archive v2 remaps identities and requires fresh access baselines after import. Completion shares root units between route and selected object checks.
 
-The local fixture retained 206 targets while the crawl fetched six order pages. The scanner requested uncrawled order 297 as both accounts and saved its selected A01 check. Other records remained unfinished. Generated address data completed its workflow; payment and deletion submissions stayed stopped. Test logs and sanitized startup evidence are retained in `.audit/grouped-route-implementation/`.
+The local fixture retained 206 targets while the crawl fetched six order pages. The scanner requested uncrawled order 297 as both accounts and saved its selected A01 check. Other records remained unfinished. Generated address data completed its workflow; payment and deletion submissions stayed stopped. Local test logs and startup evidence are no longer stored in the repository.
 
 ## Open questions and risks
 
@@ -213,6 +213,6 @@ The proposed defaults are fixed for implementation: preserve all extracted eligi
 
 Response classifiers and archive identity mapping need implementation tests because a login shell is not a positive object baseline and usernames need not be unique. Large inventories increase database/archive size; batch and cursor behavior should be checked with a large synthetic catalog without claiming a performance improvement. Historical missing targets cannot be recovered by migration.
 
-## Next implementation step
+## Recorded verification
 
-Complete the final startup and regression checks recorded in `.audit/grouped-route-implementation/todo.md`.
+The implementation checklist recorded 2,314 passing backend tests and 378 passing frontend tests, plus frontend lint, type checks, and build. Startup recovery was checked by launching AESPA against a private database copy. The server returned HTTP 200, and SQLite integrity and foreign-key checks passed. These results describe the implementation session; the checks have not been rerun for this documentation cleanup.

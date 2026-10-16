@@ -23,7 +23,7 @@ import ssl
 import time
 from contextvars import ContextVar as _ContextVar
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
@@ -6652,11 +6652,15 @@ async def _run_post_scan_llm_review(
         )
         if baseline_max_id > 0:
             q = q.where(ScanFinding.id > baseline_max_id)
-        candidates = s.exec(q).all()
+        candidates = s.exec(q.order_by(ScanFinding.id)).all()
         reference_by_id = {}
         for candidate in candidates:
             ensure_finding_reference(s, candidate)
             reference_by_id[candidate.id] = candidate.reference
+        run = s.get(TestRun, run_id)
+        concurrency = max(
+            1, get_run_scanner_policy(s, run).dast_max_concurrent_llm_requests
+        )
         for f in candidates:
             s.expunge(f)
         s.commit()
@@ -6686,13 +6690,18 @@ async def _run_post_scan_llm_review(
         },
     )
 
-    BATCH = 10
-    low_confidence_ids: list[int] = []
-    reasons: dict[int, str] = {}
+    semaphore = asyncio.Semaphore(concurrency)
 
-    for batch_start in range(0, len(candidates), BATCH):
-        batch = candidates[batch_start : batch_start + BATCH]
-        turn_num = batch_start // BATCH + 1
+    class BatchReviewOutcome(NamedTuple):
+        turn: int
+        batch: list[ScanFinding]
+        verdicts: dict[int, tuple[str, str]]
+        error: str | None
+
+    async def review_batch(
+        batch: list[ScanFinding], turn_num: int
+    ) -> BatchReviewOutcome:
+        batch_reference_ids = {reference_by_id[f.id]: f.id for f in batch}
         batch_lines = []
         for f in batch:
             ep = f.affected_url or "(no URL)"
@@ -6718,116 +6727,162 @@ async def _run_post_scan_llm_review(
             "  <REF> | LOW_CONFIDENCE:<short reason>\n"
             "Do NOT include any other text."
         )
-        batch_low_confidence: list[int] = []
         try:
-            verdict_text = await llm_svc.plain_completion(llm_cfg, prompt)
+            async with semaphore:
+                verdict_text = await llm_svc.plain_completion(llm_cfg, prompt)
         except Exception as exc:
             log.warning("Post-scan review batch failed (non-fatal): %s", exc)
+            return BatchReviewOutcome(turn_num, batch, {}, str(exc))
+
+        verdicts: dict[int, tuple[str, str]] = {}
+        repeated_ids: set[int] = set()
+        for line in verdict_text.strip().splitlines():
+            parts = [p.strip() for p in line.split("|", 1)]
+            if len(parts) != 2:
+                continue
+            reference = parts[0].removeprefix("REF:").strip()
+            fid = batch_reference_ids.get(reference)
+            if fid is None or fid in repeated_ids:
+                continue
+            verdict = parts[1].strip()
+            if verdict.upper() == "ACCEPT":
+                parsed = ("ACCEPT", "")
+            elif verdict.upper() == "LOW_CONFIDENCE" or verdict.upper().startswith(
+                "LOW_CONFIDENCE:"
+            ):
+                reason = (
+                    verdict.split(":", 1)[1].strip()
+                    if ":" in verdict
+                    else "Pre-screen: low confidence"
+                )
+                parsed = ("LOW_CONFIDENCE", reason or "Pre-screen: low confidence")
+            else:
+                continue
+            if fid in verdicts:
+                verdicts.pop(fid)
+                repeated_ids.add(fid)
+            else:
+                verdicts[fid] = parsed
+        return BatchReviewOutcome(turn_num, batch, verdicts, None)
+
+    tasks: list[asyncio.Task[BatchReviewOutcome]] = []
+    outcomes: list[BatchReviewOutcome] = []
+    async with asyncio.TaskGroup() as group:
+        for batch_start in range(0, len(candidates), 10):
+            batch = candidates[batch_start : batch_start + 10]
+            turn_num = batch_start // 10 + 1
+            tasks.append(group.create_task(review_batch(batch, turn_num)))
+        for completed in asyncio.as_completed(tasks):
+            outcome = await completed
+            outcomes.append(outcome)
+            if outcome.error is not None:
+                events_svc.emit(
+                    run_id,
+                    {
+                        "type": "scanner_phase",
+                        "phase": "post_review_turn",
+                        "status": "error",
+                        "message": f"Turn {outcome.turn}/{total_review_batches}: review failed - {outcome.error}",
+                        "data": {
+                            "turn": outcome.turn,
+                            "total_turns": total_review_batches,
+                            "error": outcome.error,
+                        },
+                    },
+                )
+                continue
+
+            accepted_this_batch = sum(
+                verdict == "ACCEPT" for verdict, _ in outcome.verdicts.values()
+            )
+            low_confidence_this_batch = sum(
+                verdict == "LOW_CONFIDENCE" for verdict, _ in outcome.verdicts.values()
+            )
+            unreviewed_this_batch = len(outcome.batch) - len(outcome.verdicts)
+            batch_msg = (
+                f"Turn {outcome.turn}/{total_review_batches}: reviewed {len(outcome.verdicts)} finding(s)"
+                f" - {accepted_this_batch} accepted,"
+                f" {low_confidence_this_batch} flagged low confidence,"
+                f" {unreviewed_this_batch} unreviewed"
+            )
             events_svc.emit(
                 run_id,
                 {
                     "type": "scanner_phase",
                     "phase": "post_review_turn",
                     "status": "complete",
-                    "message": f"Turn {turn_num}/{total_review_batches}: review failed — {exc}",
+                    "message": batch_msg,
                     "data": {
-                        "turn": turn_num,
+                        "turn": outcome.turn,
                         "total_turns": total_review_batches,
-                        "error": str(exc),
+                        "batch_size": len(outcome.batch),
+                        "accepted": accepted_this_batch,
+                        "low_confidence": low_confidence_this_batch,
+                        "unreviewed": unreviewed_this_batch,
                     },
                 },
             )
-            continue
-
-        for line in verdict_text.strip().splitlines():
-            parts = [p.strip() for p in line.split("|", 1)]
-            if len(parts) != 2:
-                continue
-            try:
-                reference = parts[0].replace("REF:", "").strip()
-                fid = next(
-                    candidate_id
-                    for candidate_id, candidate_reference in reference_by_id.items()
-                    if candidate_reference == reference
-                )
-            except (StopIteration, ValueError):
-                continue
-            verdict = parts[1].strip()
-            if verdict.upper().startswith("LOW_CONFIDENCE"):
-                reason = (
-                    verdict.split(":", 1)[1].strip()
-                    if ":" in verdict
-                    else "Pre-screen: low confidence"
-                )
-                low_confidence_ids.append(fid)
-                batch_low_confidence.append(fid)
-                reasons[fid] = reason
-
-        accepted_this_batch = len(batch) - len(batch_low_confidence)
-        batch_msg = (
-            f"Turn {turn_num}/{total_review_batches}: reviewed {len(batch)} finding(s)"
-            f" → {accepted_this_batch} accepted"
-            + (
-                f", {len(batch_low_confidence)} flagged low confidence"
-                if batch_low_confidence
-                else ""
-            )
-        )
-        events_svc.emit(
-            run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "post_review_turn",
-                "status": "complete",
-                "message": batch_msg,
-                "data": {
-                    "turn": turn_num,
-                    "total_turns": total_review_batches,
-                    "batch_size": len(batch),
-                    "accepted": accepted_this_batch,
-                    "low_confidence": len(batch_low_confidence),
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "reporting",
+                    "role": "Reporting",
+                    "status": "active",
+                    "current_task": batch_msg,
+                    "_persist": True,
                 },
-            },
-        )
-        events_svc.emit(
-            run_id,
-            {
-                "type": "agent_status",
-                "agent_id": "reporting",
-                "role": "Reporting",
-                "status": "active",
-                "current_task": batch_msg,
-                "_persist": True,
-            },
-        )
+            )
 
-    if low_confidence_ids:
+    verdicts_by_id = {
+        fid: verdict
+        for outcome in sorted(outcomes, key=lambda item: item.turn)
+        for fid, verdict in outcome.verdicts.items()
+    }
+    changed: list[tuple[int, str, str]] = []
+    accepted = 0
+    stale = 0
+    if verdicts_by_id:
         with Session(get_engine()) as s:
-            for fid in low_confidence_ids:
+            for fid, (verdict, reason) in verdicts_by_id.items():
                 row = s.get(ScanFinding, fid)
-                if row and row.validation_status == "unvalidated":
-                    row.validation_status = "low_confidence"
-                    row.validation_note = reasons.get(
-                        fid, "Pre-screen flagged as low confidence."
-                    )
-                    s.add(row)
+                if (
+                    row is None
+                    or row.test_run_id != run_id
+                    or row.validation_status != "unvalidated"
+                ):
+                    stale += 1
+                    continue
+                if verdict == "ACCEPT":
+                    accepted += 1
+                    continue
+                row.validation_status = "low_confidence"
+                row.validation_note = reason
+                s.add(row)
+                changed.append((fid, row.reference, reason))
             s.commit()
-        for fid in low_confidence_ids:
+        for fid, reference, reason in changed:
             events_svc.emit(
                 run_id,
                 {
                     "type": "finding_validation_update",
                     "finding_id": fid,
-                    "finding_reference": reference_by_id.get(fid),
+                    "finding_reference": reference,
                     "validation_status": "low_confidence",
-                    "validation_note": reasons.get(
-                        fid, "Pre-screen flagged as low confidence."
-                    ),
+                    "validation_note": reason,
                 },
             )
 
-    accepted = len(candidates) - len(low_confidence_ids)
-    review_complete_msg = f"Pre-screen complete: {accepted} accepted, {len(low_confidence_ids)} flagged as low confidence."
+    low_confidence = len(changed)
+    unreviewed = len(candidates) - accepted - low_confidence
+    review_complete_msg = (
+        f"Pre-screen complete: {accepted} accepted,"
+        f" {low_confidence} flagged as low confidence, {unreviewed} unreviewed."
+    )
+    if stale:
+        review_complete_msg += (
+            f" {stale} finding(s) changed or were removed during review."
+        )
     events_svc.emit(
         run_id,
         {
@@ -6850,10 +6905,12 @@ async def _run_post_scan_llm_review(
         },
     )
     log.info(
-        "Post-scan review run_id=%s: %d accepted, %d low_confidence",
+        "Post-scan review run_id=%s: %d accepted, %d low_confidence, %d unreviewed (%d changed or removed)",
         run_id,
         accepted,
-        len(low_confidence_ids),
+        low_confidence,
+        unreviewed,
+        stale,
     )
 
 
