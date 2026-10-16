@@ -136,6 +136,17 @@ async def list_source_providers() -> list[dict[str, Any]]:
     ]
 
 
+@router.get("/{extension_id}/openapi.json")
+def get_extension_openapi(extension_id: str) -> dict[str, Any]:
+    """Return the OpenAPI definition an enabled extension publishes."""
+    manager = get_extension_manager()
+    manager.ensure_loaded()
+    document = manager.openapi_for(extension_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="This extension has no API definition")
+    return document
+
+
 @router.get("/{extension_id}")
 async def get_extension(extension_id: str) -> dict[str, Any]:
     return await _extension_payload(extension_id)

@@ -767,6 +767,137 @@ def test_agentic_loop_answers_calls_skipped_after_rejected_done(monkeypatch):
     assert by_id["r1"].startswith("Not run:")
 
 
+def test_agentic_loop_retries_once_then_recovers_on_refusal(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    calls = 0
+    events: list[dict] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise llm.LLMRefusalError("LLM provider refusal: flagged for cyber risk")
+        block = {
+            "type": "tool_use",
+            "id": "d1",
+            "name": "done",
+            "input": {"summary": "ok"},
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+            emit_fn=events.append,
+        )
+    )
+
+    # Refused once, retried, then succeeded — the run is not failed.
+    assert summary == "ok"
+    assert calls == 2
+    assert any(e.get("data", {}).get("refusal_retry") == 1 for e in events)
+    assert not any("refusal_skips" in (e.get("data") or {}) for e in events)
+
+
+def test_agentic_loop_skips_request_refused_twice(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    calls = 0
+    last_messages: list[dict] = []
+    events: list[dict] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls, last_messages
+        calls += 1
+        last_messages = [dict(m) for m in messages]
+        if calls <= 2:
+            raise llm.LLMRefusalError("LLM provider refusal: flagged for cyber risk")
+        block = {
+            "type": "tool_use",
+            "id": "d1",
+            "name": "done",
+            "input": {"summary": "moved on"},
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+            emit_fn=events.append,
+        )
+    )
+
+    # Refused twice, then skipped and continued to completion — not failed.
+    assert summary == "moved on"
+    assert calls == 3
+    assert any(e.get("data", {}).get("refusal_skips") == 1 for e in events)
+    # A steering instruction was injected before the recovering call.
+    steer_present = any(
+        isinstance(m.get("content"), list)
+        and any(
+            b.get("type") == "text"
+            and "refused the previous request twice" in b.get("text", "")
+            for b in m["content"]
+        )
+        for m in last_messages
+        if m.get("role") == "user"
+    )
+    assert steer_present
+
+
+def test_agentic_loop_fails_after_refusal_skip_cap(monkeypatch):
+    config = LLMConfig(
+        provider="azure_foundry_openai",
+        api_key="test-key",
+        base_url="https://example.services.ai.azure.com",
+        model="gpt-5.4",
+    )
+    monkeypatch.setattr(llm, "AGENTIC_MAX_REFUSAL_SKIPS", 2)
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        raise llm.LLMRefusalError("LLM provider refusal: flagged for cyber risk")
+
+    async def fake_tool_executor(name, tool_input, step):
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(llm.LLMRefusalError):
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                config,
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=fake_tool_executor,
+            )
+        )
+
+
 def test_agentic_loop_keeps_tool_output_up_to_shared_limit(monkeypatch):
     config = LLMConfig(
         provider="azure_foundry_openai",
@@ -1537,7 +1668,7 @@ def test_agentic_loop_accounts_for_blocked_steps_and_augments_tool_schema(monkey
     assert executed == 0
 
 
-def test_agentic_loop_raises_provider_refusal_instead_of_finishing(monkeypatch):
+def test_agentic_loop_fails_after_persistent_refusal_exhausts_skips(monkeypatch):
     config = LLMConfig(
         provider="azure_foundry_openai",
         api_key="test-key",
@@ -1546,6 +1677,7 @@ def test_agentic_loop_raises_provider_refusal_instead_of_finishing(monkeypatch):
         max_tokens=2048,
     )
     emitted: list[dict] = []
+    monkeypatch.setattr(llm, "AGENTIC_MAX_REFUSAL_SKIPS", 1)
 
     async def fake_call_with_tools(*args, **kwargs):
         raise RuntimeError(
@@ -1555,6 +1687,8 @@ def test_agentic_loop_raises_provider_refusal_instead_of_finishing(monkeypatch):
 
     monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
 
+    # A request the provider refuses every time is retried once, skipped, and
+    # only after the skip budget is exhausted does the scan fail.
     with pytest.raises(llm.LLMRefusalError, match="cybersecurity risk"):
         asyncio.run(
             llm.thinking_agentic_loop(
@@ -1566,13 +1700,15 @@ def test_agentic_loop_raises_provider_refusal_instead_of_finishing(monkeypatch):
             )
         )
 
-    refusal_events = [
+    # Refusals surface as warnings now (the scan keeps going), including the
+    # retry and the skip, rather than a single terminal error.
+    refusal_warnings = [
         event
         for event in emitted
-        if event.get("phase") == "llm_response" and event.get("status") == "error"
+        if event.get("phase") == "llm_response" and event.get("status") == "warning"
     ]
-    assert len(refusal_events) == 1
-    assert "provider refused" in refusal_events[0]["message"]
+    assert any(e.get("data", {}).get("refusal_retry") == 1 for e in refusal_warnings)
+    assert any(e.get("data", {}).get("refusal_skips") for e in refusal_warnings)
 
 
 def test_agentic_loop_propagates_explicit_provider_refusal(monkeypatch):

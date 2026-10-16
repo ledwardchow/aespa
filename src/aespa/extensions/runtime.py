@@ -323,9 +323,25 @@ class RegisteredWebScanner:
 
 
 @dataclass(frozen=True)
+class ExtensionOpenAPI:
+    """Publish an OpenAPI definition for an extension's API routes.
+
+    ``webhooks`` is an optional router whose routes describe the HTTP requests
+    the extension sends to other systems (OpenAPI ``webhooks``). Its handlers are
+    never served.
+    """
+
+    title: str
+    version: str
+    description: str = ""
+    webhooks: APIRouter | None = None
+
+
+@dataclass(frozen=True)
 class RegisteredApiApp:
     extension_id: str
     app: FastAPI
+    openapi: ExtensionOpenAPI | None = None
 
 
 class ExtensionDataStore:
@@ -448,9 +464,21 @@ class ExtensionRegistry:
     def register_web_active_scanner(self, scanner: WebActiveScanner) -> None:
         self._manager._register_web_active_scanner(self._extension_id, scanner)
 
-    def register_api_router(self, router: APIRouter) -> None:
-        """Expose routes below ``/extension/<extension-id>/``."""
-        self._manager._register_api_router(self._extension_id, router)
+    def register_api_router(
+        self, router: APIRouter, *, openapi: ExtensionOpenAPI | None = None
+    ) -> None:
+        """Expose routes below ``/extension/<extension-id>/``.
+
+        Pass ``openapi`` to publish an OpenAPI definition for these routes on
+        the extension's settings page and at
+        ``/api/extensions/<extension-id>/openapi.json``.
+        """
+        self._manager._register_api_router(self._extension_id, router, openapi)
+
+    @property
+    def core(self):
+        """Core-owned run services; see ``aespa.extensions.core_access``."""
+        return self._manager.core_access_for(self._extension_id)
 
     def data_store(self, metadata=None) -> ExtensionDataStore:
         """Return isolated storage and create the extension's validated tables."""
@@ -481,6 +509,8 @@ class ExtensionManager:
         self.web_scanners: dict[str, RegisteredWebScanner] = {}
         self.api_apps: dict[str, RegisteredApiApp] = {}
         self.data_stores: dict[str, ExtensionDataStore] = {}
+        self._run_listeners: dict[str, list] = {}
+        self._openapi_cache: dict[str, dict[str, Any]] = {}
         self._loaded = False
 
     def ensure_loaded(self) -> None:
@@ -490,6 +520,9 @@ class ExtensionManager:
     def load_extensions(self) -> None:
         for store in self.data_stores.values():
             store.dispose()
+        for extension_id in list(self._run_listeners):
+            self._remove_run_listeners(extension_id)
+        self._openapi_cache.clear()
         self.extensions.clear()
         self.source_providers.clear()
         self.llm_catalogs.clear()
@@ -694,6 +727,7 @@ class ExtensionManager:
                 if registered.extension_id == record.id:
                     self.web_scanners.pop(scanner_id, None)
             self.api_apps.pop(record.id, None)
+            self._remove_run_listeners(record.id)
             self.llm_catalogs.pop(record.id, None)
             store = self.data_stores.pop(record.id, None)
             if store is not None:
@@ -783,7 +817,32 @@ class ExtensionManager:
                 )
         self.web_scanners[scanner.id] = RegisteredWebScanner(extension_id, scanner)
 
-    def _register_api_router(self, extension_id: str, router: APIRouter) -> None:
+    def core_access_for(self, extension_id: str):
+        from aespa.extensions.core_access import CoreAccess
+
+        record = self.extensions[extension_id]
+        return CoreAccess(
+            record.capabilities,
+            lambda listener: self._add_run_listener(extension_id, listener),
+        )
+
+    def _add_run_listener(self, extension_id: str, listener):
+        from aespa.services import run_lifecycle
+
+        unsubscribe = run_lifecycle.subscribe(listener)
+        self._run_listeners.setdefault(extension_id, []).append(unsubscribe)
+        return unsubscribe
+
+    def _remove_run_listeners(self, extension_id: str) -> None:
+        for unsubscribe in self._run_listeners.pop(extension_id, []):
+            unsubscribe()
+
+    def _register_api_router(
+        self,
+        extension_id: str,
+        router: APIRouter,
+        openapi: ExtensionOpenAPI | None = None,
+    ) -> None:
         record = self.extensions[extension_id]
         if "api.routes" not in record.capabilities:
             raise ValueError("api.routes is missing from extension.toml")
@@ -799,7 +858,38 @@ class ExtensionManager:
             openapi_url=None,
         )
         app.include_router(router)
-        self.api_apps[extension_id] = RegisteredApiApp(extension_id, app)
+        if openapi is not None and openapi.webhooks is not None:
+            app.webhooks.routes.extend(openapi.webhooks.routes)
+        self.api_apps[extension_id] = RegisteredApiApp(extension_id, app, openapi)
+
+    def openapi_for(self, extension_id: str) -> dict[str, Any] | None:
+        """Return the extension's OpenAPI definition, if it publishes one."""
+        record = self.extensions.get(extension_id)
+        registered = self.api_apps.get(extension_id)
+        if (
+            record is None
+            or not record.enabled
+            or record.status != "loaded"
+            or registered is None
+            or registered.openapi is None
+        ):
+            return None
+        cached = self._openapi_cache.get(extension_id)
+        if cached is None:
+            from fastapi.openapi.utils import get_openapi
+
+            info = registered.openapi
+            cached = get_openapi(
+                title=info.title,
+                version=info.version,
+                openapi_version="3.1.0",
+                description=info.description or None,
+                routes=registered.app.routes,
+                webhooks=registered.app.webhooks.routes,
+                servers=[{"url": f"/extension/{extension_id}"}],
+            )
+            self._openapi_cache[extension_id] = cached
+        return cached
 
     def data_store_for(self, extension_id: str) -> ExtensionDataStore:
         record = self.extensions.get(extension_id)
@@ -1006,6 +1096,14 @@ class ExtensionManager:
             "api_prefix": (
                 f"/extension/{record.id}"
                 if record.id in self.api_apps and record.status == "loaded"
+                else None
+            ),
+            "openapi_url": (
+                f"/api/extensions/{record.id}/openapi.json"
+                if record.enabled
+                and record.status == "loaded"
+                and record.id in self.api_apps
+                and self.api_apps[record.id].openapi is not None
                 else None
             ),
             "enabled": record.enabled,

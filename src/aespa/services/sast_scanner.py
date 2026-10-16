@@ -507,6 +507,9 @@ def _notify_campaign_source_finished(sast_run_id: int, status: str) -> None:
             "Could not sync campaign source member for finished SAST run %s",
             sast_run_id,
         )
+    from aespa.services import run_lifecycle
+
+    run_lifecycle.publish(sast_run_id, "sast", "finished")
 
 
 def _persist_paused_run(

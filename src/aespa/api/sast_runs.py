@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import uuid
-import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import (
     APIRouter,
@@ -25,7 +21,6 @@ from fastapi.responses import Response as HTTPResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from aespa.config import get_settings
 from aespa.db import get_session
 from aespa.models import (
     AgentLog,
@@ -44,13 +39,11 @@ from aespa.schemas import SastRunSummary, SastRunUpdate, ScanLeadOut
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import run_cleanup, sast_export, sast_sarif
+from aespa.services import sast_runs_service as sast_runs_svc
 from aespa.services.references import ensure_finding_reference, ensure_lead_reference
 
 _UTC = timezone.utc
 
-# Keep standalone uploads aligned with SAST export/import archives.
-_MAX_UPLOAD_BYTES = 250 * 1024 * 1024
-_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 router = APIRouter(tags=["sast-runs"])
 
@@ -74,14 +67,6 @@ def _get_run_or_404(session: Session, run_id: int) -> SastRun:
             status_code=status.HTTP_404_NOT_FOUND, detail="SAST run not found"
         )
     return run
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(_UPLOAD_CHUNK_BYTES), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _to_summary(run: SastRun) -> SastRunSummary:
@@ -305,65 +290,13 @@ async def create_standalone_sast_run(
     Not tied to an API collection — used by the SAST screen and consumed by web
     or API test runs, which explicitly import copies of the resulting leads.
     """
-    original_name = Path(file.filename or "source.zip").name or "source.zip"
-    if analysis_mode not in {"light", "deep"}:
-        raise HTTPException(
-            status_code=422,
-            detail="Analysis mode must be either 'light' or 'deep'.",
-        )
-    base = Path(get_settings().data_dir) / "sast_uploads"
-    base.mkdir(parents=True, exist_ok=True)
-    ext = Path(original_name).suffix or ".zip"
-    upload_id = uuid.uuid4().hex
-    temp_path = base / f".{upload_id}.upload"
-    stored_path = base / f"{upload_id}{ext}"
-    bytes_written = 0
-    try:
-        with temp_path.open("wb") as destination:
-            while True:
-                chunk = await file.read(_UPLOAD_CHUNK_BYTES)
-                if not chunk:
-                    break
-                bytes_written += len(chunk)
-                if bytes_written > _MAX_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"File exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MiB "
-                            "upload limit."
-                        ),
-                    )
-                destination.write(chunk)
-
-        if bytes_written == 0:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-        if not zipfile.is_zipfile(temp_path):
-            raise HTTPException(
-                status_code=400, detail="Uploaded file is not a valid ZIP archive."
-            )
-        temp_path.replace(stored_path)
-    except HTTPException:
-        temp_path.unlink(missing_ok=True)
-        raise
-    except Exception:
-        temp_path.unlink(missing_ok=True)
-        raise
-
-    from aespa.services import sast_scanner
-
-    if llm_profile_id is not None:
-        from aespa.services.settings_profiles import get_scan_profile
-
-        get_scan_profile(session, llm_profile_id)
-
-    run = sast_scanner.create_sast_run(
-        collection_id=None,
-        name=name or f"SAST – {original_name}",
-        source_archive_path=str(stored_path),
-        source_filename=original_name,
-        source_provider="upload",
-        source_locator=original_name,
-        source_archive_sha256=_file_sha256(stored_path),
+    # Check the mode before reading a large upload.
+    sast_runs_svc.check_analysis_mode(analysis_mode)
+    archive = await sast_runs_svc.store_upload(file.read, file.filename)
+    run = sast_runs_svc.create_from_archive(
+        session,
+        archive,
+        name=name,
         analysis_mode=analysis_mode,
         llm_config_id=llm_config_id,
         llm_profile_id=llm_profile_id,
@@ -381,54 +314,14 @@ async def create_sast_run_from_source(
     session: Session = Depends(get_session),
 ) -> SastRunSummary:
     """Create a SAST run whose immutable archive is prepared by an extension."""
-    if payload.analysis_mode not in {"light", "deep"}:
-        raise HTTPException(
-            status_code=422,
-            detail="Analysis mode must be either 'light' or 'deep'.",
-        )
-    if payload.llm_profile_id is not None:
-        from aespa.services.settings_profiles import get_scan_profile
-
-        get_scan_profile(session, payload.llm_profile_id)
-
-    from aespa.extensions import get_extension_manager
-    from aespa.services import sast_scanner, sast_sources
-
-    manager = get_extension_manager()
-    manager.ensure_loaded()
-    registered = manager.source_providers.get(payload.provider_id)
-    if registered is None:
-        raise HTTPException(status_code=404, detail="SAST source provider not found")
-    availability = await registered.provider.check_availability(
-        manager.context_for(registered.extension_id)
-    )
-    if not availability.available:
-        raise HTTPException(status_code=409, detail=availability.message)
-
-    repository = payload.parameters.get("repository")
-    default_name = (
-        f"SAST - {repository}"
-        if isinstance(repository, str) and repository
-        else "SAST scan"
-    )
-    run = sast_scanner.create_sast_run(
-        collection_id=None,
-        name=(payload.name or "").strip() or default_name,
-        source_provider=payload.provider_id,
-        source_locator=repository if isinstance(repository, str) else None,
-        source_requested_ref=(str(payload.parameters.get("ref") or "").strip() or None),
-        source_metadata_json=json.dumps(
-            {"request": payload.parameters}, ensure_ascii=False
-        ),
+    run = await sast_runs_svc.create_from_source(
+        session,
+        provider_id=payload.provider_id,
+        parameters=payload.parameters,
+        name=payload.name,
         analysis_mode=payload.analysis_mode,
         llm_profile_id=payload.llm_profile_id,
-        status="preparing",
-    )
-    sast_sources.start_source_preparation(
-        run.id,
-        payload.provider_id,
-        payload.parameters,
-        auto_start=payload.start_scan,
+        start_scan=payload.start_scan,
     )
     return _to_summary(run)
 
@@ -619,20 +512,7 @@ async def start_sast_scan(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> dict:
-    run = _get_run_or_404(session, run_id)
-    if run.status == "preparing":
-        raise HTTPException(
-            status_code=409,
-            detail="The source snapshot is still being prepared.",
-        )
-    if not run.source_archive_path and run.source_provider != "upload":
-        raise HTTPException(
-            status_code=409,
-            detail="The source snapshot is not ready. Resume source preparation first.",
-        )
-    from aespa.services import sast_scanner
-
-    await sast_scanner.start_sast_scan(run_id)
+    await sast_runs_svc.start(session, run_id)
     return {"ok": True}
 
 
@@ -664,12 +544,8 @@ async def stop_sast_scan(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> dict:
-    _get_run_or_404(session, run_id)
-    from aespa.services import sast_scanner, sast_sources
-
-    source_stopped = await sast_sources.stop_source_preparation_and_wait(run_id)
-    stopped = await sast_scanner.stop_sast_scan(run_id)
-    return {"ok": True, "stopped": stopped or source_stopped}
+    stopped = await sast_runs_svc.stop(session, run_id)
+    return {"ok": True, "stopped": stopped}
 
 
 @router.post("/api/sast-runs/{run_id}/scan/pause")

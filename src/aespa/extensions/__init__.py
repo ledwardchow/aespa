@@ -2,6 +2,7 @@
 
 from aespa.extensions.runtime import (
     ExtensionDataStore,
+    ExtensionOpenAPI,
     ExtensionRegistry,
     ExtensionSecretStore,
     MaterializedSource,
@@ -31,6 +32,7 @@ __all__ = [
     "ExtensionLLMSnapshot",
     "ExtensionRegistry",
     "ExtensionDataStore",
+    "ExtensionOpenAPI",
     "ExtensionSecretStore",
     "MaterializedSource",
     "ProviderAvailability",

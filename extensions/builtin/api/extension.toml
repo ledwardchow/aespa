@@ -1,0 +1,9 @@
+id = "aespa.api"
+name = "API"
+author = "aespa"
+version = "1.0.0"
+aespa_api = "1"
+entrypoint = "extension.py:create_extension"
+capabilities = ["api.routes", "core.sast_runs", "core.web_runs"]
+data_namespace = "integrationapi"
+enabled_by_default = false

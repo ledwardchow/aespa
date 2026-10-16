@@ -5493,6 +5493,56 @@ def _agentic_tool_use_block(block: Any) -> dict[str, Any] | None:
     }
 
 
+# Upper bound on how many refused requests a single agentic scan will skip
+# before it gives up and fails. Without a cap, a context the provider refuses
+# deterministically could loop forever (refuse -> skip -> refuse -> skip -> …).
+AGENTIC_MAX_REFUSAL_SKIPS = 10
+
+
+def _append_agentic_user_steer(messages: list[dict], text: str) -> None:
+    """Add a steering instruction as a user-side text block.
+
+    Merges into the trailing user message when one is present (a text block may
+    sit alongside tool_result blocks), otherwise appends a new user message, so
+    the conversation never ends up with two consecutive user turns.
+    """
+    block = {"type": "text", "text": text}
+    if messages and messages[-1].get("role") == "user":
+        content = messages[-1].get("content")
+        if isinstance(content, list):
+            content.append(block)
+        elif isinstance(content, str):
+            messages[-1]["content"] = (
+                [{"type": "text", "text": content}, block] if content else [block]
+            )
+        else:
+            messages[-1]["content"] = [block]
+    else:
+        messages.append({"role": "user", "content": [block]})
+
+
+def _drop_last_agentic_exchange(messages: list[dict]) -> bool:
+    """Remove the most recent completed assistant/tool-result exchange.
+
+    Drops the trailing assistant turn and its following user tool_result turn as
+    a matched pair so the refused content leaves the context window without
+    orphaning a tool_result or losing the initial user message. Returns True
+    when a pair was removed.
+    """
+    if len(messages) < 3:
+        return False
+    if messages[-1].get("role") == "user" and messages[-2].get("role") == "assistant":
+        assistant_content = messages[-2].get("content")
+        has_tool_use = any(
+            _agentic_tool_use_block(b) is not None
+            for b in (assistant_content if isinstance(assistant_content, list) else [])
+        )
+        if has_tool_use:
+            del messages[-2:]
+            return True
+    return False
+
+
 def _journal_from_first_message(message: dict) -> tuple[dict, list[str]]:
     """Return a first message without old journals and their useful lines."""
     first = dict(message)
@@ -7722,6 +7772,10 @@ async def thinking_agentic_loop(
     tool_call_count = resume_step_count
     final_summary = ""
     consecutive_text_only_turns = 0
+    # Refusals that recover on a successful turn reset these. consecutive_refusals
+    # drives the retry-once-then-skip behaviour; refusal_skips bounds total skips.
+    consecutive_refusals = 0
+    refusal_skips = 0
 
     if resume_repair and emit_fn:
         try:
@@ -7927,6 +7981,8 @@ async def thinking_agentic_loop(
                         except Exception:
                             pass
                 content_blocks, stop_reason, raw_content = _llm_fut.result()
+                # A completed turn means we are past any earlier refusal.
+                consecutive_refusals = 0
             except Exception as exc:
                 error_message = describe_exception(exc)
                 log.exception(
@@ -7964,7 +8020,11 @@ async def thinking_agentic_loop(
                             {
                                 "type": "scanner_phase",
                                 "phase": "llm_response",
-                                "status": "warning" if _is_quota_pause else "error",
+                                "status": (
+                                    "warning"
+                                    if (_is_quota_pause or _is_refusal)
+                                    else "error"
+                                ),
                                 "message": _msg,
                                 "data": {
                                     "step": tool_call_count + 1,
@@ -7976,9 +8036,72 @@ async def thinking_agentic_loop(
                     except Exception:
                         pass
                 if _is_refusal:
-                    raise LLMRefusalError(
-                        f"LLM provider refused the scan request at step {tool_call_count + 1}: {exc}"
-                    ) from exc
+                    consecutive_refusals += 1
+                    # First refusal of this request: retry once. Provider safety
+                    # sampling is non-deterministic, so an identical retry sometimes
+                    # succeeds.
+                    if consecutive_refusals < 2:
+                        if emit_fn:
+                            try:
+                                emit_fn(
+                                    {
+                                        "type": "scanner_phase",
+                                        "phase": "llm_response",
+                                        "status": "warning",
+                                        "message": (
+                                            f"Step {tool_call_count + 1}: provider refused "
+                                            "this request; retrying once before skipping it."
+                                        ),
+                                        "data": {
+                                            "step": tool_call_count + 1,
+                                            "refusal_retry": consecutive_refusals,
+                                        },
+                                    }
+                                )
+                            except Exception:
+                                pass
+                        continue
+                    # Refused again (twice for the same request): skip this line of
+                    # investigation and move on instead of failing the whole scan.
+                    refusal_skips += 1
+                    if refusal_skips > AGENTIC_MAX_REFUSAL_SKIPS:
+                        raise LLMRefusalError(
+                            f"LLM provider refused the scan request at step "
+                            f"{tool_call_count + 1} and did not recover after "
+                            f"{refusal_skips - 1} skipped steps: {exc}"
+                        ) from exc
+                    _drop_last_agentic_exchange(messages)
+                    _append_agentic_user_steer(
+                        messages,
+                        (
+                            "The model provider's safety filter refused the previous "
+                            "request twice. Do NOT repeat that endpoint, payload, or line "
+                            "of investigation. Abandon it and continue the assessment on a "
+                            "completely different attack surface or vulnerability class."
+                        ),
+                    )
+                    consecutive_refusals = 0
+                    if emit_fn:
+                        try:
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "llm_response",
+                                    "status": "warning",
+                                    "message": (
+                                        f"Step {tool_call_count + 1}: provider refused this "
+                                        "request twice — skipping it and moving to a "
+                                        "different target."
+                                    ),
+                                    "data": {
+                                        "step": tool_call_count + 1,
+                                        "refusal_skips": refusal_skips,
+                                    },
+                                }
+                            )
+                        except Exception:
+                            pass
+                    continue
                 # A provider/serialization failure is not a successful terminal
                 # condition. Propagate it so the owning scan is marked failed and
                 # can be resumed from the final checkpoint.

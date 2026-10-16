@@ -34,6 +34,7 @@ from aespa.services import findings as findings_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
+from aespa.services import web_runs_service as web_runs_svc
 from aespa.services.references import ensure_finding_reference
 from aespa.services.run_cleanup import detach_finding_dependents
 
@@ -54,32 +55,7 @@ class _StartScanBody(BaseModel):
     use_session: Optional[str] = None
 
 
-def _scan_mode_group(coverage_mode: str) -> str:
-    return coverage_mode if coverage_mode in {"deep", "team"} else "standard"
-
-
-def _reject_incompatible_scan_mode(
-    session: Session, run: TestRun, requested_mode: str
-) -> None:
-    if not scanner_svc.is_scan_mode_locked(session, run):
-        return
-    if _scan_mode_group(run.coverage_mode) == _scan_mode_group(requested_mode):
-        return
-    saved_label = {
-        "deep": "Deep",
-        "team": "Team",
-    }.get(run.coverage_mode, "Quick, Standard, Full, or SAST Validate")
-    requested_label = {
-        "deep": "Deep",
-        "team": "Team",
-    }.get(requested_mode, "Quick, Standard, Full, or SAST Validate")
-    raise HTTPException(
-        status_code=409,
-        detail=(
-            f"This run already started in {saved_label} mode and cannot switch "
-            f"to {requested_label}. Create a new run to use the other mode."
-        ),
-    )
+_reject_incompatible_scan_mode = web_runs_svc.reject_incompatible_scan_mode
 
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/start")
@@ -89,50 +65,20 @@ async def start_thinking_scan(
     session: Session = Depends(get_session),
 ) -> dict:
     """Start an LLM-directed scan that dynamically chooses what to test next."""
-    run = _get_run_or_404(session, run_id)
-    if crawler_svc.is_running(run_id):
-        raise HTTPException(
-            status_code=409, detail="Crawl is still running — wait for it to finish"
-        )
-    if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-    if body and body.coverage_mode is not None:
-        _reject_incompatible_scan_mode(session, run, body.coverage_mode)
-        run.coverage_mode = body.coverage_mode
+    _get_run_or_404(session, run_id)
+    target_ids = None
     if body:
         target_ids = body.target_page_ids or (
             [body.target_page_id] if body.target_page_id is not None else None
         )
-        if target_ids is not None:
-            pages = session.exec(
-                select(CrawledPage)
-                .where(CrawledPage.test_run_id == run_id)
-                .where(CrawledPage.id.in_(target_ids))
-            ).all()
-            if len(pages) != len(set(target_ids)):
-                raise HTTPException(status_code=404, detail="Target page not found")
-            run.target_page_ids_json = json.dumps(sorted(set(target_ids)))
-            run.target_session_label = body.use_session or None
-        session.add(run)
-        session.commit()
-    if run.coverage_mode != "sast_validate":
-        # Seed workprogram synchronously so it's populated before the response returns.
-        try:
-            from aespa.services.web_workprogram import seed_web_workprogram
-
-            seed_web_workprogram(run_id)
-        except Exception:
-            pass  # non-fatal
-    if run.coverage_mode == "sast_validate":
-        from aespa.services.scan_leads import get_leads_for_run
-
-        if not get_leads_for_run("web", run_id):
-            raise HTTPException(
-                status_code=409,
-                detail="No open imported SAST leads are available to validate",
-            )
-    await scanner_svc.start_thinking_scan(run_id)
-    return scanner_svc.get_thinking_scan_status(run_id)
+    return await web_runs_svc.start_scan(
+        session,
+        run_id,
+        coverage_mode=body.coverage_mode if body else None,
+        target_page_ids=target_ids,
+        use_session=body.use_session if body else None,
+        update_targets=body is not None,
+    )
 
 
 @router.post("/api/test-runs/{run_id}/pages/{page_id}/test")

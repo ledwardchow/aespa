@@ -1,0 +1,5192 @@
+{
+  "components": {
+    "schemas": {
+      "ActivityItem": {
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "cursor": {
+            "title": "Cursor",
+            "type": "integer"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "cursor",
+          "at",
+          "phase",
+          "status",
+          "message",
+          "url"
+        ],
+        "title": "ActivityItem",
+        "type": "object"
+      },
+      "ActivityPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ActivityItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Pass as after= to get newer lines.",
+            "title": "Next Cursor",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "ActivityPage",
+        "type": "object"
+      },
+      "Body_createSastScan": {
+        "properties": {
+          "analysis_mode": {
+            "default": "deep",
+            "enum": [
+              "light",
+              "deep"
+            ],
+            "title": "Analysis Mode",
+            "type": "string"
+          },
+          "callbacks": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Callback settings as a JSON object, in the CallbackConfig shape.",
+            "title": "Callbacks"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "description": "Source code as a ZIP file, up to 250 MiB.",
+            "title": "File",
+            "type": "string"
+          },
+          "llm_config_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Config Id"
+          },
+          "llm_profile_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Profile Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "start": {
+            "default": true,
+            "title": "Start",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_createSastScan",
+        "type": "object"
+      },
+      "CallbackConfig": {
+        "properties": {
+          "events": {
+            "description": "Events to send. scan.progress is sent at most once a minute.",
+            "items": {
+              "enum": [
+                "scan.started",
+                "scan.phase_changed",
+                "scan.progress",
+                "scan.needs_action",
+                "scan.paused",
+                "scan.completed",
+                "scan.failed",
+                "scan.stopped"
+              ],
+              "type": "string"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 16,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Key for the X-AESPA-Signature header. If omitted, the token's webhook secret is used, or a new secret is returned once in the response.",
+            "format": "password",
+            "title": "Secret",
+            "writeOnly": true
+          },
+          "url": {
+            "description": "Where AESPA sends a POST for each event.",
+            "format": "uri",
+            "maxLength": 2083,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "CallbackConfig",
+        "type": "object"
+      },
+      "CallbackOut": {
+        "properties": {
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Returned only when AESPA created the secret for this scan.",
+            "title": "Secret"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "events"
+        ],
+        "title": "CallbackOut",
+        "type": "object"
+      },
+      "CallbackPayload": {
+        "description": "Body of every callback. Fetch findings with the scan's links.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "event": {
+            "enum": [
+              "scan.started",
+              "scan.phase_changed",
+              "scan.progress",
+              "scan.needs_action",
+              "scan.paused",
+              "scan.completed",
+              "scan.failed",
+              "scan.stopped"
+            ],
+            "title": "Event",
+            "type": "string"
+          },
+          "id": {
+            "description": "Delivery ID, also sent as X-AESPA-Delivery.",
+            "title": "Id",
+            "type": "string"
+          },
+          "scan": {
+            "$ref": "#/components/schemas/ScanStatus"
+          }
+        },
+        "required": [
+          "id",
+          "event",
+          "created_at",
+          "scan"
+        ],
+        "title": "CallbackPayload",
+        "type": "object"
+      },
+      "Counts": {
+        "properties": {
+          "findings": {
+            "$ref": "#/components/schemas/FindingCounts"
+          },
+          "max_pages": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Pages"
+          },
+          "pages": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pages"
+          }
+        },
+        "required": [
+          "findings"
+        ],
+        "title": "Counts",
+        "type": "object"
+      },
+      "CredentialCreate": {
+        "description": "A user account AESPA signs in as.\n\nSend ``username`` and ``password``, or ``login_fields`` for custom login\nforms. ``auth_mode`` is one of ``auto`` (single form), ``totp`` (form plus\nTOTP code from ``totp_seed``), ``email_otp`` (code read from\n``test_mailbox_url``), ``entra_id`` (Microsoft sign-in), or ``guided`` (a\nperson signs in at the AESPA browser window).",
+        "properties": {
+          "auth_mode": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "totp",
+              "email_otp",
+              "entra_id",
+              "guided"
+            ],
+            "title": "Auth Mode",
+            "type": "string"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "On PUT, the ID of an existing credential to keep and update.",
+            "title": "Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "login_fields": {
+            "items": {
+              "$ref": "#/components/schemas/LoginFieldIn"
+            },
+            "title": "Login Fields",
+            "type": "array"
+          },
+          "login_url": {
+            "anyOf": [
+              {
+                "format": "uri",
+                "maxLength": 2083,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Login Url"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Never returned.",
+            "format": "password",
+            "title": "Password",
+            "writeOnly": true
+          },
+          "test_mailbox_url": {
+            "anyOf": [
+              {
+                "format": "uri",
+                "maxLength": 2083,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Test Mailbox Url"
+          },
+          "totp_seed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Base32 TOTP secret. Never returned. On PUT, omit to keep the saved seed.",
+            "format": "password",
+            "title": "Totp Seed",
+            "writeOnly": true
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          }
+        },
+        "title": "CredentialCreate",
+        "type": "object"
+      },
+      "CredentialOut": {
+        "properties": {
+          "auth_mode": {
+            "title": "Auth Mode",
+            "type": "string"
+          },
+          "has_password": {
+            "title": "Has Password",
+            "type": "boolean"
+          },
+          "has_totp_seed": {
+            "title": "Has Totp Seed",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "login_fields": {
+            "items": {
+              "$ref": "#/components/schemas/LoginFieldOut"
+            },
+            "title": "Login Fields",
+            "type": "array"
+          },
+          "login_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Login Url"
+          },
+          "test_mailbox_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Test Mailbox Url"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "username",
+          "login_url",
+          "auth_mode",
+          "test_mailbox_url",
+          "has_password",
+          "has_totp_seed",
+          "login_fields"
+        ],
+        "title": "CredentialOut",
+        "type": "object"
+      },
+      "Delivery": {
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "delivered_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivered At"
+          },
+          "event": {
+            "title": "Event",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Status Code"
+          },
+          "next_attempt_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Attempt At"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "delivered",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "event",
+          "url",
+          "status",
+          "attempts",
+          "last_status_code",
+          "last_error",
+          "created_at",
+          "delivered_at",
+          "next_attempt_at"
+        ],
+        "title": "Delivery",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "description": "What went wrong. Validation errors list each field.",
+            "title": "Detail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "Finding": {
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "classification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "cvss_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cvss Score"
+          },
+          "cvss_vector": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cvss Vector"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "dismissed": {
+            "title": "Dismissed",
+            "type": "boolean"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/FindingEvidence"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "impact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Impact"
+          },
+          "location": {
+            "$ref": "#/components/schemas/FindingLocation"
+          },
+          "proof_of_concept": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proof Of Concept"
+          },
+          "recommendation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommendation"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference"
+          },
+          "reportable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reportable"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "validation_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Status"
+          }
+        },
+        "required": [
+          "id",
+          "reference",
+          "title",
+          "severity",
+          "category",
+          "description",
+          "status",
+          "dismissed",
+          "location",
+          "evidence",
+          "created_at"
+        ],
+        "title": "Finding",
+        "type": "object"
+      },
+      "FindingCounts": {
+        "properties": {
+          "critical": {
+            "default": 0,
+            "title": "Critical",
+            "type": "integer"
+          },
+          "high": {
+            "default": 0,
+            "title": "High",
+            "type": "integer"
+          },
+          "info": {
+            "default": 0,
+            "title": "Info",
+            "type": "integer"
+          },
+          "low": {
+            "default": 0,
+            "title": "Low",
+            "type": "integer"
+          },
+          "medium": {
+            "default": 0,
+            "title": "Medium",
+            "type": "integer"
+          }
+        },
+        "title": "FindingCounts",
+        "type": "object"
+      },
+      "FindingEvidence": {
+        "properties": {
+          "request": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request"
+          },
+          "response": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          }
+        },
+        "title": "FindingEvidence",
+        "type": "object"
+      },
+      "FindingLocation": {
+        "properties": {
+          "column": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column"
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
+          },
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File"
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "raw": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "title": "FindingLocation",
+        "type": "object"
+      },
+      "FindingPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "partial": {
+            "description": "True while the scan is still running.",
+            "title": "Partial",
+            "type": "boolean"
+          },
+          "scan_id": {
+            "title": "Scan Id",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scan_id",
+          "partial",
+          "items",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "title": "FindingPage",
+        "type": "object"
+      },
+      "Gate": {
+        "properties": {
+          "blocking_findings": {
+            "title": "Blocking Findings",
+            "type": "integer"
+          },
+          "fail_on": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ],
+            "title": "Fail On",
+            "type": "string"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "fail_on",
+          "blocking_findings",
+          "passed"
+        ],
+        "title": "Gate",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "LoginFieldIn": {
+        "properties": {
+          "key": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "selector": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selector"
+          },
+          "sensitive": {
+            "default": false,
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "value": {
+            "description": "Value typed into this field. Never returned.",
+            "format": "password",
+            "minLength": 1,
+            "title": "Value",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "value"
+        ],
+        "title": "LoginFieldIn",
+        "type": "object"
+      },
+      "LoginFieldOut": {
+        "properties": {
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "selector": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selector"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Empty for sensitive fields.",
+            "title": "Value"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "sensitive",
+          "value"
+        ],
+        "title": "LoginFieldOut",
+        "type": "object"
+      },
+      "NeedsAction": {
+        "properties": {
+          "credential_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential Id"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "description": "guided_login or authenticator_approval",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "message"
+        ],
+        "title": "NeedsAction",
+        "type": "object"
+      },
+      "ScanLinks": {
+        "properties": {
+          "activity": {
+            "title": "Activity",
+            "type": "string"
+          },
+          "findings": {
+            "title": "Findings",
+            "type": "string"
+          },
+          "sarif": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sarif"
+          },
+          "self": {
+            "title": "Self",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "self",
+          "findings",
+          "summary",
+          "activity"
+        ],
+        "title": "ScanLinks",
+        "type": "object"
+      },
+      "ScanList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ScanStatus"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "title": "ScanList",
+        "type": "object"
+      },
+      "ScanStartBody": {
+        "properties": {
+          "coverage_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "track",
+                  "standard",
+                  "enforce",
+                  "deep",
+                  "team",
+                  "sast_validate"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Web scans only. Overrides the mode chosen at creation.",
+            "title": "Coverage Mode"
+          }
+        },
+        "title": "ScanStartBody",
+        "type": "object"
+      },
+      "ScanStatus": {
+        "examples": [
+          {
+            "callbacks": {
+              "events": [
+                "scan.started",
+                "scan.completed",
+                "scan.failed"
+              ],
+              "url": "https://ci.shop.example/aespa-events"
+            },
+            "counts": {
+              "findings": {
+                "critical": 0,
+                "high": 1,
+                "info": 0,
+                "low": 2,
+                "medium": 3
+              },
+              "max_pages": 200,
+              "pages": 143
+            },
+            "created_at": "2026-10-16T09:00:00+00:00",
+            "id": "web-42",
+            "kind": "web",
+            "links": {
+              "activity": "/extension/aespa.api/v1/scans/web-42/activity",
+              "findings": "/extension/aespa.api/v1/scans/web-42/findings",
+              "sarif": "/extension/aespa.api/v1/scans/web-42/sarif",
+              "self": "/extension/aespa.api/v1/scans/web-42",
+              "summary": "/extension/aespa.api/v1/scans/web-42/summary"
+            },
+            "message": "Testing pages",
+            "name": "Nightly scan",
+            "percent": 38,
+            "phase": "scanning",
+            "scan_after_crawl": true,
+            "site_id": 12,
+            "started_at": "2026-10-16T09:00:02+00:00",
+            "state": "running",
+            "status": "running"
+          }
+        ],
+        "properties": {
+          "callbacks": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallbackOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "counts": {
+            "$ref": "#/components/schemas/Counts"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "examples": [
+              "web-42",
+              "sast-17"
+            ],
+            "pattern": "^(web|sast)-[0-9]+$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "web",
+              "sast"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "links": {
+            "$ref": "#/components/schemas/ScanLinks"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "needs_action": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NeedsAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "percent": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Share of planned tests done, when AESPA can measure it.",
+            "title": "Percent"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Web: crawling, scanning, reviewing, crawled, finished. SAST: preparing_source, analyzing, finished.",
+            "title": "Phase"
+          },
+          "scan_after_crawl": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scan After Crawl"
+          },
+          "site_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Site Id"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "preparing",
+              "running",
+              "needs_action",
+              "paused",
+              "completed",
+              "failed",
+              "stopped"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "status": {
+            "description": "AESPA's own run status, for troubleshooting.",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "state",
+          "phase",
+          "status",
+          "outcome",
+          "percent",
+          "message",
+          "counts",
+          "needs_action",
+          "error",
+          "created_at",
+          "started_at",
+          "finished_at",
+          "links"
+        ],
+        "title": "ScanStatus",
+        "type": "object"
+      },
+      "SiteIn": {
+        "description": "Everything AESPA needs to test a web site.",
+        "properties": {
+          "base_url": {
+            "format": "uri",
+            "maxLength": 2083,
+            "minLength": 1,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "credentials": {
+            "description": "Accounts to sign in as. Requires requires_auth=true.",
+            "items": {
+              "$ref": "#/components/schemas/CredentialCreate"
+            },
+            "title": "Credentials",
+            "type": "array"
+          },
+          "login_url": {
+            "anyOf": [
+              {
+                "format": "uri",
+                "maxLength": 2083,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Login Url"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "requires_auth": {
+            "default": false,
+            "title": "Requires Auth",
+            "type": "boolean"
+          },
+          "scan_guidance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scan Guidance"
+          },
+          "scope_hosts": {
+            "description": "Extra hosts or URL prefixes that are in scope. The base URL's host is always in scope.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Scope Hosts",
+            "type": "array"
+          },
+          "workflow_data": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/SiteWorkflowInput"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Data"
+          }
+        },
+        "required": [
+          "name",
+          "base_url"
+        ],
+        "title": "SiteIn",
+        "type": "object"
+      },
+      "SiteOut": {
+        "properties": {
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "credentials": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialOut"
+            },
+            "title": "Credentials",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "login_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Login Url"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "requires_auth": {
+            "title": "Requires Auth",
+            "type": "boolean"
+          },
+          "scan_guidance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scan Guidance"
+          },
+          "scope_hosts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scope Hosts",
+            "type": "array"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "workflow_data": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowOut"
+            },
+            "title": "Workflow Data",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "base_url",
+          "requires_auth",
+          "login_url",
+          "notes",
+          "scan_guidance",
+          "workflow_data",
+          "scope_hosts",
+          "credentials",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SiteOut",
+        "type": "object"
+      },
+      "SiteWorkflowInput": {
+        "properties": {
+          "goal": {
+            "maxLength": 220,
+            "minLength": 1,
+            "title": "Goal",
+            "type": "string"
+          },
+          "instructions": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Instructions",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "start_url": {
+            "format": "uri",
+            "maxLength": 2083,
+            "minLength": 1,
+            "title": "Start Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "goal",
+          "start_url",
+          "instructions"
+        ],
+        "title": "SiteWorkflowInput",
+        "type": "object"
+      },
+      "SourceScanCreate": {
+        "properties": {
+          "analysis_mode": {
+            "default": "deep",
+            "enum": [
+              "light",
+              "deep"
+            ],
+            "title": "Analysis Mode",
+            "type": "string"
+          },
+          "callbacks": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallbackConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "llm_profile_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Profile Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "description": "Provider fields, for example {\"repository\": \"owner/repo\", \"ref\": \"main\"}.",
+            "title": "Parameters",
+            "type": "object"
+          },
+          "provider_id": {
+            "description": "A SAST source provider, for example aespa.githubrepository.",
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "start": {
+            "default": true,
+            "title": "Start",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "provider_id",
+          "parameters"
+        ],
+        "title": "SourceScanCreate",
+        "type": "object"
+      },
+      "StopResult": {
+        "properties": {
+          "scan": {
+            "$ref": "#/components/schemas/ScanStatus"
+          },
+          "stopped": {
+            "title": "Stopped",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stopped",
+          "scan"
+        ],
+        "title": "StopResult",
+        "type": "object"
+      },
+      "Summary": {
+        "properties": {
+          "by_category": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Category",
+            "type": "object"
+          },
+          "by_severity": {
+            "$ref": "#/components/schemas/FindingCounts"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds"
+          },
+          "gate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Gate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "partial": {
+            "title": "Partial",
+            "type": "boolean"
+          },
+          "scan_id": {
+            "title": "Scan Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "preparing",
+              "running",
+              "needs_action",
+              "paused",
+              "completed",
+              "failed",
+              "stopped"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scan_id",
+          "state",
+          "partial",
+          "total",
+          "by_severity",
+          "by_category"
+        ],
+        "title": "Summary",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WebScanCreate": {
+        "description": "Create a web scan for an existing Site or a Site described here.",
+        "properties": {
+          "callbacks": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallbackConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverage_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "track",
+                  "standard",
+                  "enforce",
+                  "deep",
+                  "team",
+                  "sast_validate"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Scan depth: track (Quick), standard, enforce (Full), deep, team, or sast_validate.",
+            "title": "Coverage Mode"
+          },
+          "crawl_credential_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Crawl as this credential only.",
+            "title": "Crawl Credential Id"
+          },
+          "crawler_mode": {
+            "default": "url",
+            "enum": [
+              "url",
+              "interactive"
+            ],
+            "title": "Crawler Mode",
+            "type": "string"
+          },
+          "llm_config_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Config Id"
+          },
+          "llm_max_concurrency": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Max Concurrency"
+          },
+          "llm_profile_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Profile Id"
+          },
+          "max_depth": {
+            "default": 3,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Max Depth",
+            "type": "integer"
+          },
+          "max_pages": {
+            "default": 500,
+            "maximum": 500.0,
+            "minimum": 5.0,
+            "title": "Max Pages",
+            "type": "integer"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "page_selection": {
+            "default": "each_url",
+            "enum": [
+              "each_url",
+              "group_similar"
+            ],
+            "title": "Page Selection",
+            "type": "string"
+          },
+          "scan_after_crawl": {
+            "default": true,
+            "description": "Start the dynamic scan when the crawl succeeds.",
+            "title": "Scan After Crawl",
+            "type": "boolean"
+          },
+          "site": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SiteIn"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Create a Site, or update the Site with the same name when update_site is true."
+          },
+          "site_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An existing Site.",
+            "title": "Site Id"
+          },
+          "start": {
+            "default": true,
+            "description": "Start crawling now.",
+            "title": "Start",
+            "type": "boolean"
+          },
+          "unattended": {
+            "default": true,
+            "description": "Reject credentials that need a person to sign in (auth_mode guided).",
+            "title": "Unattended",
+            "type": "boolean"
+          },
+          "update_site": {
+            "default": false,
+            "description": "Replace an existing Site with the same name instead of returning 409.",
+            "title": "Update Site",
+            "type": "boolean"
+          },
+          "use_screenshots": {
+            "default": false,
+            "title": "Use Screenshots",
+            "type": "boolean"
+          }
+        },
+        "title": "WebScanCreate",
+        "type": "object"
+      },
+      "WorkflowOut": {
+        "additionalProperties": true,
+        "properties": {
+          "goal": {
+            "title": "Goal",
+            "type": "string"
+          },
+          "instructions": {
+            "title": "Instructions",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "start_url": {
+            "title": "Start Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "goal",
+          "start_url",
+          "instructions"
+        ],
+        "title": "WorkflowOut",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "description": "An API token created on the API extension's settings page.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Create Sites, start web and SAST scans, follow their progress, and read results.\n\n**Authentication.** Send `Authorization: Bearer <token>`. Create tokens on the\nAPI extension's settings page in AESPA. Each token has scopes: `sast` for SAST\nscans, `web` for web scans, and `sites` to create or change Sites. A token sees\nonly the scans it created. Any `sites` token can read and change every Site.\n\n**Scan IDs** look like `web-42` or `sast-17`.\n\n**Following a scan.** Poll `GET /v1/scans/{scan_id}` (use `wait` and\n`If-None-Match` to avoid tight loops), or set `callbacks` when you create the\nscan and AESPA will POST signed events to your URL.\n\n**Access.** AESPA has no login of its own and its main `/api` routes are open to\nanyone who can reach it. Tokens protect this API when you publish only\n`/extension/aespa.api/v1/` through a reverse proxy or tunnel. Token management\nis only available from AESPA on the same computer.\n",
+    "title": "AESPA API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/deliveries/{delivery_id}/redeliver": {
+      "post": {
+        "operationId": "redeliverCallback",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "delivery_id",
+            "required": true,
+            "schema": {
+              "title": "Delivery Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Delivery"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Send a callback again",
+        "tags": [
+          "Callbacks"
+        ]
+      }
+    },
+    "/v1/sast/scans": {
+      "post": {
+        "operationId": "createSastScan",
+        "parameters": [
+          {
+            "description": "Any unique value. Repeating a request with the same key returns the first response instead of starting another scan. Kept for 24 hours.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Any unique value. Repeating a request with the same key returns the first response instead of starting another scan. Kept for 24 hours.",
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_createSastScan"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "counts": {
+                    "findings": {
+                      "critical": 0,
+                      "high": 2,
+                      "info": 0,
+                      "low": 0,
+                      "medium": 1
+                    }
+                  },
+                  "created_at": "2026-10-16T09:00:00+00:00",
+                  "id": "sast-17",
+                  "kind": "sast",
+                  "links": {
+                    "activity": "/extension/aespa.api/v1/scans/sast-17/activity",
+                    "findings": "/extension/aespa.api/v1/scans/sast-17/findings",
+                    "sarif": "/extension/aespa.api/v1/scans/sast-17/sarif",
+                    "self": "/extension/aespa.api/v1/scans/sast-17",
+                    "summary": "/extension/aespa.api/v1/scans/sast-17/summary"
+                  },
+                  "message": "Reviewing the code",
+                  "name": "acme/shop main",
+                  "percent": 54,
+                  "phase": "analyzing",
+                  "started_at": "2026-10-16T09:00:02+00:00",
+                  "state": "running",
+                  "status": "scanning"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create and start a SAST scan from a ZIP file",
+        "tags": [
+          "SAST scans"
+        ],
+        "x-aespa-scopes": [
+          "sast"
+        ]
+      }
+    },
+    "/v1/sast/scans/from-source": {
+      "post": {
+        "description": "Prepares source through an enabled SAST source extension, such as GitHub repository. The scan starts when the source is ready.",
+        "operationId": "createSastScanFromSource",
+        "parameters": [
+          {
+            "description": "Any unique value. Repeating a request with the same key returns the first response instead of starting another scan. Kept for 24 hours.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Any unique value. Repeating a request with the same key returns the first response instead of starting another scan. Kept for 24 hours.",
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "github": {
+                  "summary": "GitHub repository",
+                  "value": {
+                    "analysis_mode": "deep",
+                    "callbacks": {
+                      "events": [
+                        "scan.completed",
+                        "scan.failed"
+                      ],
+                      "url": "https://ci.shop.example/aespa-events"
+                    },
+                    "parameters": {
+                      "ref": "main",
+                      "repository": "acme/shop"
+                    },
+                    "provider_id": "aespa.githubrepository"
+                  }
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/SourceScanCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "counts": {
+                    "findings": {
+                      "critical": 0,
+                      "high": 2,
+                      "info": 0,
+                      "low": 0,
+                      "medium": 1
+                    }
+                  },
+                  "created_at": "2026-10-16T09:00:00+00:00",
+                  "id": "sast-17",
+                  "kind": "sast",
+                  "links": {
+                    "activity": "/extension/aespa.api/v1/scans/sast-17/activity",
+                    "findings": "/extension/aespa.api/v1/scans/sast-17/findings",
+                    "sarif": "/extension/aespa.api/v1/scans/sast-17/sarif",
+                    "self": "/extension/aespa.api/v1/scans/sast-17",
+                    "summary": "/extension/aespa.api/v1/scans/sast-17/summary"
+                  },
+                  "message": "Reviewing the code",
+                  "name": "acme/shop main",
+                  "percent": 54,
+                  "phase": "analyzing",
+                  "started_at": "2026-10-16T09:00:02+00:00",
+                  "state": "running",
+                  "status": "scanning"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create a SAST scan from a source provider",
+        "tags": [
+          "SAST scans"
+        ],
+        "x-aespa-scopes": [
+          "sast"
+        ]
+      }
+    },
+    "/v1/scans": {
+      "get": {
+        "operationId": "listScans",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "web",
+                    "sast"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List scans created with this token",
+        "tags": [
+          "Scans"
+        ]
+      }
+    },
+    "/v1/scans/{scan_id}": {
+      "get": {
+        "description": "Responses carry an ETag. Send it as If-None-Match to get 304 when nothing changed. With wait, the request is held for up to that many seconds until the status differs from If-None-Match (or from the status when the request arrived).",
+        "operationId": "getScan",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Seconds to wait for a change.",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Seconds to wait for a change.",
+              "maximum": 60,
+              "minimum": 0,
+              "title": "Wait",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-None-Match"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "Not changed"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get a scan's status and progress",
+        "tags": [
+          "Scans"
+        ]
+      }
+    },
+    "/v1/scans/{scan_id}/activity": {
+      "get": {
+        "operationId": "getScanActivity",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "next_cursor from the previous page.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "next_cursor from the previous page.",
+              "minimum": 0,
+              "title": "After",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read the scan's activity log",
+        "tags": [
+          "Scans"
+        ]
+      }
+    },
+    "/v1/scans/{scan_id}/deliveries": {
+      "get": {
+        "operationId": "listScanDeliveries",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Delivery"
+                  },
+                  "title": "Response Listscandeliveries",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List callbacks sent for a scan",
+        "tags": [
+          "Callbacks"
+        ]
+      }
+    },
+    "/v1/scans/{scan_id}/findings": {
+      "get": {
+        "description": "Most severe first. Available while the scan runs (partial=true).",
+        "operationId": "listScanFindings",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma-separated severities, for example high,critical.",
+            "in": "query",
+            "name": "severity",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated severities, for example high,critical.",
+              "title": "Severity"
+            }
+          },
+          {
+            "description": "Include findings marked false positive or dismissed.",
+            "in": "query",
+            "name": "include_dismissed",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Include findings marked false positive or dismissed.",
+              "title": "Include Dismissed",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindingPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List the scan's findings",
+        "tags": [
+          "Results"
+        ]
+      }
+    },
+    "/v1/scans/{scan_id}/sarif": {
+      "get": {
+        "description": "Returns web or SAST results as a SARIF 2.1.0 document for GitHub code scanning and other tools. Web results have one rule per OWASP category and use the affected URL as the location. Web findings marked as false positives are left out unless include_dismissed is true, when they are included as suppressed results. SAST results include reportable findings only.",
+        "operationId": "getScanSarif",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Web scans only: include findings marked as false positives, as suppressed results.",
+            "in": "query",
+            "name": "include_dismissed",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Web scans only: include findings marked as false positives, as suppressed results.",
+              "title": "Include Dismissed",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/sarif+json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "SARIF 2.1.0 document"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Download results as SARIF 2.1.0",
+        "tags": [
+          "Results"
+        ]
+      }
+    },
+    "/v1/scans/{scan_id}/start": {
+      "post": {
+        "operationId": "startScan",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Start a scan that was created with start=false or failed to start",
+        "tags": [
+          "Scans"
+        ]
+      }
+    },
+    "/v1/scans/{scan_id}/stop": {
+      "post": {
+        "operationId": "stopScan",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Stop a scan",
+        "tags": [
+          "Scans"
+        ]
+      }
+    },
+    "/v1/scans/{scan_id}/summary": {
+      "get": {
+        "description": "With fail_on, gate.passed is false when any finding is at or above that severity.",
+        "operationId": "getScanSummary",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fail_on",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "critical",
+                    "high",
+                    "medium",
+                    "low",
+                    "info"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fail On"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_dismissed",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Dismissed",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Summary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Count findings and check a CI gate",
+        "tags": [
+          "Results"
+        ]
+      }
+    },
+    "/v1/sites": {
+      "get": {
+        "operationId": "listSites",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SiteOut"
+                  },
+                  "title": "Response Listsites",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List Sites",
+        "tags": [
+          "Sites"
+        ],
+        "x-aespa-scopes": [
+          "sites"
+        ]
+      },
+      "post": {
+        "description": "Create a Site with its scope, accounts, workflows, and scan guidance. With upsert=true, a Site with the same name is replaced instead (PUT semantics, so send every credential's password again).",
+        "operationId": "createSite",
+        "parameters": [
+          {
+            "description": "Replace a Site with the same name.",
+            "in": "query",
+            "name": "upsert",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Replace a Site with the same name.",
+              "title": "Upsert",
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "basic": {
+                  "summary": "Public site",
+                  "value": {
+                    "base_url": "https://docs.shop.example",
+                    "name": "Docs site"
+                  }
+                },
+                "custom_login": {
+                  "summary": "Custom login form and workflow",
+                  "value": {
+                    "base_url": "https://partners.shop.example",
+                    "credentials": [
+                      {
+                        "label": "Partner",
+                        "login_fields": [
+                          {
+                            "key": "company",
+                            "label": "Company code",
+                            "value": "ACME"
+                          },
+                          {
+                            "key": "email",
+                            "label": "Email",
+                            "value": "ops@acme.example"
+                          },
+                          {
+                            "key": "password",
+                            "label": "Password",
+                            "sensitive": true,
+                            "value": "change-me"
+                          }
+                        ]
+                      }
+                    ],
+                    "login_url": "https://partners.shop.example/sign-in",
+                    "name": "Partner portal",
+                    "requires_auth": true,
+                    "workflow_data": [
+                      {
+                        "goal": "Submit a purchase order",
+                        "instructions": "Add one item, then submit the order.",
+                        "name": "Place order",
+                        "start_url": "https://partners.shop.example/orders/new"
+                      }
+                    ]
+                  }
+                },
+                "signed_in": {
+                  "summary": "Site with accounts",
+                  "value": {
+                    "base_url": "https://staging.shop.example",
+                    "credentials": [
+                      {
+                        "label": "Admin",
+                        "password": "change-me",
+                        "username": "admin@shop.example"
+                      },
+                      {
+                        "auth_mode": "totp",
+                        "label": "Two-factor user",
+                        "password": "change-me",
+                        "totp_seed": "JBSWY3DPEHPK3PXP",
+                        "username": "mfa@shop.example"
+                      }
+                    ],
+                    "login_url": "https://staging.shop.example/login",
+                    "name": "Shop staging",
+                    "requires_auth": true,
+                    "scan_guidance": "Do not submit real payments.",
+                    "scope_hosts": [
+                      "api.staging.shop.example"
+                    ]
+                  }
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/SiteIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create a Site",
+        "tags": [
+          "Sites"
+        ],
+        "x-aespa-scopes": [
+          "sites"
+        ]
+      }
+    },
+    "/v1/sites/{site_id}": {
+      "get": {
+        "operationId": "getSite",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "site_id",
+            "required": true,
+            "schema": {
+              "title": "Site Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get a Site",
+        "tags": [
+          "Sites"
+        ],
+        "x-aespa-scopes": [
+          "sites"
+        ]
+      },
+      "put": {
+        "description": "Replace every field. Credentials not listed are removed. Include a credential's id to keep it; its password must be sent again.",
+        "operationId": "replaceSite",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "site_id",
+            "required": true,
+            "schema": {
+              "title": "Site Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "basic": {
+                  "summary": "Public site",
+                  "value": {
+                    "base_url": "https://docs.shop.example",
+                    "name": "Docs site"
+                  }
+                },
+                "custom_login": {
+                  "summary": "Custom login form and workflow",
+                  "value": {
+                    "base_url": "https://partners.shop.example",
+                    "credentials": [
+                      {
+                        "label": "Partner",
+                        "login_fields": [
+                          {
+                            "key": "company",
+                            "label": "Company code",
+                            "value": "ACME"
+                          },
+                          {
+                            "key": "email",
+                            "label": "Email",
+                            "value": "ops@acme.example"
+                          },
+                          {
+                            "key": "password",
+                            "label": "Password",
+                            "sensitive": true,
+                            "value": "change-me"
+                          }
+                        ]
+                      }
+                    ],
+                    "login_url": "https://partners.shop.example/sign-in",
+                    "name": "Partner portal",
+                    "requires_auth": true,
+                    "workflow_data": [
+                      {
+                        "goal": "Submit a purchase order",
+                        "instructions": "Add one item, then submit the order.",
+                        "name": "Place order",
+                        "start_url": "https://partners.shop.example/orders/new"
+                      }
+                    ]
+                  }
+                },
+                "signed_in": {
+                  "summary": "Site with accounts",
+                  "value": {
+                    "base_url": "https://staging.shop.example",
+                    "credentials": [
+                      {
+                        "label": "Admin",
+                        "password": "change-me",
+                        "username": "admin@shop.example"
+                      },
+                      {
+                        "auth_mode": "totp",
+                        "label": "Two-factor user",
+                        "password": "change-me",
+                        "totp_seed": "JBSWY3DPEHPK3PXP",
+                        "username": "mfa@shop.example"
+                      }
+                    ],
+                    "login_url": "https://staging.shop.example/login",
+                    "name": "Shop staging",
+                    "requires_auth": true,
+                    "scan_guidance": "Do not submit real payments.",
+                    "scope_hosts": [
+                      "api.staging.shop.example"
+                    ]
+                  }
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/SiteIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Replace a Site",
+        "tags": [
+          "Sites"
+        ],
+        "x-aespa-scopes": [
+          "sites"
+        ]
+      }
+    },
+    "/v1/sites/{site_id}/credentials": {
+      "post": {
+        "operationId": "addSiteCredential",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "site_id",
+            "required": true,
+            "schema": {
+              "title": "Site Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "email_code": {
+                  "summary": "Email sign-in code",
+                  "value": {
+                    "auth_mode": "email_otp",
+                    "label": "Email code user",
+                    "password": "change-me",
+                    "test_mailbox_url": "https://mail.shop.example/inbox/otp",
+                    "username": "otp@shop.example"
+                  }
+                },
+                "password": {
+                  "summary": "Username and password",
+                  "value": {
+                    "label": "Viewer",
+                    "password": "change-me",
+                    "username": "viewer@shop.example"
+                  }
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CredentialCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Add an account to a Site",
+        "tags": [
+          "Sites"
+        ],
+        "x-aespa-scopes": [
+          "sites"
+        ]
+      }
+    },
+    "/v1/sites/{site_id}/credentials/{credential_id}": {
+      "delete": {
+        "operationId": "deleteSiteCredential",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "site_id",
+            "required": true,
+            "schema": {
+              "title": "Site Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "title": "Credential Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Remove an account from a Site",
+        "tags": [
+          "Sites"
+        ],
+        "x-aespa-scopes": [
+          "sites"
+        ]
+      }
+    },
+    "/v1/web/scans": {
+      "post": {
+        "description": "Uses an existing Site (site_id) or creates one (site). By default the crawl starts at once and the dynamic scan follows when the crawl succeeds. If the scan was created but could not start, the error's detail includes its scan_id; fix the problem and call the start route.",
+        "operationId": "createWebScan",
+        "parameters": [
+          {
+            "description": "Any unique value. Repeating a request with the same key returns the first response instead of starting another scan. Kept for 24 hours.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Any unique value. Repeating a request with the same key returns the first response instead of starting another scan. Kept for 24 hours.",
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "crawl_only": {
+                  "summary": "Crawl now, scan later",
+                  "value": {
+                    "scan_after_crawl": false,
+                    "site_id": 12
+                  }
+                },
+                "existing_site": {
+                  "summary": "Scan an existing Site",
+                  "value": {
+                    "coverage_mode": "standard",
+                    "max_pages": 200,
+                    "site_id": 12
+                  }
+                },
+                "new_site": {
+                  "summary": "Create or update a Site and scan it",
+                  "value": {
+                    "callbacks": {
+                      "url": "https://ci.shop.example/aespa-events"
+                    },
+                    "coverage_mode": "standard",
+                    "max_pages": 200,
+                    "name": "Nightly scan",
+                    "site": {
+                      "base_url": "https://staging.shop.example",
+                      "credentials": [
+                        {
+                          "label": "Admin",
+                          "password": "change-me",
+                          "username": "admin@shop.example"
+                        },
+                        {
+                          "auth_mode": "totp",
+                          "label": "Two-factor user",
+                          "password": "change-me",
+                          "totp_seed": "JBSWY3DPEHPK3PXP",
+                          "username": "mfa@shop.example"
+                        }
+                      ],
+                      "login_url": "https://staging.shop.example/login",
+                      "name": "Shop staging",
+                      "requires_auth": true,
+                      "scan_guidance": "Do not submit real payments.",
+                      "scope_hosts": [
+                        "api.staging.shop.example"
+                      ]
+                    },
+                    "update_site": true
+                  }
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/WebScanCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create and start a web scan",
+        "tags": [
+          "Web scans"
+        ],
+        "x-aespa-scopes": [
+          "web"
+        ]
+      }
+    },
+    "/v1/web/scans/{scan_id}/scan": {
+      "post": {
+        "description": "For web scans created with scan_after_crawl=false.",
+        "operationId": "startWebDynamicScan",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "mode": {
+                  "summary": "Choose the scan depth",
+                  "value": {
+                    "coverage_mode": "deep"
+                  }
+                }
+              },
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ScanStartBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Start the dynamic scan on a crawled web scan",
+        "tags": [
+          "Web scans"
+        ],
+        "x-aespa-scopes": [
+          "web"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "/extension/aespa.api"
+    }
+  ],
+  "webhooks": {
+    "scan.completed": {
+      "post": {
+        "description": "The scan finished. Fetch results with the scan's links. Respond with any 2xx status within 10 seconds. Other responses are retried after 30 seconds, 2, 5, 15, and 30 minutes, then the delivery is marked failed. Redirects are not followed.",
+        "operationId": "callback_scan_completed",
+        "parameters": [
+          {
+            "description": "The event name.",
+            "in": "header",
+            "name": "x-aespa-event",
+            "required": true,
+            "schema": {
+              "description": "The event name.",
+              "title": "X-Aespa-Event",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+            "in": "header",
+            "name": "x-aespa-delivery",
+            "required": true,
+            "schema": {
+              "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+              "title": "X-Aespa-Delivery",
+              "type": "string"
+            }
+          },
+          {
+            "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+            "in": "header",
+            "name": "x-aespa-signature",
+            "required": true,
+            "schema": {
+              "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+              "title": "X-Aespa-Signature",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Received"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "scan.completed",
+        "tags": [
+          "Callbacks"
+        ]
+      }
+    },
+    "scan.failed": {
+      "post": {
+        "description": "The scan ended with an error. See scan.error. Respond with any 2xx status within 10 seconds. Other responses are retried after 30 seconds, 2, 5, 15, and 30 minutes, then the delivery is marked failed. Redirects are not followed.",
+        "operationId": "callback_scan_failed",
+        "parameters": [
+          {
+            "description": "The event name.",
+            "in": "header",
+            "name": "x-aespa-event",
+            "required": true,
+            "schema": {
+              "description": "The event name.",
+              "title": "X-Aespa-Event",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+            "in": "header",
+            "name": "x-aespa-delivery",
+            "required": true,
+            "schema": {
+              "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+              "title": "X-Aespa-Delivery",
+              "type": "string"
+            }
+          },
+          {
+            "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+            "in": "header",
+            "name": "x-aespa-signature",
+            "required": true,
+            "schema": {
+              "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+              "title": "X-Aespa-Signature",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Received"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "scan.failed",
+        "tags": [
+          "Callbacks"
+        ]
+      }
+    },
+    "scan.needs_action": {
+      "post": {
+        "description": "A person must act in AESPA, for example to sign in. Respond with any 2xx status within 10 seconds. Other responses are retried after 30 seconds, 2, 5, 15, and 30 minutes, then the delivery is marked failed. Redirects are not followed.",
+        "operationId": "callback_scan_needs_action",
+        "parameters": [
+          {
+            "description": "The event name.",
+            "in": "header",
+            "name": "x-aespa-event",
+            "required": true,
+            "schema": {
+              "description": "The event name.",
+              "title": "X-Aespa-Event",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+            "in": "header",
+            "name": "x-aespa-delivery",
+            "required": true,
+            "schema": {
+              "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+              "title": "X-Aespa-Delivery",
+              "type": "string"
+            }
+          },
+          {
+            "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+            "in": "header",
+            "name": "x-aespa-signature",
+            "required": true,
+            "schema": {
+              "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+              "title": "X-Aespa-Signature",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Received"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "scan.needs_action",
+        "tags": [
+          "Callbacks"
+        ]
+      }
+    },
+    "scan.paused": {
+      "post": {
+        "description": "The scan paused, for example when the LLM provider was unavailable. Respond with any 2xx status within 10 seconds. Other responses are retried after 30 seconds, 2, 5, 15, and 30 minutes, then the delivery is marked failed. Redirects are not followed.",
+        "operationId": "callback_scan_paused",
+        "parameters": [
+          {
+            "description": "The event name.",
+            "in": "header",
+            "name": "x-aespa-event",
+            "required": true,
+            "schema": {
+              "description": "The event name.",
+              "title": "X-Aespa-Event",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+            "in": "header",
+            "name": "x-aespa-delivery",
+            "required": true,
+            "schema": {
+              "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+              "title": "X-Aespa-Delivery",
+              "type": "string"
+            }
+          },
+          {
+            "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+            "in": "header",
+            "name": "x-aespa-signature",
+            "required": true,
+            "schema": {
+              "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+              "title": "X-Aespa-Signature",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Received"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "scan.paused",
+        "tags": [
+          "Callbacks"
+        ]
+      }
+    },
+    "scan.phase_changed": {
+      "post": {
+        "description": "The scan moved to another phase, or resumed after a pause. Respond with any 2xx status within 10 seconds. Other responses are retried after 30 seconds, 2, 5, 15, and 30 minutes, then the delivery is marked failed. Redirects are not followed.",
+        "operationId": "callback_scan_phase_changed",
+        "parameters": [
+          {
+            "description": "The event name.",
+            "in": "header",
+            "name": "x-aespa-event",
+            "required": true,
+            "schema": {
+              "description": "The event name.",
+              "title": "X-Aespa-Event",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+            "in": "header",
+            "name": "x-aespa-delivery",
+            "required": true,
+            "schema": {
+              "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+              "title": "X-Aespa-Delivery",
+              "type": "string"
+            }
+          },
+          {
+            "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+            "in": "header",
+            "name": "x-aespa-signature",
+            "required": true,
+            "schema": {
+              "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+              "title": "X-Aespa-Signature",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Received"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "scan.phase_changed",
+        "tags": [
+          "Callbacks"
+        ]
+      }
+    },
+    "scan.progress": {
+      "post": {
+        "description": "The percentage changed. Sent at most once a minute; opt in. Respond with any 2xx status within 10 seconds. Other responses are retried after 30 seconds, 2, 5, 15, and 30 minutes, then the delivery is marked failed. Redirects are not followed.",
+        "operationId": "callback_scan_progress",
+        "parameters": [
+          {
+            "description": "The event name.",
+            "in": "header",
+            "name": "x-aespa-event",
+            "required": true,
+            "schema": {
+              "description": "The event name.",
+              "title": "X-Aespa-Event",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+            "in": "header",
+            "name": "x-aespa-delivery",
+            "required": true,
+            "schema": {
+              "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+              "title": "X-Aespa-Delivery",
+              "type": "string"
+            }
+          },
+          {
+            "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+            "in": "header",
+            "name": "x-aespa-signature",
+            "required": true,
+            "schema": {
+              "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+              "title": "X-Aespa-Signature",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Received"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "scan.progress",
+        "tags": [
+          "Callbacks"
+        ]
+      }
+    },
+    "scan.started": {
+      "post": {
+        "description": "The scan began preparing source, crawling, or scanning. Respond with any 2xx status within 10 seconds. Other responses are retried after 30 seconds, 2, 5, 15, and 30 minutes, then the delivery is marked failed. Redirects are not followed.",
+        "operationId": "callback_scan_started",
+        "parameters": [
+          {
+            "description": "The event name.",
+            "in": "header",
+            "name": "x-aespa-event",
+            "required": true,
+            "schema": {
+              "description": "The event name.",
+              "title": "X-Aespa-Event",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+            "in": "header",
+            "name": "x-aespa-delivery",
+            "required": true,
+            "schema": {
+              "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+              "title": "X-Aespa-Delivery",
+              "type": "string"
+            }
+          },
+          {
+            "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+            "in": "header",
+            "name": "x-aespa-signature",
+            "required": true,
+            "schema": {
+              "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+              "title": "X-Aespa-Signature",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Received"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "scan.started",
+        "tags": [
+          "Callbacks"
+        ]
+      }
+    },
+    "scan.stopped": {
+      "post": {
+        "description": "The scan was stopped before it finished. Respond with any 2xx status within 10 seconds. Other responses are retried after 30 seconds, 2, 5, 15, and 30 minutes, then the delivery is marked failed. Redirects are not followed.",
+        "operationId": "callback_scan_stopped",
+        "parameters": [
+          {
+            "description": "The event name.",
+            "in": "header",
+            "name": "x-aespa-event",
+            "required": true,
+            "schema": {
+              "description": "The event name.",
+              "title": "X-Aespa-Event",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+            "in": "header",
+            "name": "x-aespa-delivery",
+            "required": true,
+            "schema": {
+              "description": "Unique delivery ID. The same ID is reused when a delivery is retried.",
+              "title": "X-Aespa-Delivery",
+              "type": "string"
+            }
+          },
+          {
+            "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+            "in": "header",
+            "name": "x-aespa-signature",
+            "required": true,
+            "schema": {
+              "description": "t=<unix seconds>,v1=<hex HMAC-SHA256>. Compute the HMAC over '<t>.' followed by the raw request body, using the callback secret as the key. Reject the request if the values differ or t is more than 5 minutes old.",
+              "title": "X-Aespa-Signature",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Received"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "scan.stopped",
+        "tags": [
+          "Callbacks"
+        ]
+      }
+    }
+  }
+}

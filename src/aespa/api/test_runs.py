@@ -61,6 +61,7 @@ from aespa.services import scanner as scanner_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services import settings as settings_service
 from aespa.services import validator as validator_svc
+from aespa.services import web_runs_service as web_runs_svc
 from aespa.services.crawl_archives import _json_dict, _redacted_metadata
 from aespa.services.references import ensure_finding_reference, ensure_lead_reference
 from aespa.services.run_graph import build_run_graph
@@ -75,7 +76,7 @@ class WorkflowRetryBody(BaseModel):
     generate_sample_data: bool = False
 
 
-_CRAWL_OWNED_PHASES = {"created", "crawling", "reconciling", "finalizing"}
+_CRAWL_OWNED_PHASES = web_runs_svc.CRAWL_OWNED_PHASES
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -158,17 +159,7 @@ def _scanner_session_out(record: ScannerSession) -> ScannerSessionOut:
     )
 
 
-def _auto_name(session: Session, site_id: int) -> str:
-    existing = session.exec(select(TestRun).where(TestRun.site_id == site_id)).all()
-    return f"Run #{len(existing) + 1}"
-
-
-def _validate_page_selection(crawler_mode: str, page_selection: str) -> None:
-    if crawler_mode != "url" and page_selection != "each_url":
-        raise HTTPException(
-            status_code=422,
-            detail="Group similar pages is available only with URL crawl",
-        )
+_validate_page_selection = web_runs_svc.validate_page_selection
 
 
 def _clear_crawl_state(session: Session, run: TestRun) -> None:
@@ -259,34 +250,7 @@ def create_test_run(
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     _get_site_or_404(session, site_id)
-    _validate_page_selection(payload.crawler_mode, payload.page_selection)
-    if payload.llm_config_id is not None:
-        from aespa.models import LLMConfig
-
-        if session.get(LLMConfig, payload.llm_config_id) is None:
-            raise HTTPException(status_code=404, detail="LLM model not found")
-    if payload.llm_profile_id is not None:
-        from aespa.services.settings_profiles import get_scan_profile
-
-        get_scan_profile(session, payload.llm_profile_id)
-    name = payload.name or _auto_name(session, site_id)
-    policy = settings_service.get_scanner_policy(session)
-    run = TestRun(
-        site_id=site_id,
-        name=name,
-        use_screenshots=payload.use_screenshots,
-        max_depth=payload.max_depth,
-        max_pages=payload.max_pages,
-        crawler_mode=payload.crawler_mode,
-        page_selection=payload.page_selection,
-        scan_mode=policy.scan_mode,
-        scanner_policy_json="{}",
-        llm_config_id=payload.llm_config_id,
-        llm_profile_id=payload.llm_profile_id,
-    )
-    session.add(run)
-    session.commit()
-    session.refresh(run)
+    run = web_runs_svc.create_run(session, site_id, payload)
     return _run_summary(run, session)
 
 
@@ -576,79 +540,7 @@ async def start_test_run(
     body: StartCrawlBody | None = None,
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
-    run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Test run is already running")
-    if run.status not in (
-        TestRunStatus.pending,
-        TestRunStatus.stopped,
-        TestRunStatus.failed,
-        TestRunStatus.complete,
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Cannot start a run with status '{run.status}'",
-        )
-    if get_llm_config_for_run(session, run) is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No LLM configuration found. Configure it in Settings first.",
-        )
-    next_crawler_mode = (
-        body.crawler_mode if body and body.crawler_mode else run.crawler_mode
-    )
-    next_page_selection = (
-        body.page_selection if body and body.page_selection else run.page_selection
-    )
-    _validate_page_selection(next_crawler_mode, next_page_selection)
-    if run.crawl_started_once and (
-        next_crawler_mode != run.crawler_mode
-        or next_page_selection != run.page_selection
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Clear or restart the crawl to change its mode or page selection",
-        )
-    if body and body.start_pentest_after_crawl:
-        from aespa.api.scan import _reject_incompatible_scan_mode
-
-        if scanner_svc.is_thinking_running(run_id):
-            raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-        if body.coverage_mode is not None:
-            _reject_incompatible_scan_mode(session, run, body.coverage_mode)
-            run.coverage_mode = body.coverage_mode
-        if run.coverage_mode == "sast_validate":
-            from aespa.services.scan_leads import get_leads_for_run
-
-            if not get_leads_for_run("web", run_id):
-                raise HTTPException(
-                    status_code=409,
-                    detail="No open imported SAST leads are available to validate",
-                )
-    if body and body.crawl_credential_id is not None:
-        from aespa.models import Credential
-
-        cred = session.get(Credential, body.crawl_credential_id)
-        if cred is None or cred.site_id != run.site_id:
-            raise HTTPException(
-                status_code=404,
-                detail="Credential not found or does not belong to this site",
-            )
-        run.crawl_credential_id = body.crawl_credential_id
-    else:
-        # Reset to "all credentials" if no specific user was requested.
-        run.crawl_credential_id = None
-    # Clear stale per_user_progress synchronously so the response (and the
-    # first poll) never contains data from a previous crawl.
-    run.per_user_progress = None
-    run.crawler_mode = next_crawler_mode
-    run.page_selection = next_page_selection
-    run.crawl_started_once = True
-    session.add(run)
-    session.commit()
-    crawl_task = await crawler_svc.start_crawl(run_id)
-    if body and body.start_pentest_after_crawl:
-        crawl_then_pentest.schedule(run_id, crawl_task)
+    run = await web_runs_svc.start(session, run_id, body)
     return _run_summary(run, session)
 
 

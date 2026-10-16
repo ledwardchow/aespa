@@ -72,6 +72,10 @@ def emit(run_id: int, event: dict) -> None:
             except asyncio.QueueFull:
                 pass  # slow client — drop the event rather than block
 
+    from aespa.services import run_lifecycle
+
+    run_lifecycle.publish(run_id, run_kind, str(event.get("type") or ""))
+
     if event.get("type") == "scanner_phase":
         _persist_phase_event(run_id, event)
 

@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 
 import { BenchmarkPublishing } from "../benchmark-lab/public.js";
+import { ApiDefinition } from "./ApiDefinition.jsx";
+import { ApiTokens } from "./ApiTokens.jsx";
+import "./extensions.css";
 
 import * as extensionsApi from "../../shared/api/extensions.js";
 import { Crumb, PageHeader, Sep } from "../../shared/ui/PageHeader.jsx";
@@ -167,67 +170,78 @@ export function ExtensionSettingsPage({ extensionId }) {
           <div className="subtle">Extension not found.</div>
         ) : null}
         {extension ? (
-          <section className="card" style={{ maxWidth: 720 }}>
-            <div className="form-section-title">{extension.name} settings</div>
-            <div className="subtle" style={{ marginTop: 4 }}>
-              {extension.id}
-            </div>
-            <div className="subtle" style={{ marginTop: 4 }}>
-              Author: {extension.author || "Not specified"}
-            </div>
-            {!extension.enabled ? (
-              <div className="alert warning" style={{ marginTop: 16 }}>
-                Enable this extension from the <a href="#/extensions">Extensions list</a> to edit
-                its settings.
+          <div className="extension-settings">
+            <section className="card">
+              <div className="form-section-title">{extension.name} settings</div>
+              <div className="subtle" style={{ marginTop: 4 }}>
+                {extension.id}
               </div>
-            ) : (
-              <>
-                {extension.id === "aespa.benchmarking" ? (
-                  <BenchmarkPublishing mode="settings" />
-                ) : (extension.settings_fields || []).length ? (
-                  extension.settings_fields.map((field) => (
-                    <ExtensionSettingField
-                      key={field.key}
-                      extensionId={extension.id}
-                      field={field}
-                      value={settings[field.key]}
-                      hasSecret={extension.has_secrets?.[field.key]}
-                      onChange={(value) =>
-                        setSettings((previous) => ({ ...previous, [field.key]: value }))
-                      }
-                    />
-                  ))
-                ) : (
-                  <div className="subtle" style={{ marginTop: 16 }}>
-                    This extension has no settings.
-                  </div>
-                )}
-                {checkResult ? (
-                  <div
-                    className={`alert ${checkResult.available ? "success" : "warning"}`}
-                    style={{ marginTop: 16 }}
-                  >
-                    {checkResult.message}
-                  </div>
-                ) : null}
-                <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-                  <button
-                    className="btn secondary"
-                    type="button"
-                    disabled={checking}
-                    onClick={check}
-                  >
-                    {checking ? "Checking…" : "Check connection"}
-                  </button>
-                  {(extension.settings_fields || []).length ? (
-                    <button className="btn" type="button" disabled={saving} onClick={save}>
-                      {saving ? "Saving…" : "Save settings"}
-                    </button>
-                  ) : null}
+              <div className="subtle" style={{ marginTop: 4 }}>
+                Author: {extension.author || "Not specified"}
+              </div>
+              {!extension.enabled ? (
+                <div className="alert warning" style={{ marginTop: 16 }}>
+                  Enable this extension from the <a href="#/extensions">Extensions list</a> to edit
+                  its settings.
                 </div>
-              </>
-            )}
-          </section>
+              ) : (
+                <>
+                  {extension.id === "aespa.benchmarking" ? (
+                    <BenchmarkPublishing mode="settings" />
+                  ) : (extension.settings_fields || []).length ? (
+                    extension.settings_fields.map((field) => (
+                      <ExtensionSettingField
+                        key={field.key}
+                        extensionId={extension.id}
+                        field={field}
+                        value={settings[field.key]}
+                        hasSecret={extension.has_secrets?.[field.key]}
+                        onChange={(value) =>
+                          setSettings((previous) => ({ ...previous, [field.key]: value }))
+                        }
+                      />
+                    ))
+                  ) : (
+                    <div className="subtle" style={{ marginTop: 16 }}>
+                      This extension has no settings.
+                    </div>
+                  )}
+                  {checkResult ? (
+                    <div
+                      className={`alert ${checkResult.available ? "success" : "warning"}`}
+                      style={{ marginTop: 16 }}
+                    >
+                      {checkResult.message}
+                    </div>
+                  ) : null}
+                  <div
+                    className="row"
+                    style={{ justifyContent: "flex-end", gap: 8, marginTop: 16 }}
+                  >
+                    {extension.source_providers?.length || extension.web_scanners?.length ? (
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        disabled={checking}
+                        onClick={check}
+                      >
+                        {checking ? "Checking…" : "Check connection"}
+                      </button>
+                    ) : null}
+                    {(extension.settings_fields || []).length ? (
+                      <button className="btn" type="button" disabled={saving} onClick={save}>
+                        {saving ? "Saving…" : "Save settings"}
+                      </button>
+                    ) : null}
+                  </div>
+                </>
+              )}
+            </section>
+            {extension.enabled && extension.id === "aespa.api" ? <ApiTokens /> : null}
+            {extension.enabled && extension.openapi_url ? (
+              <ApiDefinition extension={extension} />
+            ) : null}
+          </div>
         ) : null}
       </div>
     </>

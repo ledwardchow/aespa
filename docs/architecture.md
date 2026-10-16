@@ -2080,6 +2080,24 @@ Extensions may declare `author` and `secrets_namespace` in their manifest. Secre
 
 `sast_sources.start_source_preparation()` owns the background lifecycle. It asks the provider for an archive, extracts it using the same SAST limits, creates a normalized archive, calculates its checksum, saves source provenance on `SastRun`, and optionally starts the ordinary scanner. Extension settings are stored separately by extension ID. Secret fields are stored under the namespace declared by the extension and are redacted from API responses.
 
+Passing `openapi=ExtensionOpenAPI(...)` to `register_api_router` publishes an OpenAPI 3.1 definition for the extension's routes, including optional `webhooks`. `ExtensionManager.openapi_for()` builds and caches it with the server set to `/extension/<id>`, `/api/extensions/<id>/openapi.json` serves it, and the extension list includes `openapi_url` so the settings page can show an API definition section.
+
+### Core run services for extensions
+
+**Files**: `src/aespa/extensions/core_access.py`, `src/aespa/services/web_runs_service.py`, `src/aespa/services/sast_runs_service.py`, `src/aespa/services/run_progress.py`, `src/aespa/services/run_results.py`, `src/aespa/services/run_lifecycle.py`
+
+Creating, starting, and stopping runs lives in `web_runs_service` and `sast_runs_service`. The `/api` routes and extensions both call them, so every request gets the same checks; the services raise `HTTPException` with the route's status codes. `registry.core` gives an extension `core.runs` (read progress, activity, findings, summaries, and SARIF), `core.sast` (requires the `core.sast_runs` capability), `core.web` (requires `core.web_runs`; also creates and updates Sites and credentials, returning them without secrets), and `core.on_run_change(listener)`. This is the sanctioned way for an extension to change core records.
+
+`run_progress.get_progress(run_id)` turns web and SAST run state into one shape: `state` (`queued`, `preparing`, `running`, `needs_action`, `paused`, `completed`, `failed`, `stopped`), `phase`, `percent` (completed page/OWASP cells for web, resolved work items for SAST), counts, `needs_action` for waiting guided or authenticator logins, and timestamps. Run IDs are unique across kinds, so the function finds the run kind itself. `events.emit` notifies `run_lifecycle` listeners for every non-traffic event, and SAST task completion notifies them directly. Notices only say that a run may have changed; listeners re-read progress. Listeners registered through `registry.core` are removed when the extension reloads or is disabled.
+
+### API extension
+
+**Files**: `extensions/builtin/api/`
+
+The bundled `aespa.api` extension (disabled by default) serves `/extension/aespa.api/v1/`. Bearer tokens are stored as SHA-256 hashes in the extension database with `sast`, `web`, and `sites` scopes; each scan row records its owning token, so tokens see only their scans. Token management routes under `/admin/` are hidden from the definition and accept only loopback, same-origin requests without proxy forwarding headers. Create requests accept `Idempotency-Key`; a key is reserved before work starts and stores the final response (including start failures, which report the created scan ID) for 24 hours.
+
+A background thread compares each unfinished scan that has a callback URL with its last seen state, on run-change notices and every 15 seconds, and queues `scan.*` events in an outbox table. Deliveries are POSTed without following redirects, signed with `X-AESPA-Signature: t=<unix>,v1=<HMAC-SHA256 of "t." + body>`, and retried after 30 s, 2, 5, 15, and 30 minutes before being marked failed. The `send_callbacks` setting pauses the worker. `tests/fixtures/aespa_api_v1_openapi.json` is a saved copy of the v1 definition; a test fails on any change until the copy is updated with `AESPA_UPDATE_API_SNAPSHOT=1`. See `docs/api.md` for client usage.
+
 See `docs/extensions.md` for the extension API contract and bundled implementations.
 
 ---

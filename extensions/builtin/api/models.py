@@ -1,0 +1,91 @@
+"""Tables in the API extension's own database."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Optional
+
+from sqlalchemy import MetaData, UniqueConstraint
+from sqlmodel import Field, SQLModel
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+metadata = MetaData()
+
+
+class ExtensionModel(SQLModel):
+    metadata = metadata
+
+
+class ApiToken(ExtensionModel, table=True):
+    """An access token. Only a SHA-256 hash of the token is kept."""
+
+    __tablename__ = "integrationapi_token"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    token_hash: str = Field(index=True, unique=True)
+    token_prefix: str
+    scopes_json: str = "[]"
+    webhook_url: Optional[str] = None
+    # Kept in clear text because AESPA needs it to sign callbacks.
+    webhook_secret: Optional[str] = None
+    created_at: datetime = Field(default_factory=now)
+    last_used_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+
+
+class ApiScan(ExtensionModel, table=True):
+    """A run started through the API and the token that owns it."""
+
+    __tablename__ = "integrationapi_scan"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(index=True, unique=True)
+    kind: str = Field(index=True)  # web | sast
+    token_id: int = Field(index=True)
+    scan_after_crawl: bool = False
+    start_options_json: str = "{}"
+    callback_url: Optional[str] = None
+    callback_secret: Optional[str] = None
+    callback_events_json: str = "[]"
+    last_state: Optional[str] = None
+    last_phase: Optional[str] = None
+    last_percent: Optional[int] = None
+    last_progress_sent_at: Optional[datetime] = None
+    finished: bool = Field(default=False, index=True)
+    created_at: datetime = Field(default_factory=now)
+
+
+class ApiDelivery(ExtensionModel, table=True):
+    """A callback waiting to be sent, sent, or given up on."""
+
+    __tablename__ = "integrationapi_delivery"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    delivery_id: str = Field(index=True, unique=True)
+    scan_id: int = Field(index=True)
+    event: str
+    url: str
+    payload_json: str
+    status: str = Field(default="pending", index=True)  # pending|delivered|failed
+    attempts: int = 0
+    next_attempt_at: datetime = Field(default_factory=now, index=True)
+    last_status_code: Optional[int] = None
+    last_error: Optional[str] = None
+    created_at: datetime = Field(default_factory=now)
+    delivered_at: Optional[datetime] = None
+
+
+class ApiIdempotency(ExtensionModel, table=True):
+    """The saved response for a request sent with an Idempotency-Key."""
+
+    __tablename__ = "integrationapi_idempotency"
+    __table_args__ = (UniqueConstraint("token_id", "key"),)
+    id: Optional[int] = Field(default=None, primary_key=True)
+    token_id: int = Field(index=True)
+    key: str
+    request_hash: str
+    status_code: Optional[int] = None
+    response_json: Optional[str] = None
+    created_at: datetime = Field(default_factory=now, index=True)

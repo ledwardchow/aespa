@@ -109,6 +109,7 @@ def create_extension():
     manager.load_extensions()
 
     assert set(manager.extensions) == {
+        "aespa.api",
         "aespa.burpsuite",
         "aespa.githubrepository",
         "aespa.benchmarking",

@@ -124,7 +124,7 @@ def test_crawl_status_uses_crawler_task_state(client: TestClient, monkeypatch):
 def test_start_crawl_then_pentest_saves_mode_and_schedules_handoff(
     client: TestClient, monkeypatch
 ):
-    from aespa.api import test_runs as test_runs_api
+    from aespa.services import web_runs_service as test_runs_api
 
     site = _make_site(client)
     run = _make_run(client, site["id"]).json()

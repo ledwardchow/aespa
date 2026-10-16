@@ -12,6 +12,8 @@ An extension is trusted Python code loaded inside the AESPA process. API `1` sup
 | `web.active_scanner` | A scanner that selects web scan candidates and returns issues | Target scope checks, scheduling, cancellation, activity events, and finding storage |
 | `api.routes` | A FastAPI router exposed below `/extension/<extension-id>/` | Stable dispatch, enable/disable isolation, and route removal |
 | `llm.catalog` | CLI or SDK based LLM providers, models, and profiles read from the extension's own database | Validation, read-only display in LLM Settings, and resolution to an AESPA LLM config for extension calls |
+| `core.sast_runs` | Requests to create, start, and stop SAST runs through `registry.core.sast` | Upload checks, run creation, source preparation, and scan lifecycle |
+| `core.web_runs` | Requests to create Sites, credentials, and web runs, and to start and stop them, through `registry.core.web` | Site and credential validation, run creation, crawl and scan lifecycle |
 
 An extension may also register settings fields without another capability. Extension code may read AESPA's primary database but must not write to or change it, directly or through a core service that changes core records. Store extension-owned data in the separate extension database. AESPA core handles changes to scan records, extension settings and secrets, and usage records. Calls through AESPA's LLM service may record usage in the primary database. Extensions do not add tables or migrations to the primary database and do not inject frontend code. Extensions run with AESPA's process permissions, so only install code you trust. This is a code rule, not a process-level security boundary.
 
@@ -93,6 +95,24 @@ Extension code can call `registry.resolve_llm_profile(profile_key, role)` after 
 
 Declare `api.routes` and register one FastAPI `APIRouter`. A route declared as `/datasets` by extension `acme.benchmarking` is available at `/extension/acme.benchmarking/datasets`. The core `/api` namespace is reserved for AESPA. The stable dispatcher resolves the enabled extension for every request, so disabling an extension immediately returns 404 for all of its routes without rebuilding the main application or affecting another extension.
 
+To publish an OpenAPI definition for these routes, pass `openapi`:
+
+```python
+from aespa.extensions import ExtensionOpenAPI
+
+registry.register_api_router(
+    router,
+    openapi=ExtensionOpenAPI(
+        title="Acme API",
+        version="1.0.0",
+        description="What the API is for and how to authenticate.",
+        webhooks=webhooks_router,  # optional: requests the extension sends out
+    ),
+)
+```
+
+AESPA serves the OpenAPI 3.1 document at `/api/extensions/<extension-id>/openapi.json`, with `servers` set to `/extension/<extension-id>`, and shows it on the extension's settings page with a download button. Routes with `include_in_schema=False` are left out. Give each route an `operation_id`, `summary`, `tags`, a response model, and error responses so the definition is useful to client generators. Mark request-only secrets with `json_schema_extra={"writeOnly": True}`. Without `openapi`, no definition is published.
+
 Extensions that persist data declare `data_namespace` and pass their own SQLAlchemy or SQLModel metadata to `registry.data_store(metadata)`. AESPA creates a separate SQLite file under `<data_dir>/extensions/<extension-id>.db`; it never adds those tables to `aespa.db`. Every table name is validated to begin with `<data_namespace>_` before creation. The file is retained on disable, while its engine is disposed, so re-enabling restores the extension's data cleanly. Extension schema evolution remains the extension author's responsibility and must occur only inside that isolated database.
 
 ## Settings fields and secrets
@@ -118,6 +138,20 @@ SourceProviderField(
 The Extensions UI uses field metadata to render controls. Non-secret settings are stored by extension ID and returned through `context.settings`. A field's `default` is display metadata; extension code should also supply a fallback when it reads an unset setting, for example `context.settings.get("enabled", True)`. `settings_schema_version` and `schema_version` are stored with settings, but API `1` does not run an extension settings migration. Unknown saved keys remain in storage but are not passed through `context.settings`.
 
 Secret fields require `author` and `secrets_namespace` in the manifest. AESPA uses `<author>.<secrets_namespace>` as the full storage namespace and returns that name in the extension API. Read a secret with `context.secrets.get("api_key")`; `registry.secrets` offers the same namespace during registration. Extension code should use only `get` and `has`. The stores also expose `set` and `delete`, but extension code must not call them because they write to the primary database. AESPA's settings API handles secret changes. Secret keys use the same ID pattern. The API returns only `has_secrets` flags, not secret values. A null secret update keeps its existing value; an empty string removes it. Stored secrets are in AESPA's local database without encryption at rest. Never include credentials in ordinary settings, request parameters, results, metadata, errors, or logs.
+
+## Core run services
+
+Extensions must not write to AESPA's main database, but an extension that declares `core.sast_runs` or `core.web_runs` can ask AESPA to make run changes through `registry.core`. AESPA code performs and checks each change with the same services as its own `/api` routes, and raises `fastapi.HTTPException` with the same status codes and messages.
+
+| Attribute | Needs | Methods |
+| --- | --- | --- |
+| `core.runs` | Nothing | `kind(run_id)`, `progress(run_id, scan_after_crawl=False)`, `activity(run_id, after=0, limit=100)`, `findings(run_id, severities=None, include_dismissed=False)`, `summarize(findings, fail_on=None)`, `sast_sarif(run_id)`, `web_sarif(run_id, include_false_positives=False)` |
+| `core.sast` | `core.sast_runs` | `check_analysis_mode(mode)`, `await store_upload(read, filename)`, `create_from_archive(archive, name=..., analysis_mode=..., llm_config_id=..., llm_profile_id=..., metadata=...)`, `await create_from_source(provider_id=..., parameters=..., ...)`, `await start(run_id)`, `await stop(run_id)` |
+| `core.web` | `core.web_runs` | `list_sites()`, `get_site(id)`, `find_site_id(name)`, `create_site(SiteCreate)`, `update_site(id, SiteUpdate)`, `add_credential(site_id, CredentialIn)`, `delete_credential(site_id, id)`, `create_run(site_id, TestRunCreate)`, `await start(run_id, StartCrawlBody)`, `await start_scan(run_id, coverage_mode)`, `stop(run_id)`, `site_id_for_run(run_id)` |
+
+Accessing `core.sast` or `core.web` without the capability raises `PermissionError`. Create methods return run IDs; Site methods return dictionaries without passwords, TOTP seeds, or sensitive login field values. `progress()` returns one format for web and SAST runs; see `docs/architecture.md` (Core run services) for its fields.
+
+`core.on_run_change(listener)` calls `listener(run_id, run_kind, reason)` when a run may have changed. It runs on the thread that emitted the event, so only record the ID and return; read `progress()` later. AESPA removes the listener when the extension is reloaded or disabled. Notices are hints: none are sent for changes made while AESPA was stopped, so also check periodically.
 
 ## SAST source provider contract
 
@@ -225,6 +259,8 @@ left in place. Disabling the extension removes its routes and sidebar entry but
 preserves the database.
 The legacy primary-database tables remain available for this one-time import,
 but new Benchmark Lab data and settings are handled only by the extension.
+
+The `aespa.api` extension is disabled by default. It lets other tools create Sites, start web and SAST scans, follow progress, receive signed callbacks, and read findings, summaries, and SARIF under `/extension/aespa.api/v1/`. It uses `core.sast_runs` and `core.web_runs`, keeps tokens, scan ownership, callbacks, and idempotency keys in its own database, and publishes an OpenAPI definition. See `docs/api.md`. Its code is in `extensions/builtin/api/`.
 
 The `aespa.chatgptplanusage` API extension is disabled by default. While enabled, it reads
 AESPA's monthly usage totals for the ChatGPT plan and Codex CLI providers every 15 seconds (and

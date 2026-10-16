@@ -4,11 +4,19 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ## Unreleased
 
+### New features
+
+- **API for other tools**: The new API extension, disabled by default, lets CI pipelines and other apps run AESPA scans. Apps can create Sites with all of their settings, including scope, accounts, login fields, TOTP and email codes, workflows, and scan guidance. They can then start web scans (crawl, then scan) and SAST scans from a ZIP file or a source extension such as GitHub repository. Each scan reports one status for polling, with progress, the current phase, and a notice when a person must sign in. Results are available as findings, a severity summary with a pass/fail check for CI, and SARIF 2.1.0 for GitHub code scanning. Web scan SARIF groups findings by OWASP category, points each one at the affected URL, and includes CVSS scores; findings marked as false positives are left out unless requested. Apps can also receive signed callbacks when a scan starts, changes phase, pauses, needs action, finishes, fails, or stops; failed callbacks are retried and listed on the settings page. Tokens are created on the extension's settings page, have separate SAST, web, and Sites permissions, and see only their own scans. Repeating a request with the same `Idempotency-Key` does not start a second scan. AESPA's main API still has no login, so tokens only protect access when a reverse proxy or tunnel exposes just the extension's API.
+
+- **API definitions for extensions**: An extension's settings page now shows its OpenAPI 3.1 definition when the extension publishes one. The page shows the base URL, lists each endpoint with its fields, responses, and required permissions, describes callback payloads, lets you open nested objects such as a Site's accounts in place or in a list of all data objects, shows example curl calls and example responses for each endpoint and example bodies for each callback, and offers the definition as a download for Postman, Insomnia, or client generators. Extension authors can also ask AESPA to create and control SAST and web runs through new core run services instead of writing to AESPA's database.
+
 ### Updates
 
 - **Finding review after web scans**: AESPA reviews batches of findings concurrently, up to the saved DAST LLM request limit. Failed requests and missing verdicts leave the affected findings unvalidated.
 
 ### Fixes
+
+- **Scans no longer fail on a single refused request**: When the model provider refused one request during a web or API scan, the whole run stopped and was marked failed. AESPA now retries a refused request once, and if it is refused again, skips that line of investigation and continues the scan on a different target. A scan fails only if the provider keeps refusing across many skipped requests.
 
 - **A.L.I.C.E. on API runs**: Endpoint lists, coverage, and finding commands in API-run chats no longer fail every time. Steering an active goal on an API run now works instead of returning a server error.
 
@@ -19,6 +27,10 @@ All pull requests merged to `main`, in reverse chronological order.
 - **API coverage by HTTP method**: When several methods share a path, such as `GET`, `PUT`, and `DELETE /users/{id}`, probes and findings now update the coverage cells for the method actually used instead of the first endpoint on that path. Findings from SAST lead validation scans on API runs now get their OWASP API category.
 
 - **Finding validation requests**: Requests sent while validating findings now follow the run's target scope and the scan mode's allowed HTTP methods. Redirects that leave the target scope are not followed. These requests also use the configured testing proxy and global HTTP headers. The fallback validation probes, which previously failed without sending anything, now send their requests.
+
+### Housekeeping
+
+- **Shared run services**: Creating, starting, and stopping web and SAST runs now uses shared services for both AESPA's own API and extensions, so both follow the same checks. Existing API behaviour is unchanged.
 
 ## [PR #283] October 16 - Workflow detection, grouped page routes
 
