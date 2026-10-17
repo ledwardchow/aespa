@@ -38,6 +38,7 @@ import { isRetryBusy, retriesByNote } from "./workflowRetries.js";
 import { WebRunSastLeadsTab } from "../../shared/leads/RunLeadsTab.jsx";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
+import { BudgetPausedBanner, RunBudgetMeter, isBudgetReached } from "./RunBudget.jsx";
 import { SastSourceCosts } from "../../shared/ui/SastSourceCosts";
 
 export function TestRunDetail(props) {
@@ -356,6 +357,13 @@ function TestRunContent({
       setError(e.message);
     }
   };
+  const onResumeAfterBudget = async () => {
+    if (run?.phase === "crawling") {
+      setRun(await webRunsApi.resumeWebCrawl(runId));
+      return;
+    }
+    await onResumeThinkingScan();
+  };
   const startCrawl = async (
     startPentestAfterCrawl = false,
     selectedCoverageMode = coverageMode,
@@ -646,9 +654,27 @@ function TestRunContent({
             tokenUsage={tokenUsage}
             tokenExpanded={tokenExpanded}
             setTokenExpanded={setTokenExpanded}
-          />
+          >
+            {run ? (
+              <RunBudgetMeter
+                run={run}
+                tokenUsage={tokenUsage}
+                onRunUpdate={setRun}
+                onError={setError}
+              />
+            ) : null}
+          </TokenUsageBar>
           <SastSourceCosts runId={runId} />
         </div>
+        {run?.status === "paused" && isBudgetReached(run, tokenUsage) ? (
+          <BudgetPausedBanner
+            key={run.llm_budget_usd}
+            run={run}
+            tokenUsage={tokenUsage}
+            onRunUpdate={setRun}
+            onResume={onResumeAfterBudget}
+          />
+        ) : null}
 
         {activeTab === "sitemap" && run && (
           <>

@@ -119,6 +119,9 @@ export const deletePage = (runId, pgId, cascade) =>
 
 export const updateRun = (id, b) => req(`/api/test-runs/${id}`, { method: "PATCH", body: b });
 
+export const updateRunBudget = (id, llmBudgetUsd) =>
+  req(`/api/test-runs/${id}/budget`, { method: "PATCH", body: { llm_budget_usd: llmBudgetUsd } });
+
 export const startThinkingScan = (id, coverageMode) =>
   req(`/api/test-runs/${id}/thinking-scan/start`, {
     method: "POST",

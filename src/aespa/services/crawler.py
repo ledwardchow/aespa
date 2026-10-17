@@ -251,17 +251,18 @@ async def _crawl_task(run_id: int) -> None:
         from aespa.services import llm as llm_svc
 
         if isinstance(exc, llm_svc.LLMQuotaPauseError):
-            log.warning("Crawl paused for quota: run_id=%s: %s", run_id, exc)
+            log.warning("Crawl paused (%s): run_id=%s: %s", exc.reason, run_id, exc)
             from aespa.services import run_pause as run_pause_svc
 
             run_pause_svc.save_pause(
                 "crawl",
                 run_id,
-                provider="openai_codex",
+                provider=run_pause_svc.pause_kind(exc.reason).provider,
                 message=str(exc),
                 reset_at=exc.reset_at,
                 snapshot=exc.snapshot,
                 resume_stage="crawl",
+                reason=exc.reason,
             )
             with Session(get_engine()) as s:
                 run = s.get(TestRun, run_id)
@@ -274,7 +275,7 @@ async def _crawl_task(run_id: int) -> None:
                 run_id,
                 {
                     "type": "scan_paused",
-                    "reason": "quota",
+                    "reason": exc.reason,
                     "message": str(exc),
                     "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
                 },
@@ -811,7 +812,9 @@ async def _do_crawl_inner(run_id: int) -> None:
             if final_status == TestRunStatus.complete
             and _discovery_run is not None
             and _discovery_run.discovery_completeness == "recording"
-            else _discovery_run.discovery_completeness if _discovery_run else "incomplete"
+            else _discovery_run.discovery_completeness
+            if _discovery_run
+            else "incomplete"
         )
     _update_run(
         run_id,
@@ -1709,8 +1712,12 @@ async def _crawl_as_credential(
                         link_items, phase_key, route_is_queued
                     )
                     new_groups = set(shared.route_sampler.groups) - old_groups
-                await asyncio.to_thread(target_catalog.assign_route_patterns, run_id, link_items)
-                await asyncio.to_thread(target_catalog.backfill_group_patterns, run_id, new_groups)
+                await asyncio.to_thread(
+                    target_catalog.assign_route_patterns, run_id, link_items
+                )
+                await asyncio.to_thread(
+                    target_catalog.backfill_group_patterns, run_id, new_groups
+                )
                 await _save_route_sampler(run_id, shared)
                 held_urls = {_norm(item["url"]) for item in link_items} - {
                     _norm(item["url"]) for item in admitted
@@ -1822,8 +1829,12 @@ async def _crawl_as_credential(
                             js_items, phase_key, route_is_queued
                         )
                         new_groups = set(shared.route_sampler.groups) - old_groups
-                    await asyncio.to_thread(target_catalog.assign_route_patterns, run_id, js_items)
-                    await asyncio.to_thread(target_catalog.backfill_group_patterns, run_id, new_groups)
+                    await asyncio.to_thread(
+                        target_catalog.assign_route_patterns, run_id, js_items
+                    )
+                    await asyncio.to_thread(
+                        target_catalog.backfill_group_patterns, run_id, new_groups
+                    )
                     await _save_route_sampler(run_id, shared)
                     held_js = {_norm(item["url"]) for item in js_items} - {
                         _norm(item["url"]) for item in admitted_js

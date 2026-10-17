@@ -14,6 +14,7 @@ export function TestRunForm({ siteId }) {
     crawler_mode: "url",
     page_selection: "each_url",
     llm_profile_id: null,
+    llm_budget_usd: "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -46,6 +47,7 @@ export function TestRunForm({ siteId }) {
         crawler_mode: form.crawler_mode,
         page_selection: form.page_selection,
         llm_profile_id: form.llm_profile_id || null,
+        llm_budget_usd: form.llm_budget_usd === "" ? null : Number(form.llm_budget_usd),
       });
       nav(`#/runs/${run.id}`);
     } catch (e) {
@@ -186,6 +188,26 @@ export function TestRunForm({ siteId }) {
                 </option>
               ))}
             </select>
+          </div>
+          <div className="field">
+            <label>
+              LLM budget{" "}
+              <span className="field-optional">
+                (optional — pauses all LLM work on this run when estimated spend reaches it)
+              </span>
+            </label>
+            <div className="row" style={{ gap: 8 }}>
+              <span>$</span>
+              <input
+                type="number"
+                min="0.01"
+                step="0.01"
+                placeholder="No limit"
+                style={{ width: 160 }}
+                value={form.llm_budget_usd}
+                onChange={(e) => upd({ llm_budget_usd: e.target.value })}
+              />
+            </div>
           </div>
           {error && (
             <div className="alert error form-error" role="alert">

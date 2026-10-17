@@ -48,6 +48,7 @@ from aespa.schemas import (
     StartCrawlBody,
     TargetIntelItemOut,
     TargetIntelSummary,
+    TestRunBudgetUpdate,
     TestRunCreate,
     TestRunSummary,
     TestRunUpdate,
@@ -546,6 +547,21 @@ def update_test_run(
     return _run_summary(run, session)
 
 
+@router.patch("/api/test-runs/{run_id}/budget", response_model=TestRunSummary)
+def update_test_run_budget(
+    run_id: int,
+    payload: TestRunBudgetUpdate,
+    session: Session = Depends(get_session),
+) -> TestRunSummary:
+    """Set or clear the run's LLM budget; allowed while the run is active."""
+    run = _get_run_or_404(session, run_id)
+    run.llm_budget_usd = payload.llm_budget_usd
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return _run_summary(run, session)
+
+
 # ── Crawl control ─────────────────────────────────────────────────────────────
 
 
@@ -631,6 +647,7 @@ async def resume_test_run_crawl(
             status_code=409,
             detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
         )
+    web_runs_svc.reject_resume_over_budget(run)
     await crawler_svc.start_crawl(run_id)
     run_pause_svc.clear_pause("crawl", run_id)
     session.refresh(run)

@@ -64,6 +64,19 @@ def _apply_upstream_proxy(session: Session) -> None:
     )
 
 
+def _alice_pause_message(exc: llm_svc.LLMQuotaPauseError) -> str:
+    if isinstance(exc, llm_svc.LLMBudgetPauseError):
+        return (
+            "This run reached its LLM budget, so AESPA paused this ALICE turn. "
+            f"Raise the budget on the run page to continue. Details: {exc}"
+        )
+    return (
+        "ChatGPT/Codex is temporarily unavailable because its allowance or "
+        "rate-limit window is full. AESPA paused this ALICE turn. Come back "
+        f"after the window resets and try again. Details: {exc}"
+    )
+
+
 def _get_alice_timeout(run_id: int) -> float:  # noqa: ARG001
     """Return the configured request timeout, falling back to the scanner default."""
     from aespa.services.scanner import REQUEST_TIMEOUT
@@ -2982,12 +2995,8 @@ async def run_alice_turn_stream(
                 goal["id"], status="paused", pause_reason=str(exc)
             )
             yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
-        log.info("ALICE Codex allowance exhausted: %s", exc)
-        err_msg = (
-            "ChatGPT/Codex is temporarily unavailable because its allowance or "
-            "rate-limit window is full. AESPA paused this ALICE turn. Come back "
-            f"after the window resets and try again. Details: {exc}"
-        )
+        log.info("ALICE paused: %s", exc)
+        err_msg = _alice_pause_message(exc)
         yield f"data: {json.dumps({'type': 'warning', 'message': err_msg})}\n\n"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err_msg}'})}\n\n"
         accumulated_message += err_msg
@@ -3484,9 +3493,7 @@ def _run_api_context_tool(
                         finding.affected_url or "",
                         endpoints,
                         base,
-                        method=_request_method_from_evidence(
-                            finding.request_evidence
-                        ),
+                        method=_request_method_from_evidence(finding.request_evidence),
                     )
                     if ep is not None:
                         update_coverage_cell(
@@ -4321,12 +4328,8 @@ async def run_api_alice_turn_stream(
                 goal["id"], status="paused", pause_reason=str(exc)
             )
             yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
-        log.info("ALICE API Codex allowance exhausted: %s", exc)
-        err_msg = (
-            "ChatGPT/Codex is temporarily unavailable because its allowance or "
-            "rate-limit window is full. AESPA paused this ALICE turn. Come back "
-            f"after the window resets and try again. Details: {exc}"
-        )
+        log.info("ALICE API paused: %s", exc)
+        err_msg = _alice_pause_message(exc)
         yield f"data: {json.dumps({'type': 'warning', 'message': err_msg})}\n\n"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err_msg}'})}\n\n"
         accumulated_message += err_msg

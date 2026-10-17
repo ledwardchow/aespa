@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,6 +11,38 @@ from sqlmodel import Session, select
 
 from aespa.db import get_engine
 from aespa.models import RunPause
+
+
+@dataclass(frozen=True)
+class PauseKind:
+    provider: str
+    terminal_reason: str
+    specialist_outcome: str
+
+
+PAUSE_KINDS: dict[str, PauseKind] = {
+    "quota": PauseKind(
+        provider="openai_codex",
+        terminal_reason="provider_quota",
+        specialist_outcome="Specialist paused because the LLM allowance was exhausted.",
+    ),
+    "network": PauseKind(
+        provider="llm",
+        terminal_reason="provider_unreachable",
+        specialist_outcome=(
+            "Specialist paused because the LLM provider could not be reached."
+        ),
+    ),
+    "budget": PauseKind(
+        provider="llm",
+        terminal_reason="budget_reached",
+        specialist_outcome="Specialist paused because the run reached its LLM budget.",
+    ),
+}
+
+
+def pause_kind(reason: str) -> PauseKind:
+    return PAUSE_KINDS.get(reason, PAUSE_KINDS["quota"])
 
 
 def _utcnow() -> datetime:

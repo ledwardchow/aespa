@@ -16,7 +16,7 @@ export function fmtCredits(n) {
 
 export { fmtUsd };
 
-export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
+export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded, children }) {
   const hasTokens =
     tokenUsage &&
     (tokenUsage.total_input > 0 ||
@@ -152,6 +152,7 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
                 </span>
               </>
             ) : null}
+            {children}
             {hasCompletedUsage ? (
               <span className="activity-expand-chevron" style={{ marginLeft: 4 }}>
                 {tokenExpanded ? "▲" : "▼"}
@@ -159,7 +160,10 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
             ) : null}
           </>
         ) : (
-          <span className="token-bar-empty">No usage data yet</span>
+          <>
+            <span className="token-bar-empty">No usage data yet</span>
+            {children}
+          </>
         )}
       </div>
       {tokenExpanded && hasCompletedUsage && (

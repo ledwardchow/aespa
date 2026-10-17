@@ -5437,14 +5437,12 @@ async def _run_specialist_agent(
         # An exhausted allowance or an unreachable provider must reach the outer
         # scan task so it can pause the whole run and keep a resumable checkpoint.
         if handoff_id is not None:
+            from aespa.services import run_pause as run_pause_svc
+
             handoff_svc.update_handoff(
                 handoff_id,
                 status="failed",
-                outcome=(
-                    "Specialist paused because the LLM provider could not be reached."
-                    if isinstance(exc, llm_svc.LLMNetworkPauseError)
-                    else "Specialist paused because the LLM allowance was exhausted."
-                ),
+                outcome=run_pause_svc.pause_kind(exc.reason).specialist_outcome,
             )
         raise
     except Exception as exc:
@@ -6550,11 +6548,11 @@ async def _thinking_scan_task(run_id: int) -> None:
         _emit_thinking_status(run_id)
         from aespa.services import run_pause as run_pause_svc
 
-        is_network_pause = isinstance(exc, llm_svc.LLMNetworkPauseError)
+        kind = run_pause_svc.pause_kind(exc.reason)
         run_pause_svc.save_pause(
             "web",
             run_id,
-            provider="llm" if is_network_pause else "openai_codex",
+            provider=kind.provider,
             message=str(exc),
             reset_at=exc.reset_at,
             snapshot=exc.snapshot,
@@ -6567,9 +6565,7 @@ async def _thinking_scan_task(run_id: int) -> None:
                 _run.status = "paused"
                 _run.phase = "scanning"
                 _run.outcome = "paused"
-                _run.terminal_reason = (
-                    "provider_unreachable" if is_network_pause else "provider_quota"
-                )
+                _run.terminal_reason = kind.terminal_reason
                 _run.error_message = str(exc)[:2000]
                 _s.add(_run)
                 _s.commit()

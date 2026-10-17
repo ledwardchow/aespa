@@ -112,6 +112,12 @@ class LLMNetworkPauseError(LLMQuotaPauseError):
     reason = "network"
 
 
+class LLMBudgetPauseError(LLMQuotaPauseError):
+    """The run's estimated LLM spend reached its budget; the run should pause."""
+
+    reason = "budget"
+
+
 # Seconds to wait before each retry of an LLM call that failed with a temporary
 # network or credential-refresh error. Together they ride out a few minutes of
 # lost connectivity (Wi-Fi drop, sleep/wake, DNS hiccup) before pausing.
@@ -317,6 +323,39 @@ def _read_run_concurrency_limit(run_kind: str) -> int:
         return 4
 
 
+def _read_run_budget(run_id: int, run_kind: str) -> float | None:
+    if run_kind != "web":
+        return None
+    from sqlmodel import Session
+
+    from aespa.db import get_engine
+    from aespa.models import TestRun
+
+    with Session(get_engine()) as session:
+        run = session.get(TestRun, run_id)
+        return run.llm_budget_usd if run is not None else None
+
+
+def run_llm_spend_usd(run_id: int, run_kind: str = "web") -> float:
+    """Estimated spend recorded so far for a run, from the live usage bucket."""
+    bucket = _run_token_usage.get((run_kind, run_id))
+    if bucket is None:
+        bucket = _load_bucket_from_db(run_id, run_kind)
+    return _cost_total(bucket, "estimated_total_cost_usd") or 0.0
+
+
+def check_run_budget(run_id: int, run_kind: str = "web") -> None:
+    budget = _read_run_budget(run_id, run_kind)
+    if budget is None:
+        return
+    spend = run_llm_spend_usd(run_id, run_kind)
+    if spend >= budget:
+        raise LLMBudgetPauseError(
+            f"LLM budget reached: ${spend:.2f} spent of ${budget:.2f}.",
+            snapshot={"spend_usd": spend, "budget_usd": budget},
+        )
+
+
 @asynccontextmanager
 async def _run_concurrency_slot():
     """Limit live provider requests for the current DAST or SAST run."""
@@ -331,6 +370,9 @@ async def _run_concurrency_slot():
     gate = _run_concurrency_gates.setdefault(key, _RunConcurrencyGate())
     await gate.acquire(_read_run_concurrency_limit(run_kind))
     try:
+        # Checked after the slot is acquired so a queued call sees the cost of
+        # the call that finished ahead of it.
+        check_run_budget(run_id, run_kind)
         yield
     finally:
         await gate.release()

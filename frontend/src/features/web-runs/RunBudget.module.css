@@ -1,0 +1,78 @@
+.meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.label {
+  color: var(--text-2);
+}
+
+.track {
+  display: inline-block;
+  width: 120px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--border-2);
+  overflow: hidden;
+}
+
+.fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.near .fill,
+.reached .fill {
+  background: var(--warn);
+}
+
+.reached .amount {
+  color: var(--warn);
+}
+
+.input {
+  width: 90px;
+}
+
+.unpriced {
+  color: var(--warn);
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--warn);
+  border-radius: 0;
+  background: rgba(245, 166, 35, 0.08);
+  font-size: 12px;
+}
+
+.bannerText {
+  flex: 1;
+  min-width: 240px;
+  color: var(--text-2);
+}
+
+.bannerTitle {
+  color: var(--warn);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.bannerField {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+}
+
+.error {
+  flex-basis: 100%;
+  color: var(--danger);
+}

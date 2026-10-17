@@ -1416,6 +1416,11 @@ class TestRunCreate(BaseModel):
     page_selection: Literal["each_url", "group_similar"] = "each_url"
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
+    llm_budget_usd: float | None = Field(default=None, gt=0)
+
+
+class TestRunBudgetUpdate(BaseModel):
+    llm_budget_usd: float | None = Field(default=None, gt=0)
 
 
 class TestRunUpdate(BaseModel):
@@ -1487,6 +1492,7 @@ class TestRunSummary(BaseModel):
     scanner_policy: dict = Field(default_factory=dict)
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
+    llm_budget_usd: float | None = None
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
     scope_hosts: list[str] = Field(default_factory=list)

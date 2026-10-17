@@ -903,6 +903,8 @@ class TestRun(SQLModel, table=True):
     llm_config_id: Optional[int] = Field(default=None, foreign_key="llm_config.id")
     # Per-run model-mixing profile (null = use the globally active profile).
     llm_profile_id: Optional[int] = Field(default=None, foreign_key="llm_profile.id")
+    # Estimated LLM spend in USD at which all LLM work on the run pauses.
+    llm_budget_usd: Optional[float] = Field(default=None)
     # Cached JSON attack-surface/coverage projection; the UI rebuilds it live.
     recon_summary: Optional[str] = Field(default=None)
     # Persisted token usage, including per-model estimated costs.

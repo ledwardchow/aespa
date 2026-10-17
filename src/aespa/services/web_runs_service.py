@@ -77,11 +77,29 @@ def create_run(session: Session, site_id: int, payload: TestRunCreate) -> TestRu
         scanner_policy_json="{}",
         llm_config_id=payload.llm_config_id,
         llm_profile_id=payload.llm_profile_id,
+        llm_budget_usd=payload.llm_budget_usd,
     )
     session.add(run)
     session.commit()
     session.refresh(run)
     return run
+
+
+def reject_resume_over_budget(run: TestRun) -> None:
+    """Refuse to resume a run whose estimated LLM spend is at its budget."""
+    if run.llm_budget_usd is None:
+        return
+    from aespa.services import llm as llm_svc
+
+    spend = llm_svc.run_llm_spend_usd(run.id)
+    if spend >= run.llm_budget_usd:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This run has spent ${spend:.2f} of its ${run.llm_budget_usd:.2f} "
+                "LLM budget. Raise the budget to resume."
+            ),
+        )
 
 
 def _scan_mode_group(coverage_mode: str) -> str:

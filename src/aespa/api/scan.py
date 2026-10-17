@@ -184,6 +184,7 @@ async def resume_thinking_scan(
         )
     if scanner_svc.is_thinking_running(run_id):
         raise HTTPException(status_code=409, detail="Dynamic Scan already running")
+    web_runs_svc.reject_resume_over_budget(run)
     status = checkpoint_svc.checkpoint_status(run_id)
     if not status["exists"] and run.coverage_mode not in {"deep", "team"}:
         raise HTTPException(status_code=404, detail="No checkpoint found for this run")

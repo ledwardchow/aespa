@@ -2013,6 +2013,18 @@
             "title": "Crawler Mode",
             "type": "string"
           },
+          "llm_budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Budget Usd"
+          },
           "llm_config_id": {
             "anyOf": [
               {
