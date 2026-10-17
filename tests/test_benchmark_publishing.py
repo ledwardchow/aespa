@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-from aespa.models import UpstreamProxyConfig
+from aespa.models import LLMPriceCatalog, SastRun, Site, TestRun, UpstreamProxyConfig
 from tests import test_benchmark_transfer as transfer_tests
 from tests.test_benchmark_lab import enabled_benchmarking  # noqa: F401
 from tests.test_benchmark_transfer import seed
@@ -49,6 +49,84 @@ def test_graph_export_keeps_only_summary_and_stable_identity(portable):
     assert "SQL injection" not in serialized
     assert "ground_truth" not in result
     assert "findings" not in result
+
+
+def test_publish_prices_fast_calls_at_normal_rates_and_preserves_comment(
+    portable, db_engine
+):
+    models, _, stores = portable
+    seed(models, stores[0])
+    with Session(db_engine) as core:
+        core.add(Site(name="Bank", base_url="https://bank.test"))
+        core.add(
+            LLMPriceCatalog(
+                provider="openai_chatgpt_plan",
+                model="test-model",
+                input_price_usd_per_million=1,
+            )
+        )
+        core.commit()
+        run = TestRun(
+            site_id=1,
+            name="Scan",
+            token_usage_json=json.dumps(
+                {
+                    "test-model": {
+                        "provider": "openai_chatgpt_plan",
+                        "input": 3_000_000,
+                        "estimated_cost_available": True,
+                        "estimated_total_cost_usd": 3,
+                    },
+                    "test-model#fast": {
+                        "provider": "openai_chatgpt_plan",
+                        "model": "test-model",
+                        "service_tier": "fast",
+                        "input": 1_000_000,
+                        "estimated_cost_available": True,
+                        "estimated_total_cost_usd": 2,
+                    },
+                }
+            ),
+        )
+        sast = SastRun(
+            name="Source scan",
+            token_usage_json=json.dumps(
+                {
+                    "test-model#fast": {
+                        "provider": "openai_chatgpt_plan",
+                        "model": "test-model",
+                        "service_tier": "fast",
+                        "input": 1_000_000,
+                        "estimated_cost_available": True,
+                        "estimated_total_cost_usd": 4,
+                    }
+                }
+            ),
+        )
+        core.add_all([run, sast])
+        core.commit()
+        run_id, sast_id = run.id, sast.id
+    with stores[0].session() as session:
+        row = session.exec(select(models.ScanResult)).one()
+        row.run_id = run_id
+        saved = json.loads(row.rows_json)
+        saved["scan_models"]["sast"] = [{"run_id": sast_id}]
+        saved["scan_cost_usd"] = 9
+        saved["scan_cost_breakdown"] = {"complete": True}
+        saved["comment"] = "Reviewed by Alice."
+        row.rows_json = json.dumps(saved)
+        session.add(row)
+        session.commit()
+
+    first = modules().graph_bundle(stores[0])["results"][0]
+    second = modules().graph_bundle(stores[0])["results"][0]
+    assert first == second
+    assert first["scan_cost_usd"] == 5
+    assert first["comment"] == (
+        "Reviewed by Alice.\n\nRun used Fast mode. Estimated scan cost with Fast mode: "
+        "$9.00000000. Published scan cost uses Normal mode pricing."
+    )
+    assert first["comment"].count("Run used Fast mode") == 1
 
 
 def test_matched_score_weights_full_and_partial_matches():

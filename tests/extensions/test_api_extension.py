@@ -1135,6 +1135,76 @@ def _set_sast(run_id, **values):
         session.commit()
 
 
+def _set_web(run_id, **values):
+    with Session(get_engine()) as session:
+        run = session.get(TestRun, run_id)
+        for key, value in values.items():
+            setattr(run, key, value)
+        session.add(run)
+        session.commit()
+
+
+def test_resume_paused_web_crawl(api):
+    token = _token(api)
+    scan = api.client.post(
+        f"{BASE}/v1/web/scans", headers=_auth(token), json={"site": _site()}
+    ).json()
+    run_id = int(scan["id"].split("-")[1])
+    url = f"{BASE}/v1/scans/{scan['id']}"
+    resume = f"{BASE}/v1/web/scans/{scan['id']}/resume"
+    assert scan["resumable"] is False
+    assert api.client.post(resume, headers=_auth(token)).status_code == 409
+
+    _set_web(run_id, status="paused", phase="crawling")
+    run_pause.save_pause(
+        "crawl", run_id, provider="openai", message="Rate limited", resume_stage="crawl"
+    )
+    assert api.client.get(url, headers=_auth(token)).json()["resumable"] is True
+    assert api.client.post(resume, headers=_auth(_token(api, scopes=["sast"]))).status_code == 403
+    assert api.client.post(resume, headers=_auth(_token(api, scopes=["web"]))).status_code == 404
+
+    resumed = api.client.post(resume, headers=_auth(token))
+    assert resumed.status_code == 200, resumed.text
+    assert api.started["crawl"] == [run_id, run_id]
+    assert api.started["scheduled"] == [run_id, run_id]
+    assert run_pause.get_pause("crawl", run_id) is None
+    assert resumed.json()["resumable"] is False
+
+
+def test_resume_paused_web_dynamic_scan(api, monkeypatch):
+    token = _token(api)
+    scan = api.client.post(
+        f"{BASE}/v1/web/scans", headers=_auth(token), json={"site": _site()}
+    ).json()
+    run_id = int(scan["id"].split("-")[1])
+    resume = f"{BASE}/v1/web/scans/{scan['id']}/resume"
+    calls = []
+
+    async def fake_resume(value):
+        calls.append(value)
+
+    monkeypatch.setattr("aespa.services.scanner.start_thinking_scan_resume", fake_resume)
+    monkeypatch.setattr(
+        "aespa.services.checkpoint.checkpoint_status",
+        lambda value: {"exists": value == run_id},
+    )
+    _set_web(run_id, status="paused", phase="scanning")
+    run_pause.save_pause("web", run_id, provider="openai", message="Rate limited")
+    response = api.client.post(resume, headers=_auth(token))
+    assert response.status_code == 200, response.text
+    assert calls == [run_id]
+    assert run_pause.get_pause("web", run_id) is None
+
+
+def test_web_resume_rejects_sast_scan(api):
+    token = _token(api)
+    scan = _upload(api, token).json()
+    response = api.client.post(
+        f"{BASE}/v1/web/scans/{scan['id']}/resume", headers=_auth(token)
+    )
+    assert response.status_code == 409
+
+
 def test_resume_paused_sast_scan(api):
     token = _token(api)
     scan = _upload(api, token).json()
@@ -1169,7 +1239,7 @@ def test_resume_is_only_for_sast_scans(api):
     web = api.client.post(
         f"{BASE}/v1/web/scans", headers=_auth(token), json={"site": _site()}
     ).json()
-    assert web["resumable"] is None
+    assert web["resumable"] is False
     response = api.client.post(
         f"{BASE}/v1/sast/scans/{web['id']}/resume", headers=_auth(token)
     )

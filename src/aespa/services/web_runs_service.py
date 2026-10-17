@@ -8,14 +8,18 @@ match the other run services.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from aespa.models import CrawledPage, Credential, Site, TestRun, TestRunStatus
 from aespa.schemas import StartCrawlBody, TestRunCreate
+from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import crawl_then_pentest
+from aespa.services import crawl_workflows as crawl_workflows_svc
 from aespa.services import crawler as crawler_svc
+from aespa.services import run_pause as run_pause_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import settings as settings_service
 from aespa.services.settings import get_llm_config_for_run
@@ -100,6 +104,95 @@ def reject_resume_over_budget(run: TestRun) -> None:
                 "LLM budget. Raise the budget to resume."
             ),
         )
+
+
+def resumable_stage(run: TestRun) -> str | None:
+    """Find the saved web work that can continue without clearing run data."""
+    if crawler_svc.is_running(run.id) or scanner_svc.is_thinking_running(run.id):
+        return None
+    if crawl_then_pentest.is_pending(run.id):
+        return None
+    crawl_pause = run_pause_svc.get_pause("crawl", run.id)
+    if run.status == "paused" and crawl_pause is not None:
+        return "crawl"
+    scan_pause = run_pause_svc.get_pause("web", run.id)
+    checkpoint = checkpoint_svc.checkpoint_status(run.id)["exists"]
+    if scan_pause is not None and run.status == "paused":
+        return "scan" if checkpoint or run.coverage_mode in {"deep", "team"} else None
+    if run.phase in {"scanning", "validating", "reporting"} and (
+        checkpoint or run.coverage_mode in {"deep", "team"}
+    ):
+        return "scan"
+    return None
+
+
+async def resume_crawl(
+    session: Session, run_id: int, *, scan_after_crawl: bool = False
+) -> TestRun:
+    run = get_run(session, run_id)
+    if crawl_workflows_svc.workflow_retry_status(run_id)["status"] == "running":
+        raise HTTPException(status_code=409, detail="Wait for workflows to finish.")
+    pause = run_pause_svc.get_pause("crawl", run_id)
+    if pause is None or run.status != "paused":
+        raise HTTPException(status_code=409, detail="Crawl is not paused")
+    if pause.reset_at and pause.reset_at > datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=409,
+            detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
+        )
+    reject_resume_over_budget(run)
+    crawl_task = await crawler_svc.start_crawl(run_id)
+    if scan_after_crawl:
+        crawl_then_pentest.schedule(run_id, crawl_task)
+    run_pause_svc.clear_pause("crawl", run_id)
+    session.refresh(run)
+    return run
+
+
+async def resume_scan(session: Session, run_id: int) -> dict:
+    run = get_run(session, run_id)
+    pause = run_pause_svc.get_pause("web", run_id)
+    if pause is not None and pause.reset_at and pause.reset_at > datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=409,
+            detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
+        )
+    if crawler_svc.is_running(run_id):
+        raise HTTPException(
+            status_code=409, detail="Crawl is still running — wait for it to finish"
+        )
+    if scanner_svc.is_thinking_running(run_id):
+        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
+    reject_resume_over_budget(run)
+    checkpoint = checkpoint_svc.checkpoint_status(run_id)
+    if not checkpoint["exists"] and run.coverage_mode not in {"deep", "team"}:
+        raise HTTPException(status_code=404, detail="No checkpoint found for this run")
+    if run.coverage_mode == "sast_validate":
+        _require_sast_leads(run_id)
+    else:
+        try:
+            from aespa.services.web_workprogram import seed_web_workprogram
+
+            seed_web_workprogram(run_id)
+        except Exception:
+            pass
+    await scanner_svc.start_thinking_scan_resume(run_id)
+    if pause is not None:
+        run_pause_svc.clear_pause("web", run_id)
+    return scanner_svc.get_thinking_scan_status(run_id)
+
+
+async def resume(
+    session: Session, run_id: int, *, scan_after_crawl: bool = False
+) -> None:
+    run = get_run(session, run_id)
+    stage = resumable_stage(run)
+    if stage == "crawl":
+        await resume_crawl(session, run_id, scan_after_crawl=scan_after_crawl)
+    elif stage == "scan":
+        await resume_scan(session, run_id)
+    else:
+        raise HTTPException(status_code=409, detail="This web scan cannot be resumed")
 
 
 def _scan_mode_group(coverage_mode: str) -> str:

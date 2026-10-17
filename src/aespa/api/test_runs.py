@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -643,23 +642,7 @@ async def resume_test_run_crawl(
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
     """Resume a quota-paused crawl using its persisted crawl artifacts."""
-    run = _get_run_or_404(session, run_id)
-    if crawl_workflows_svc.workflow_retry_status(run_id)["status"] == "running":
-        raise HTTPException(status_code=409, detail="Wait for workflows to finish.")
-    from aespa.services import run_pause as run_pause_svc
-
-    pause = run_pause_svc.get_pause("crawl", run_id)
-    if pause is None or run.status != "paused":
-        raise HTTPException(status_code=409, detail="Crawl is not paused")
-    if pause.reset_at and pause.reset_at > datetime.now(timezone.utc):
-        raise HTTPException(
-            status_code=409,
-            detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
-        )
-    web_runs_svc.reject_resume_over_budget(run)
-    await crawler_svc.start_crawl(run_id)
-    run_pause_svc.clear_pause("crawl", run_id)
-    session.refresh(run)
+    run = await web_runs_svc.resume_crawl(session, run_id)
     return _run_summary(run, session)
 
 

@@ -165,48 +165,7 @@ async def resume_thinking_scan(
     run_id: int, session: Session = Depends(get_session)
 ) -> dict:
     """Resume an interrupted dynamic scan from the last saved checkpoint."""
-    run = _get_run_or_404(session, run_id)
-    from aespa.services import run_pause as run_pause_svc
-
-    pause = run_pause_svc.get_pause("web", run_id)
-    if pause is not None:
-        if pause.reset_at and pause.reset_at > datetime.now(timezone.utc):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": pause.message,
-                    "reset_at": pause.reset_at.isoformat(),
-                },
-            )
-    if crawler_svc.is_running(run_id):
-        raise HTTPException(
-            status_code=409, detail="Crawl is still running — wait for it to finish"
-        )
-    if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-    web_runs_svc.reject_resume_over_budget(run)
-    status = checkpoint_svc.checkpoint_status(run_id)
-    if not status["exists"] and run.coverage_mode not in {"deep", "team"}:
-        raise HTTPException(status_code=404, detail="No checkpoint found for this run")
-    if run.coverage_mode == "sast_validate":
-        from aespa.services.scan_leads import get_leads_for_run
-
-        if not get_leads_for_run("web", run_id):
-            raise HTTPException(
-                status_code=409,
-                detail="No open imported SAST leads are available to validate",
-            )
-    else:
-        try:
-            from aespa.services.web_workprogram import seed_web_workprogram
-
-            seed_web_workprogram(run_id)
-        except Exception:
-            pass
-    await scanner_svc.start_thinking_scan_resume(run_id)
-    if pause is not None:
-        run_pause_svc.clear_pause("web", run_id)
-    return scanner_svc.get_thinking_scan_status(run_id)
+    return await web_runs_svc.resume_scan(session, run_id)
 
 
 @router.delete("/api/test-runs/{run_id}/findings/{finding_id}", status_code=204)

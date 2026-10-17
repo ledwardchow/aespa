@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 import re
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -77,13 +78,25 @@ def model_summary(value) -> dict | None:
 
 
 def token_counts(core, row, models: dict) -> dict | None:
+    totals = {key: 0 for key in ("input", "output", "cache_read", "cache_write")}
+    recorded = False
+    for _, entry in run_usage(core, row, models):
+        for key in totals:
+            value = entry.get(key)
+            if type(value) is int and value >= 0:
+                totals[key] += value
+                recorded = True
+    return totals if recorded else None
+
+
+def run_usage(core, row, models: dict):
     from aespa.models import ApiTestRun, SastRun, TestRun
 
     if row.run_id <= 0:
-        return None
+        return
     run_type = {"site": TestRun, "api": ApiTestRun, "sast": SastRun}.get(row.run_kind)
     if run_type is None:
-        return None
+        return
     runs = [core.get(run_type, row.run_id)]
     if row.run_kind != "sast":
         source_ids = {
@@ -92,21 +105,71 @@ def token_counts(core, row, models: dict) -> dict | None:
             if isinstance(source, dict) and isinstance(source.get("run_id"), int)
         }
         runs.extend(core.get(SastRun, source_id) for source_id in sorted(source_ids))
-    totals = {key: 0 for key in ("input", "output", "cache_read", "cache_write")}
-    recorded = False
     for run in runs:
         usage = json.loads(run.token_usage_json or "{}") if run else {}
         if not isinstance(usage, dict):
             continue
-        for entry in usage.values():
-            if not isinstance(entry, dict):
-                continue
-            for key in totals:
-                value = entry.get(key)
-                if type(value) is int and value >= 0:
-                    totals[key] += value
-                    recorded = True
-    return totals if recorded else None
+        for key, entry in usage.items():
+            if isinstance(entry, dict):
+                yield key, entry
+
+
+def published_price_and_comment(core, row, models: dict, result: dict):
+    from aespa.services.statistics import _rates_for, estimate_usage_cost
+
+    cost = result.get("scan_cost_usd")
+    comment = result.get("comment") or ""
+    fast_cost = 0.0
+    normal_cost = 0.0
+    fast_found = False
+    complete = True
+    for key, entry in run_usage(core, row, models):
+        if not entry.get("service_tier"):
+            continue
+        fast_found = True
+        recorded = entry.get("estimated_total_cost_usd")
+        if (
+            not entry.get("estimated_cost_available")
+            or type(recorded) not in (int, float)
+            or not math.isfinite(recorded)
+        ):
+            complete = False
+            continue
+        fast_cost += recorded
+        provider = entry.get("provider")
+        model = entry.get("model") or key.split("#", 1)[0]
+        if not provider or not model:
+            complete = False
+            continue
+        standard = estimate_usage_cost(
+            provider,
+            input_tokens=entry.get("input", 0),
+            output_tokens=entry.get("output", 0),
+            cache_read_tokens=entry.get("cache_read", 0),
+            cache_write_tokens=entry.get("cache_write", 0),
+            ai_credits=entry.get("ai_credits", 0),
+            factory_credits=entry.get("factory_credits", 0),
+            rates=_rates_for(core, provider, model),
+        )
+        if not standard["estimated_cost_available"]:
+            complete = False
+            continue
+        normal_cost += standard["estimated_total_cost_usd"]
+    if not fast_found:
+        return cost, comment
+    price_available = complete and type(cost) in (int, float) and math.isfinite(cost)
+    note = (
+        f"Run used Fast mode. Estimated scan cost with Fast mode: ${cost:.8f}. "
+        "Published scan cost uses Normal mode pricing."
+        if price_available
+        else "Run used Fast mode. A complete Fast mode price is unavailable."
+    )
+    if note not in comment:
+        comment = f"{comment.rstrip()}\n\n{note}".strip()
+    return (
+        round(cost - fast_cost + normal_cost, 8) if price_available else None,
+        comment,
+    )
 
 
 def graph_bundle(store, dataset_ids: set[int] | None = None) -> dict:
@@ -125,6 +188,9 @@ def graph_bundle(store, dataset_ids: set[int] | None = None) -> dict:
                 continue
             models = result.get("scan_models") or {}
             sources = models.get("sast") or []
+            published_cost, comment = published_price_and_comment(
+                core, row, models, result
+            )
             output.append(
                 {
                     "id": identity(session, "results", row).key,
@@ -142,13 +208,13 @@ def graph_bundle(store, dataset_ids: set[int] | None = None) -> dict:
                     if row.run_kind != "sast"
                     else [],
                     "scan_started_at": timestamp(result.get("scan_started_at")),
-                    "scan_cost_usd": result.get("scan_cost_usd"),
+                    "scan_cost_usd": published_cost,
                     "tokens": token_counts(core, row, models),
                     "summary": result["summary"],
                     "score": result["score"],
                     "category_counts": result["category_counts"],
                     "category_totals": result["category_totals"],
-                    "comment": result["comment"],
+                    "comment": comment,
                     "updated_at": timestamp(row.updated_at),
                 }
             )

@@ -119,7 +119,13 @@ def _web_percent(session: Session, run_id: int) -> int | None:
 
 
 def _web_progress(session: Session, run: TestRun, scan_after_crawl: bool) -> dict:
-    from aespa.services import crawl_then_pentest, crawler, scanner, validator
+    from aespa.services import (
+        crawl_then_pentest,
+        crawler,
+        scanner,
+        validator,
+        web_runs_service,
+    )
 
     run_id = run.id
     crawling = crawler.is_running(run_id)
@@ -190,6 +196,8 @@ def _web_progress(session: Session, run: TestRun, scan_after_crawl: bool) -> dic
             "findings": _severity_counts(list(findings)),
         },
         "needs_action": needs_action,
+        "resumable": state not in {"running", "needs_action"}
+        and web_runs_service.resumable_stage(run) is not None,
         "error": run.error_message if state == "failed" else None,
         "created_at": _iso(run.created_at),
         "started_at": _iso(run.started_at),

@@ -1547,7 +1547,7 @@
                 "type": "null"
               }
             ],
-            "description": "SAST: true when POST /sast/scans/{scan_id}/resume can continue the scan from its saved progress. Null for web scans.",
+            "description": "True when the matching web or SAST resume route can continue the scan from its saved progress.",
             "title": "Resumable"
           },
           "scan_after_crawl": {
@@ -5058,6 +5058,103 @@
           }
         ],
         "summary": "Create and start a web scan",
+        "tags": [
+          "Web scans"
+        ],
+        "x-aespa-scopes": [
+          "web"
+        ]
+      }
+    },
+    "/v1/web/scans/{scan_id}/resume": {
+      "post": {
+        "description": "Continue a paused crawl or dynamic scan from its saved progress. AESPA chooses which stage to resume. Check resumable in the scan status first.",
+        "operationId": "resumeWebScan",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Resume a web scan",
         "tags": [
           "Web scans"
         ],

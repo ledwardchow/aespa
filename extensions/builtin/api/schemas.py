@@ -329,8 +329,8 @@ class ScanStatus(BaseModel):
     resumable: bool | None = Field(
         default=None,
         description=(
-            "SAST: true when POST /sast/scans/{scan_id}/resume can continue the scan "
-            "from its saved progress. Null for web scans."
+            "True when the matching web or SAST resume route can continue the scan "
+            "from its saved progress."
         ),
     )
     error: str | None

@@ -93,6 +93,8 @@ curl -sf -X POST "$BASE/web/scans" \
 - Passwords, TOTP seeds, and sensitive login field values are never returned.
 - Accounts with `auth_mode: "guided"` need a person to sign in at the AESPA browser window. They are rejected unless you set `unattended: false`. When AESPA is waiting for a person, the scan's state is `needs_action`.
 
+If a crawl or dynamic scan pauses, check `resumable` in its status. When it is `true`, call `POST /web/scans/{scan_id}/resume`. AESPA continues the saved stage and keeps the existing crawl and scan results. If the scan was set to start after the crawl, it still starts when the resumed crawl finishes. A rate limit may prevent resume until its reset time; the response includes `reset_at` when known. A run that has reached its LLM budget needs a higher budget before it can resume.
+
 If a scan is created but cannot start, for example because no LLM is configured, the error includes its `scan_id`. Fix the problem and call `POST /scans/{scan_id}/start`.
 
 ## Following a scan
@@ -106,7 +108,7 @@ curl -s "$BASE/scans/sast-17" -H "Authorization: Bearer $AESPA_TOKEN"
 | `state` | `queued`, `preparing`, `running`, `needs_action`, `paused`, `completed`, `failed`, or `stopped` |
 | `phase` | Web: `crawling`, `scanning`, `reviewing`, `crawled`, `finished`. SAST: `preparing_source`, `analyzing`, `finished` |
 | `percent` | Share of planned tests done, or `null` when AESPA cannot measure it |
-| `resumable` | SAST only: `true` when the scan can be resumed from its saved progress |
+| `resumable` | `true` when the web or SAST scan can continue from saved progress |
 | `message`, `error`, `needs_action` | What is happening, why it failed, or what a person must do |
 | `counts.findings` | Findings so far by severity |
 

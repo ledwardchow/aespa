@@ -769,6 +769,29 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         return status_for(row)
 
     @router.post(
+        "/v1/web/scans/{scan_id}/resume",
+        response_model=ScanStatus,
+        operation_id="resumeWebScan",
+        summary="Resume a web scan",
+        description=(
+            "Continue a paused crawl or dynamic scan from its saved progress. "
+            "AESPA chooses which stage to resume. Check resumable in the scan status first."
+        ),
+        tags=["Web scans"],
+        responses=ERRORS,
+        openapi_extra=_scopes("web"),
+    )
+    async def resume_web_scan(
+        scan_id: ScanIdPath,
+        caller: Caller = Depends(require("web")),
+    ):
+        row = scans.get_visible(store, core, caller, scan_id)
+        if row.kind != "web":
+            raise HTTPException(status_code=409, detail="This is not a web scan.")
+        await core.web.resume(row.run_id, scan_after_crawl=row.scan_after_crawl)
+        return status_for(row)
+
+    @router.post(
         "/v1/sast/scans/{scan_id}/resume",
         response_model=ScanStatus,
         operation_id="resumeSastScan",

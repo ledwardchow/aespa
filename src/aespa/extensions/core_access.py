@@ -196,6 +196,12 @@ class WebRunAccess:
         with _session() as session:
             await web_runs.start_scan(session, run_id, coverage_mode=coverage_mode)
 
+    async def resume(self, run_id: int, *, scan_after_crawl: bool = False) -> None:
+        with _session() as session:
+            await web_runs.resume(
+                session, run_id, scan_after_crawl=scan_after_crawl
+            )
+
     def stop(self, run_id: int) -> bool:
         with _session() as session:
             return web_runs.stop(session, run_id)
