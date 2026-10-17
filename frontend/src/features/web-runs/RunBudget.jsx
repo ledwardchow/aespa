@@ -53,7 +53,7 @@ export function RunBudgetMeter({ run, tokenUsage, onRunUpdate, onError }) {
       <span className={styles.meter} onClick={stop}>
         <span className="token-bar-sep">·</span>
         <span className={styles.label}>Budget</span>
-        <span className={styles.amount}>$</span>
+        <span className="token-bar-cost">$</span>
         <input
           className={styles.input}
           type="number"
@@ -100,8 +100,11 @@ export function RunBudgetMeter({ run, tokenUsage, onRunUpdate, onError }) {
       <span className={styles.track}>
         <span className={styles.fill} style={{ width: `${Math.round(share * 100)}%` }} />
       </span>
-      <span className={styles.amount}>
-        {fmtUsd(spend)} of {fmtUsd(budget)}
+      <span
+        className={`token-bar-cost ${styles.amount}`}
+        title="Estimated cost based on recorded usage and model pricing"
+      >
+        ≈{fmtUsd(spend)} of {fmtUsd(budget)}
       </span>
       <button type="button" className={styles.link} onClick={() => setDraft(String(budget))}>
         Edit

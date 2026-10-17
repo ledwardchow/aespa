@@ -16,7 +16,13 @@ export function fmtCredits(n) {
 
 export { fmtUsd };
 
-export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded, children }) {
+export function TokenUsageBar({
+  tokenUsage,
+  tokenExpanded,
+  setTokenExpanded,
+  hideEstimatedCost = false,
+  children,
+}) {
   const hasTokens =
     tokenUsage &&
     (tokenUsage.total_input > 0 ||
@@ -141,7 +147,7 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded, chi
                 ) : null}
               </>
             ) : null}
-            {hasEstimatedCost ? (
+            {hasEstimatedCost && !hideEstimatedCost ? (
               <>
                 <span className="token-bar-sep">·</span>
                 <span

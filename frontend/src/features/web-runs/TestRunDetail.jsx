@@ -654,6 +654,7 @@ function TestRunContent({
             tokenUsage={tokenUsage}
             tokenExpanded={tokenExpanded}
             setTokenExpanded={setTokenExpanded}
+            hideEstimatedCost={run?.llm_budget_usd != null}
           >
             {run ? (
               <RunBudgetMeter

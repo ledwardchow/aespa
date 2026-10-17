@@ -13,12 +13,6 @@
   letter-spacing: 0.5px;
 }
 
-.amount {
-  font-weight: 600;
-  color: var(--text-2);
-  font-variant-numeric: tabular-nums;
-}
-
 .link {
   padding: 0;
   border: 0;
