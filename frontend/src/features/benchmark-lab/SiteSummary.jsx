@@ -7,6 +7,7 @@ import { paretoFrontier } from "./paretoFrontier.js";
 import { linearFit } from "./linearFit.js";
 import { scanType } from "./scanPresentation.js";
 import { placeSingleScanLabels, placeTrendLabels } from "./trendLabels.js";
+import { modelBadges } from "./modelBadges.js";
 
 const shortModelName = (model) => {
   const name = model?.name || model?.model;
@@ -727,6 +728,13 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
             style={{ left: hovered.left, top: hovered.top }}
           >
             <strong>{hovered.result.run_name}</strong>
+            {modelBadges(hovered.result.scan_models?.primary).length > 0 && (
+              <div className="benchmark-tooltip-badges">
+                {modelBadges(hovered.result.scan_models?.primary).map((label) => (
+                  <span className="benchmark-model-badge" key={label}>{label}</span>
+                ))}
+              </div>
+            )}
             <span className={styles.tooltipType}>
               {scanType(hovered.result.run_kind, hovered.result.scan_models)}
               {hovered.result.run_id ? ` · Scan #${hovered.result.run_id}` : ""}

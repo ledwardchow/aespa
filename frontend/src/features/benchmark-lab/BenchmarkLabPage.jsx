@@ -13,6 +13,7 @@ import { GroundTruthDatasets } from "./GroundTruthDatasets.jsx";
 import { CompletedScanBenchmarks } from "./CompletedScanBenchmarks.jsx";
 import { SiteSummary, modelName, money } from "./SiteSummary.jsx";
 import { BenchmarkResultComment } from "./BenchmarkResultComment.jsx";
+import { modelBadges } from "./modelBadges.js";
 
 import styles from "./BenchmarkSettings.module.css";
 import { scanType } from "./scanPresentation.js";
@@ -25,10 +26,6 @@ const modelLabel = (model) => {
     return `${model.name} (${model.model})`;
   return model.model || model.name || "Unavailable";
 };
-const daybreakLabel = (model) =>
-  (model?.daybreak_programs || [])
-    .filter((program) => ["daybreak_blue", "daybreak_red"].includes(program))
-    .map((program) => (program === "daybreak_blue" ? "Daybreak Blue" : "Daybreak Red"));
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "informational"];
 
 function groupGroundTruth(items, groupBy) {
@@ -295,8 +292,8 @@ export function BenchmarkLabPage({ initialResultId }) {
           {selectedResult.run_kind !== "sast" && (
             <p className="subtle">
               Scan model: {modelLabel(selectedResult.scan_models.primary)}{" "}
-              {daybreakLabel(selectedResult.scan_models.primary).map((label) => (
-                <span className="benchmark-daybreak-badge" key={label}>{label}</span>
+              {modelBadges(selectedResult.scan_models.primary).map((label) => (
+                <span className="benchmark-model-badge" key={label}>{label}</span>
               ))}
             </p>
           )}

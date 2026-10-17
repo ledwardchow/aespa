@@ -106,6 +106,18 @@ test("shows recorded Daybreak programs on a saved result", async () => {
   expect(screen.getByText("Daybreak Red")).toBeTruthy();
 });
 
+test("shows Glasswing only for the Claude CLI Mythos result", async () => {
+  const result = await benchmarkApi.createBenchmarkResult();
+  result.scan_models.primary = {
+    model: "claude-mythos-5",
+    name: "claude-mythos-5",
+    provider: "claude_cli",
+  };
+  benchmarkApi.listBenchmarkResults.mockResolvedValue([result]);
+  render(<BenchmarkLabPage initialResultId={4} />);
+  expect(await screen.findByText("Glasswing")).toBeTruthy();
+});
+
 test("saves the default model in Settings and removes per-run selection", async () => {
   const user = userEvent.setup();
   render(<BenchmarkLabPage />);

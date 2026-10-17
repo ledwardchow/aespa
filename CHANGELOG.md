@@ -16,7 +16,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
-- **Daybreak benchmark labels**: Benchmark results now show which Daybreak program a scan used when the provider reports or accepts one. Published results include the program for the main scan model. Codex checks available programs for each model before requesting one. A one-time script can label older saved benchmark results after showing a preview and making a database backup. ChatGPT text streams and Codex tool calls now save the program used by the run.
+- **Benchmark model badges**: Benchmark results show which Daybreak program an OpenAI scan used, and Mythos results show a Glasswing badge. Published results include the Daybreak program for the main scan model. Codex checks available programs for each model before requesting one. A one-time script can label older saved benchmark results after showing a preview and making a database backup. ChatGPT text streams and Codex tool calls save the program used by the run.
 
 - **Benchmark prices for Fast mode scans**: Published results use Normal mode prices for Fast mode calls so scan costs can be compared. The result comment also shows the estimated scan cost with Fast mode.
 

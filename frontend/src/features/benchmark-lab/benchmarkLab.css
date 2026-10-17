@@ -602,7 +602,7 @@
 .content.benchmark-summary-page {
   overflow: hidden;
 }
-.benchmark-daybreak-badge {
+.benchmark-model-badge {
   display: inline-block;
   margin-left: 6px;
   padding: 2px 7px;
@@ -611,4 +611,12 @@
   font-size: 0.78em;
   font-weight: 600;
   white-space: nowrap;
+}
+.benchmark-tooltip-badges {
+  display: flex;
+  gap: 4px;
+  margin: 6px 0 2px;
+}
+.benchmark-tooltip-badges .benchmark-model-badge {
+  margin-left: 0;
 }
