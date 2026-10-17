@@ -58,6 +58,7 @@ from .schemas import (
     SourceScanCreate,
     StopResult,
     Summary,
+    TokenInfo,
     WebScanCreate,
 )
 
@@ -129,15 +130,20 @@ class ScanStartBody(BaseModel):
     )
 
 
+ScanAccess = Literal["own", "all"]
+
+
 class TokenCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     scopes: list[Literal["sast", "web", "sites"]] = Field(min_length=1)
+    scan_access: ScanAccess = "own"
     webhook_url: str | None = None
 
 
 class TokenUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     scopes: list[Literal["sast", "web", "sites"]] | None = None
+    scan_access: ScanAccess | None = None
     webhook_url: str | None = Field(
         default=None, description="An empty string removes the default webhook."
     )
@@ -160,11 +166,14 @@ def _token_out(row: ApiToken) -> dict[str, Any]:
         "name": row.name,
         "prefix": row.token_prefix,
         "scopes": token_scopes(row),
+        "scan_access": row.scan_access,
+        "active": row.deactivated_at is None,
+        "can_show_token": bool(row.token_value),
         "webhook_url": row.webhook_url,
         "has_webhook_secret": bool(row.webhook_secret),
         "created_at": _iso(row.created_at),
         "last_used_at": _iso(row.last_used_at),
-        "revoked_at": _iso(row.revoked_at),
+        "deactivated_at": _iso(row.deactivated_at),
     }
 
 
@@ -562,6 +571,27 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
 
         return await run_create(caller, idempotency_key, digest, create)
 
+    # ── The calling token ───────────────────────────────────────────────────
+
+    @router.get(
+        "/v1/token",
+        response_model=TokenInfo,
+        operation_id="getToken",
+        summary="Describe the token sending the request",
+        description="Shows the token's scopes and which scans it can see.",
+        tags=["Tokens"],
+        responses=ERRORS,
+    )
+    def get_token(caller: Caller = Depends(require())):
+        with store.session() as session:
+            row = session.get(ApiToken, caller.token_id)
+        return {
+            "name": row.name,
+            "prefix": row.token_prefix,
+            "scopes": token_scopes(row),
+            "scan_access": row.scan_access,
+        }
+
     # ── LLM profiles ────────────────────────────────────────────────────────
 
     @router.get(
@@ -586,7 +616,12 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         "/v1/scans",
         response_model=ScanList,
         operation_id="listScans",
-        summary="List scans created with this token",
+        summary="List the scans this token can see",
+        description=(
+            "Newest first. A token set to its own scans sees only scans it created. "
+            "A token set to all scans sees every web or SAST scan its scopes allow, "
+            "including scans started in AESPA; those have no callbacks."
+        ),
         tags=["Scans"],
         responses=ERRORS,
     )
@@ -596,18 +631,14 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         limit: int = Query(25, ge=1, le=100),
         caller: Caller = Depends(require()),
     ):
-        with store.session() as session:
-            query = select(ApiScan).where(ApiScan.token_id == caller.token_id)
-            if kind:
-                query = query.where(ApiScan.kind == kind)
-            rows = session.exec(query.order_by(ApiScan.id.desc())).all()
+        rows, total = scans.list_visible(store, core, caller, kind, offset, limit)
         items = []
-        for row in rows[offset : offset + limit]:
+        for row in rows:
             try:
                 items.append(status_for(row))
             except HTTPException:
                 continue  # The run was deleted in AESPA.
-        return {"items": items, "total": len(rows), "offset": offset, "limit": limit}
+        return {"items": items, "total": total, "offset": offset, "limit": limit}
 
     @router.get(
         "/v1/scans/{scan_id}",
@@ -631,7 +662,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         if_none_match: str | None = Header(default=None, alias="If-None-Match"),
         caller: Caller = Depends(require()),
     ):
-        row = scans.get_owned(store, caller, scan_id)
+        row = scans.get_visible(store, core, caller, scan_id)
 
         def current() -> tuple[dict[str, Any], str]:
             body = status_for(row)
@@ -674,7 +705,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         scan_id: ScanIdPath,
         caller: Caller = Depends(require()),
     ):
-        row = scans.get_owned(store, caller, scan_id)
+        row = scans.get_visible(store, core, caller, scan_id)
         _require_kind_scope(caller, row)
         if row.kind == "web":
             await start_web(row)
@@ -699,7 +730,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         ),
         caller: Caller = Depends(require("web")),
     ):
-        row = scans.get_owned(store, caller, scan_id)
+        row = scans.get_visible(store, core, caller, scan_id)
         if row.kind != "web":
             raise HTTPException(status_code=409, detail="This is not a web scan.")
         coverage_mode = (
@@ -726,7 +757,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         scan_id: ScanIdPath,
         caller: Caller = Depends(require("sast")),
     ):
-        row = scans.get_owned(store, caller, scan_id)
+        row = scans.get_visible(store, core, caller, scan_id)
         if row.kind != "sast":
             raise HTTPException(status_code=409, detail="This is not a SAST scan.")
         await core.sast.resume(row.run_id)
@@ -741,7 +772,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         responses=ERRORS,
     )
     async def stop_scan(scan_id: ScanIdPath, caller: Caller = Depends(require())):
-        row = scans.get_owned(store, caller, scan_id)
+        row = scans.get_visible(store, core, caller, scan_id)
         _require_kind_scope(caller, row)
         if row.kind == "web":
             stopped = core.web.stop(row.run_id)
@@ -764,7 +795,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         limit: int = Query(100, ge=1, le=500),
         caller: Caller = Depends(require()),
     ):
-        row = scans.get_owned(store, caller, scan_id)
+        row = scans.get_visible(store, core, caller, scan_id)
         items = core.runs.activity(row.run_id, after=after, limit=limit)
         return {
             "items": items,
@@ -813,7 +844,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         limit: int = Query(100, ge=1, le=500),
         caller: Caller = Depends(require()),
     ):
-        row = scans.get_owned(store, caller, scan_id)
+        row = scans.get_visible(store, core, caller, scan_id)
         items = _findings(row, severity, include_dismissed)
         progress = core.runs.progress(row.run_id, scan_after_crawl=row.scan_after_crawl)
         return {
@@ -841,7 +872,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         include_dismissed: bool = False,
         caller: Caller = Depends(require()),
     ):
-        row = scans.get_owned(store, caller, scan_id)
+        row = scans.get_visible(store, core, caller, scan_id)
         items = _findings(row, None, include_dismissed)
         status = status_for(row)
         duration = None
@@ -893,7 +924,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         ),
         caller: Caller = Depends(require()),
     ):
-        row = scans.get_owned(store, caller, scan_id)
+        row = scans.get_visible(store, core, caller, scan_id)
         if row.kind == "web":
             document = core.runs.web_sarif(
                 row.run_id, include_false_positives=include_dismissed
@@ -917,7 +948,9 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         responses=ERRORS,
     )
     def list_deliveries(scan_id: ScanIdPath, caller: Caller = Depends(require())):
-        row = scans.get_owned(store, caller, scan_id)
+        row = scans.get_visible(store, core, caller, scan_id)
+        if row.id is None:
+            return []
         with store.session() as session:
             rows = session.exec(
                 select(ApiDelivery)
@@ -940,8 +973,16 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
                 select(ApiDelivery).where(ApiDelivery.delivery_id == delivery_id)
             ).first()
             owner = session.get(ApiScan, item.scan_id) if item else None
-            if item is None or owner is None or owner.token_id != caller.token_id:
+            if item is None or owner is None:
                 raise HTTPException(status_code=404, detail="Delivery not found")
+            try:
+                scans.get_visible(
+                    store, core, caller, scans.scan_id(owner.kind, owner.run_id)
+                )
+            except HTTPException:
+                raise HTTPException(
+                    status_code=404, detail="Delivery not found"
+                ) from None
             item.status = "pending"
             item.attempts = 0
             item.next_attempt_at = now()
@@ -980,7 +1021,9 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
             name=payload.name.strip(),
             token_hash=hash_token(token),
             token_prefix=token[:12],
+            token_value=token,
             scopes_json=json.dumps(sorted(set(payload.scopes))),
+            scan_access=payload.scan_access,
             webhook_url=webhook_url,
             webhook_secret=secret,
         )
@@ -1009,6 +1052,8 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
                         status_code=422, detail="Choose at least one scope."
                     )
                 row.scopes_json = json.dumps(sorted(set(payload.scopes)))
+            if payload.scan_access is not None:
+                row.scan_access = payload.scan_access
             if payload.webhook_url is not None:
                 row.webhook_url = _check_webhook_url(payload.webhook_url)
                 if row.webhook_url and not row.webhook_secret:
@@ -1027,16 +1072,37 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
             session.commit()
             return {"webhook_secret": row.webhook_secret}
 
-    @router.post("/admin/tokens/{token_id}/revoke", **admin_only)
-    def admin_revoke_token(token_id: int) -> dict:
+    def _set_active(token_id: int, active: bool) -> dict:
         with store.session() as session:
             row = _admin_token(session, token_id)
-            if row.revoked_at is None:
-                row.revoked_at = now()
+            if active != (row.deactivated_at is None):
+                row.deactivated_at = None if active else now()
                 session.add(row)
                 session.commit()
                 session.refresh(row)
             return _token_out(row)
+
+    @router.post("/admin/tokens/{token_id}/deactivate", **admin_only)
+    def admin_deactivate_token(token_id: int) -> dict:
+        return _set_active(token_id, False)
+
+    @router.post("/admin/tokens/{token_id}/reactivate", **admin_only)
+    def admin_reactivate_token(token_id: int) -> dict:
+        return _set_active(token_id, True)
+
+    @router.get("/admin/tokens/{token_id}/token", **admin_only)
+    def admin_show_token(token_id: int) -> dict:
+        with store.session() as session:
+            row = _admin_token(session, token_id)
+        if not row.token_value:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This token was created before AESPA kept tokens, so it can't "
+                    "be shown. Create a new token to replace it."
+                ),
+            )
+        return {"token": row.token_value}
 
     @router.get("/admin/deliveries", **admin_only)
     def admin_recent_deliveries(

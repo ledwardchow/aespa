@@ -79,13 +79,57 @@ def status_payload(core, row: ApiScan) -> dict[str, Any]:
     return payload
 
 
-def get_owned(store: ExtensionDataStore, caller: Caller, value: str) -> ApiScan:
+def get_visible(store: ExtensionDataStore, core, caller: Caller, value: str) -> ApiScan:
+    """The scan with this ID, if the caller may see it.
+
+    A scan started in AESPA has no row of its own, so it is returned as an
+    unsaved row with no callbacks.
+    """
     kind, run_id = parse_scan_id(value)
     with store.session() as session:
         row = session.exec(select(ApiScan).where(ApiScan.run_id == run_id)).first()
-    if row is None or row.kind != kind or row.token_id != caller.token_id:
+    if row is not None and row.kind == kind and row.token_id == caller.token_id:
+        return row
+    if not caller.sees_all_scans or kind not in caller.scopes:
         raise HTTPException(status_code=404, detail="Scan not found")
-    return row
+    if row is not None and row.kind == kind:
+        return row
+    if row is None and core.runs.kind(run_id) == kind:
+        return ApiScan(run_id=run_id, kind=kind, token_id=0)
+    raise HTTPException(status_code=404, detail="Scan not found")
+
+
+def list_visible(
+    store: ExtensionDataStore,
+    core,
+    caller: Caller,
+    kind: str | None,
+    offset: int,
+    limit: int,
+) -> tuple[list[ApiScan], int]:
+    """Scans the caller may see, newest first, with the total."""
+    if not caller.sees_all_scans:
+        with store.session() as session:
+            query = select(ApiScan).where(ApiScan.token_id == caller.token_id)
+            if kind:
+                query = query.where(ApiScan.kind == kind)
+            rows = session.exec(query.order_by(ApiScan.id.desc())).all()
+        return list(rows[offset : offset + limit]), len(rows)
+    kinds = {k for k in ("web", "sast") if k in caller.scopes and kind in (None, k)}
+    page, total = core.runs.list_runs(kinds, offset=offset, limit=limit)
+    with store.session() as session:
+        saved = {
+            row.run_id: row
+            for row in session.exec(
+                select(ApiScan).where(
+                    ApiScan.run_id.in_([run_id for _, run_id in page])
+                )
+            ).all()
+        }
+    return [
+        saved.get(run_id) or ApiScan(run_id=run_id, kind=run_kind, token_id=0)
+        for run_kind, run_id in page
+    ], total
 
 
 def record_scan(

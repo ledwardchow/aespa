@@ -33,6 +33,7 @@ bearer = HTTPBearer(
 class Caller:
     token_id: int
     scopes: frozenset[str]
+    sees_all_scans: bool = False
 
 
 def aware(value: datetime | None) -> datetime | None:
@@ -72,10 +73,10 @@ def authenticate(store: ExtensionDataStore, token: str | None) -> Caller:
         row = session.exec(
             select(ApiToken).where(ApiToken.token_hash == hash_token(token))
         ).first()
-        if row is None or row.revoked_at is not None:
+        if row is None or row.deactivated_at is not None:
             raise HTTPException(
                 status_code=401,
-                detail="The API token is not valid or has been revoked.",
+                detail="The API token is not valid or has been turned off.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         current = now()
@@ -84,7 +85,7 @@ def authenticate(store: ExtensionDataStore, token: str | None) -> Caller:
             row.last_used_at = current
             session.add(row)
             session.commit()
-        return Caller(row.id, frozenset(token_scopes(row)))
+        return Caller(row.id, frozenset(token_scopes(row)), row.scan_access == "all")
 
 
 def scope_dependency(store: ExtensionDataStore):

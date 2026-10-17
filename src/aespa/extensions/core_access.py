@@ -200,6 +200,9 @@ class WebRunAccess:
             return run.site_id if run else None
 
 
+RUN_TABLES = (("web", TestRun), ("sast", SastRun))
+
+
 class RunReadAccess:
     """Read progress and results for web and SAST runs."""
 
@@ -248,6 +251,23 @@ class RunReadAccess:
             return run_results.web_sarif(
                 session, run_id, include_false_positives=include_false_positives
             )
+
+    def list_runs(
+        self, kinds: set[str], *, offset: int = 0, limit: int = 25
+    ) -> tuple[list[tuple[str, int]], int]:
+        """Web and SAST runs of the given kinds, newest first, with the total."""
+        tables = [(kind, table) for kind, table in RUN_TABLES if kind in kinds]
+        with _session() as session:
+            runs = [
+                (created_at, run_id, kind)
+                for kind, table in tables
+                for run_id, created_at in session.exec(
+                    select(table.id, table.created_at)
+                ).all()
+            ]
+        runs.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        page = [(kind, run_id) for _, run_id, kind in runs[offset : offset + limit]]
+        return page, len(runs)
 
     def sast_run_exists(self, run_id: int) -> bool:
         with _session() as session:

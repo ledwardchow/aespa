@@ -32,7 +32,9 @@ Create Sites, start web and SAST scans, follow their progress, and read results.
 **Authentication.** Send `Authorization: Bearer <token>`. Create tokens on the
 API extension's settings page in AESPA. Each token has scopes: `sast` for SAST
 scans, `web` for web scans, and `sites` to create or change Sites. A token sees
-only the scans it created. Any `sites` token can read and change every Site.
+either only the scans it created or, if set to see all scans, every web or SAST
+scan its scopes allow, including scans started in AESPA. Any `sites` token can
+read and change every Site.
 
 **Scan IDs** look like `web-42` or `sast-17`.
 
@@ -51,6 +53,7 @@ class ApiExtension:
     def register(self, registry) -> None:
         registry.register_settings_fields(SETTINGS)
         store = registry.data_store(models.metadata)
+        models.upgrade(store.engine)
         core = registry.core
         registry.register_api_router(
             build_router(store, core),

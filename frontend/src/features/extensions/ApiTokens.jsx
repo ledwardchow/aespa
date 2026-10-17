@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import * as integrationApi from "../../shared/api/integrationApi.js";
-import { API_PERMISSIONS, permissionLabels } from "./apiPermissions.js";
+import { API_PERMISSIONS, SCAN_ACCESS, permissionLabels } from "./apiPermissions.js";
 
 function formatDate(value) {
   return value ? new Date(value).toLocaleString() : "Never";
@@ -33,6 +33,7 @@ function OneTimeValue({ label, value }) {
 function CreateTokenForm({ onCreated }) {
   const [name, setName] = useState("");
   const [scopes, setScopes] = useState(["sast"]);
+  const [scanAccess, setScanAccess] = useState("own");
   const [webhookUrl, setWebhookUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -50,6 +51,7 @@ function CreateTokenForm({ onCreated }) {
       const created = await integrationApi.createApiToken({
         name,
         scopes,
+        scan_access: scanAccess,
         webhook_url: webhookUrl || null,
       });
       setName("");
@@ -90,6 +92,25 @@ function CreateTokenForm({ onCreated }) {
           </label>
         ))}
       </fieldset>
+      <fieldset className="api-token-scopes">
+        <legend>Scans it can see</legend>
+        {SCAN_ACCESS.map((option) => (
+          <label key={option.value} className="checkbox-row">
+            <input
+              type="radio"
+              name="api-token-scan-access"
+              value={option.value}
+              checked={scanAccess === option.value}
+              onChange={() => setScanAccess(option.value)}
+            />
+            <span>{option.label}</span>
+          </label>
+        ))}
+        <div className="subtle" style={{ fontSize: 12 }}>
+          All scans includes scans started here in AESPA and by other tokens, limited to the scan
+          types this token is allowed to run.
+        </div>
+      </fieldset>
       <div className="field">
         <label htmlFor="api-token-webhook">Default callback URL (optional)</label>
         <input
@@ -112,12 +133,12 @@ function CreateTokenForm({ onCreated }) {
   );
 }
 
-function TokenRow({ token, onChanged, onSecret }) {
+function TokenRow({ token, onChanged, onSecret, onShowToken }) {
   const [editing, setEditing] = useState(false);
   const [webhookUrl, setWebhookUrl] = useState(token.webhook_url || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const revoked = Boolean(token.revoked_at);
+  const active = token.active;
 
   const run = async (action) => {
     setBusy(true);
@@ -148,6 +169,25 @@ function TokenRow({ token, onChanged, onSecret }) {
         </code>
       </td>
       <td className="subtle">{permissionLabels(token.scopes)}</td>
+      <td>
+        <select
+          aria-label={`Scans ${token.name} can see`}
+          value={token.scan_access}
+          disabled={busy}
+          onChange={(event) =>
+            run(async () => {
+              await integrationApi.updateApiToken(token.id, { scan_access: event.target.value });
+              onChanged();
+            })
+          }
+        >
+          {SCAN_ACCESS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.short}
+            </option>
+          ))}
+        </select>
+      </td>
       <td className="subtle">{formatDate(token.last_used_at)}</td>
       <td className="subtle api-token-webhook">
         {editing ? (
@@ -172,53 +212,80 @@ function TokenRow({ token, onChanged, onSecret }) {
         ) : null}
       </td>
       <td>
-        <span className={`badge ${revoked ? "danger" : "success"}`}>
-          {revoked ? "Revoked" : "Active"}
-        </span>
+        <span className={`badge ${active ? "success" : "danger"}`}>{active ? "On" : "Off"}</span>
       </td>
       <td>
-        {revoked ? null : (
-          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+          {token.can_show_token ? (
             <button
               className="btn secondary sm"
               type="button"
               disabled={busy}
-              onClick={() => setEditing((value) => !value)}
+              onClick={() =>
+                run(async () => {
+                  const shown = await integrationApi.showApiToken(token.id);
+                  onShowToken(token.name, shown.token);
+                })
+              }
             >
-              {editing ? "Cancel" : "Change callback"}
+              Show token
             </button>
-            {token.has_webhook_secret ? (
-              <button
-                className="btn secondary sm"
-                type="button"
-                disabled={busy}
-                onClick={() =>
-                  run(async () => {
-                    const rotated = await integrationApi.rotateWebhookSecret(token.id);
-                    onSecret(token.name, rotated.webhook_secret);
-                  })
-                }
-              >
-                New callback secret
-              </button>
-            ) : null}
+          ) : null}
+          <button
+            className="btn secondary sm"
+            type="button"
+            disabled={busy}
+            onClick={() => setEditing((value) => !value)}
+          >
+            {editing ? "Cancel" : "Change callback"}
+          </button>
+          {token.has_webhook_secret ? (
+            <button
+              className="btn secondary sm"
+              type="button"
+              disabled={busy}
+              onClick={() =>
+                run(async () => {
+                  const rotated = await integrationApi.rotateWebhookSecret(token.id);
+                  onSecret(token.name, rotated.webhook_secret);
+                })
+              }
+            >
+              New callback secret
+            </button>
+          ) : null}
+          {active ? (
             <button
               className="btn secondary sm"
               type="button"
               disabled={busy}
               onClick={() => {
-                if (window.confirm(`Revoke ${token.name}? Apps using it will stop working.`)) {
+                if (window.confirm(`Turn off ${token.name}? Apps using it stop working until you turn it back on.`)) {
                   run(async () => {
-                    await integrationApi.revokeApiToken(token.id);
+                    await integrationApi.deactivateApiToken(token.id);
                     onChanged();
                   });
                 }
               }}
             >
-              Revoke
+              Turn off
             </button>
-          </div>
-        )}
+          ) : (
+            <button
+              className="btn sm"
+              type="button"
+              disabled={busy}
+              onClick={() =>
+                run(async () => {
+                  await integrationApi.reactivateApiToken(token.id);
+                  onChanged();
+                })
+              }
+            >
+              Turn on
+            </button>
+          )}
+        </div>
       </td>
     </tr>
   );
@@ -247,8 +314,8 @@ export function ApiTokens() {
     <section className="card api-tokens" aria-label="API tokens">
       <div className="form-section-title">API tokens</div>
       <div className="subtle" style={{ marginTop: 4 }}>
-        Apps send a token in the Authorization header. Each token sees only the scans it created.
-        Tokens can only be managed here, on this computer.
+        Apps send a token in the Authorization header. A token sees either only the scans it
+        created or all scans, as set below. Tokens can only be managed here, on this computer.
       </div>
       {error ? (
         <div className="alert error" style={{ marginTop: 12 }}>
@@ -257,7 +324,9 @@ export function ApiTokens() {
       ) : null}
       {shown ? (
         <div className="alert success" style={{ marginTop: 16 }}>
-          <div>Copy {shown.title} now. It will not be shown again.</div>
+          <div>
+            Copy {shown.title} now. {shown.note}
+          </div>
           {shown.values.map((item) => (
             <OneTimeValue key={item.label} label={item.label} value={item.value} />
           ))}
@@ -276,6 +345,7 @@ export function ApiTokens() {
               <tr>
                 <th>Name</th>
                 <th>Permissions</th>
+                <th>Scans it can see</th>
                 <th>Last used</th>
                 <th>Callback URL</th>
                 <th>Status</th>
@@ -288,9 +358,17 @@ export function ApiTokens() {
                   key={token.id}
                   token={token}
                   onChanged={load}
+                  onShowToken={(name, value) =>
+                    setShown({
+                      title: `the token for ${name}`,
+                      note: "",
+                      values: [{ label: "Token", value }],
+                    })
+                  }
                   onSecret={(name, secret) =>
                     setShown({
                       title: `the callback secret for ${name}`,
+                      note: "It will not be shown again.",
                       values: [{ label: "Callback secret", value: secret }],
                     })
                   }
@@ -309,6 +387,9 @@ export function ApiTokens() {
         onCreated={(created) => {
           setShown({
             title: `the token for ${created.name}`,
+            note: created.webhook_secret
+              ? "You can show the token again later, but not the callback secret."
+              : "You can show it again later from the list below.",
             values: [
               { label: "Token", value: created.token },
               ...(created.webhook_secret

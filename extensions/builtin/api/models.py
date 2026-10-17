@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import MetaData, UniqueConstraint
+from sqlalchemy import Engine, MetaData, UniqueConstraint, inspect, text
 from sqlmodel import Field, SQLModel
 
 
@@ -21,20 +21,26 @@ class ExtensionModel(SQLModel):
 
 
 class ApiToken(ExtensionModel, table=True):
-    """An access token. Only a SHA-256 hash of the token is kept."""
+    """An access token. Requests are matched on the SHA-256 hash."""
 
     __tablename__ = "integrationapi_token"
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     token_hash: str = Field(index=True, unique=True)
     token_prefix: str
+    # Kept so the settings page can show the token again. Null for tokens
+    # created before AESPA kept them.
+    token_value: Optional[str] = None
     scopes_json: str = "[]"
+    # "own": only scans this token created. "all": every scan of a kind its
+    # scopes allow, including scans started in AESPA.
+    scan_access: str = "own"
     webhook_url: Optional[str] = None
     # Kept in clear text because AESPA needs it to sign callbacks.
     webhook_secret: Optional[str] = None
     created_at: datetime = Field(default_factory=now)
     last_used_at: Optional[datetime] = None
-    revoked_at: Optional[datetime] = None
+    deactivated_at: Optional[datetime] = None
 
 
 class ApiScan(ExtensionModel, table=True):
@@ -89,3 +95,35 @@ class ApiIdempotency(ExtensionModel, table=True):
     status_code: Optional[int] = None
     response_json: Optional[str] = None
     created_at: datetime = Field(default_factory=now, index=True)
+
+
+# Columns added after the first release, with the SQL that adds each one to an
+# existing database.
+_ADDED_COLUMNS = {
+    "integrationapi_token": {
+        "token_value": "VARCHAR",
+        "scan_access": "VARCHAR NOT NULL DEFAULT 'own'",
+        "deactivated_at": "DATETIME",
+    },
+}
+
+
+def upgrade(engine: Engine) -> None:
+    """Bring an existing database up to the current tables. Safe to repeat."""
+    inspector = inspect(engine)
+    with engine.begin() as connection:
+        for table, columns in _ADDED_COLUMNS.items():
+            existing = {column["name"] for column in inspector.get_columns(table)}
+            for name, ddl in columns.items():
+                if name not in existing:
+                    connection.execute(
+                        text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                    )
+            if "revoked_at" in existing:
+                # Revoked tokens from before tokens could be turned back on.
+                connection.execute(
+                    text(
+                        f"UPDATE {table} SET deactivated_at = revoked_at "
+                        "WHERE revoked_at IS NOT NULL AND deactivated_at IS NULL"
+                    )
+                )

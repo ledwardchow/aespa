@@ -9,7 +9,14 @@ The API extension lets CI pipelines and other tools create Sites, run web and SA
    - **SAST scans** (`sast`)
    - **Web scans** (`web`)
    - **Create and change Sites** (`sites`)
-3. Copy the token. AESPA shows it only once.
+3. Choose which scans it can see:
+   - **Only scans it creates**. This is the default.
+   - **All scans in AESPA**: every web or SAST scan its permissions allow, including scans started in AESPA itself and by other tokens. Scans started in AESPA have no callbacks.
+4. Copy the token. You can show it again later from the token list, on this computer only.
+
+Turn a token off to stop apps from using it, and turn it back on when needed. Its settings and scans are kept while it is off.
+
+`GET /token` returns the token's name, permissions (`scopes`), and which scans it can see (`scan_access`: `own` or `all`).
 
 Send the token with every request:
 
@@ -21,7 +28,7 @@ curl -H "Authorization: Bearer $AESPA_TOKEN" http://127.0.0.1:8000/extension/aes
 
 AESPA has no login, and its own `/api` routes are open to anyone who can reach it. Tokens protect only this API. To let a CI runner reach AESPA, publish just `/extension/aespa.api/v1/` through a reverse proxy or tunnel, and keep everything else private. Token management refuses requests that come from another machine or carry proxy forwarding headers, so manage tokens in AESPA on its own computer.
 
-A token sees only the scans it created. Any token with the `sites` permission can read and change every Site.
+A token sees the scans it created, or all scans if it is set to. Any token with the `sites` permission can read and change every Site.
 
 ## SAST scan from a ZIP file
 

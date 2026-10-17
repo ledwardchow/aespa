@@ -6,6 +6,12 @@ export const API_PERMISSIONS = [
   { value: "sites", label: "Sites" },
 ];
 
+// Which scans a token can see through the API.
+export const SCAN_ACCESS = [
+  { value: "own", label: "Only scans it creates", short: "Own scans" },
+  { value: "all", label: "All scans in AESPA", short: "All scans" },
+];
+
 export function permissionLabels(values = []) {
   return values
     .map((value) => API_PERMISSIONS.find((item) => item.value === value)?.label || value)

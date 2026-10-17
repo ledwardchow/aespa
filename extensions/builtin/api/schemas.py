@@ -410,6 +410,20 @@ class Delivery(BaseModel):
     next_attempt_at: str | None
 
 
+class TokenInfo(BaseModel):
+    """The token that sent the request."""
+
+    name: str
+    prefix: str = Field(description="The first characters of the token.")
+    scopes: list[Scope]
+    scan_access: Literal["own", "all"] = Field(
+        description=(
+            "own: only scans this token created. all: every web or SAST scan its "
+            "scopes allow, including scans started in AESPA."
+        )
+    )
+
+
 class LlmProfile(BaseModel):
     """A scan profile: which LLM models AESPA uses for a scan."""
 

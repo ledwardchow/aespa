@@ -154,7 +154,7 @@ test("settings page shows the definition only for extensions that publish one", 
   expect(screen.queryByText("API tokens")).toBeNull();
 });
 
-test("a new token is shown once and the list reloads", async () => {
+test("a new token is shown and the list reloads", async () => {
   const user = userEvent.setup();
   integrationApi.createApiToken.mockResolvedValue({
     id: 1,
@@ -167,16 +167,64 @@ test("a new token is shown once and the list reloads", async () => {
 
   await user.type(screen.getByLabelText("Name"), "CI");
   await user.click(screen.getByLabelText("Web scans"));
+  await user.click(screen.getByLabelText("All scans in AESPA"));
   await user.click(screen.getByRole("button", { name: "Create token" }));
 
   expect(integrationApi.createApiToken).toHaveBeenCalledWith({
     name: "CI",
     scopes: ["sast", "web"],
+    scan_access: "all",
     webhook_url: null,
   });
   expect(await screen.findByDisplayValue("aespa_example")).toBeTruthy();
-  expect(screen.getByText(/It will not be shown again/)).toBeTruthy();
+  expect(screen.getByText(/You can show it again later/)).toBeTruthy();
   expect(integrationApi.listApiTokens).toHaveBeenCalledTimes(2);
+});
+
+const savedToken = {
+  id: 7,
+  name: "CI",
+  prefix: "aespa_abc123",
+  scopes: ["sast"],
+  scan_access: "own",
+  active: true,
+  can_show_token: true,
+  webhook_url: null,
+  has_webhook_secret: false,
+  last_used_at: null,
+};
+
+test("a saved token can be shown, turned off and on, and set to see all scans", async () => {
+  const user = userEvent.setup();
+  integrationApi.listApiTokens.mockResolvedValue([savedToken]);
+  integrationApi.showApiToken.mockResolvedValue({ token: "aespa_saved" });
+  integrationApi.deactivateApiToken.mockResolvedValue({ ...savedToken, active: false });
+  integrationApi.updateApiToken.mockResolvedValue({ ...savedToken, scan_access: "all" });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<ApiTokens />);
+  expect(await screen.findByText("On")).toBeTruthy();
+
+  await user.click(screen.getByRole("button", { name: "Show token" }));
+  expect(await screen.findByDisplayValue("aespa_saved")).toBeTruthy();
+  expect(integrationApi.showApiToken).toHaveBeenCalledWith(7);
+
+  await user.selectOptions(screen.getByLabelText("Scans CI can see"), "all");
+  expect(integrationApi.updateApiToken).toHaveBeenCalledWith(7, { scan_access: "all" });
+
+  integrationApi.listApiTokens.mockResolvedValue([{ ...savedToken, active: false }]);
+  await user.click(screen.getByRole("button", { name: "Turn off" }));
+  expect(integrationApi.deactivateApiToken).toHaveBeenCalledWith(7);
+  expect(await screen.findByText("Off")).toBeTruthy();
+
+  await user.click(screen.getByRole("button", { name: "Turn on" }));
+  expect(integrationApi.reactivateApiToken).toHaveBeenCalledWith(7);
+});
+
+test("a token saved before tokens were kept has no Show button", async () => {
+  integrationApi.listApiTokens.mockResolvedValue([{ ...savedToken, can_show_token: false }]);
+  render(<ApiTokens />);
+  expect(await screen.findByText("On")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Show token" })).toBeNull();
 });
 
 test("nested objects open in place and link to their Data objects entry", async () => {

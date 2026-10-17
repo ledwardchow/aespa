@@ -1970,6 +1970,49 @@
         "title": "Summary",
         "type": "object"
       },
+      "TokenInfo": {
+        "description": "The token that sent the request.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "The first characters of the token.",
+            "title": "Prefix",
+            "type": "string"
+          },
+          "scan_access": {
+            "description": "own: only scans this token created. all: every web or SAST scan its scopes allow, including scans started in AESPA.",
+            "enum": [
+              "own",
+              "all"
+            ],
+            "title": "Scan Access",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "enum": [
+                "sast",
+                "web",
+                "sites"
+              ],
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "prefix",
+          "scopes",
+          "scan_access"
+        ],
+        "title": "TokenInfo",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -2241,7 +2284,7 @@
     }
   },
   "info": {
-    "description": "Create Sites, start web and SAST scans, follow their progress, and read results.\n\n**Authentication.** Send `Authorization: Bearer <token>`. Create tokens on the\nAPI extension's settings page in AESPA. Each token has scopes: `sast` for SAST\nscans, `web` for web scans, and `sites` to create or change Sites. A token sees\nonly the scans it created. Any `sites` token can read and change every Site.\n\n**Scan IDs** look like `web-42` or `sast-17`.\n\n**Following a scan.** Poll `GET /v1/scans/{scan_id}` (use `wait` and\n`If-None-Match` to avoid tight loops), or set `callbacks` when you create the\nscan and AESPA will POST signed events to your URL.\n\n**Access.** AESPA has no login of its own and its main `/api` routes are open to\nanyone who can reach it. Tokens protect this API when you publish only\n`/extension/aespa.api/v1/` through a reverse proxy or tunnel. Token management\nis only available from AESPA on the same computer.\n",
+    "description": "Create Sites, start web and SAST scans, follow their progress, and read results.\n\n**Authentication.** Send `Authorization: Bearer <token>`. Create tokens on the\nAPI extension's settings page in AESPA. Each token has scopes: `sast` for SAST\nscans, `web` for web scans, and `sites` to create or change Sites. A token sees\neither only the scans it created or, if set to see all scans, every web or SAST\nscan its scopes allow, including scans started in AESPA. Any `sites` token can\nread and change every Site.\n\n**Scan IDs** look like `web-42` or `sast-17`.\n\n**Following a scan.** Poll `GET /v1/scans/{scan_id}` (use `wait` and\n`If-None-Match` to avoid tight loops), or set `callbacks` when you create the\nscan and AESPA will POST signed events to your URL.\n\n**Access.** AESPA has no login of its own and its main `/api` routes are open to\nanyone who can reach it. Tokens protect this API when you publish only\n`/extension/aespa.api/v1/` through a reverse proxy or tunnel. Token management\nis only available from AESPA on the same computer.\n",
     "title": "AESPA API",
     "version": "1.0.0"
   },
@@ -2809,6 +2852,7 @@
     },
     "/v1/scans": {
       "get": {
+        "description": "Newest first. A token set to its own scans sees only scans it created. A token set to all scans sees every web or SAST scan its scopes allow, including scans started in AESPA; those have no callbacks.",
         "operationId": "listScans",
         "parameters": [
           {
@@ -2922,7 +2966,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "List scans created with this token",
+        "summary": "List the scans this token can see",
         "tags": [
           "Scans"
         ]
@@ -4574,6 +4618,83 @@
         ],
         "x-aespa-scopes": [
           "sites"
+        ]
+      }
+    },
+    "/v1/token": {
+      "get": {
+        "description": "Shows the token's scopes and which scans it can see.",
+        "operationId": "getToken",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Describe the token sending the request",
+        "tags": [
+          "Tokens"
         ]
       }
     },

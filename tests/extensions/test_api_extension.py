@@ -263,7 +263,7 @@ def test_openapi_is_not_published_while_disabled(api):
 # ── Tokens ───────────────────────────────────────────────────────────────────
 
 
-def test_tokens_scopes_and_revocation(api):
+def test_tokens_scopes_and_turning_off(api):
     token = _token(api, scopes=["sast"])
     assert api.client.get(f"{BASE}/v1/scans").status_code == 401
     assert (
@@ -277,9 +277,160 @@ def test_tokens_scopes_and_revocation(api):
     assert "token" not in listed[0]
     assert token.startswith(listed[0]["prefix"])
     assert listed[0]["last_used_at"] is not None
+    assert (listed[0]["active"], listed[0]["scan_access"]) == (True, "own")
 
-    api.client.post(f"{BASE}/admin/tokens/{listed[0]['id']}/revoke")
+    me = api.client.get(f"{BASE}/v1/token", headers=_auth(token)).json()
+    assert me == {
+        "name": "CI",
+        "prefix": listed[0]["prefix"],
+        "scopes": ["sast"],
+        "scan_access": "own",
+    }
+
+    token_id = listed[0]["id"]
+    off = api.client.post(f"{BASE}/admin/tokens/{token_id}/deactivate").json()
+    assert off["active"] is False and off["deactivated_at"]
     assert api.client.get(f"{BASE}/v1/scans", headers=_auth(token)).status_code == 401
+
+    on = api.client.post(f"{BASE}/admin/tokens/{token_id}/reactivate").json()
+    assert (on["active"], on["deactivated_at"]) == (True, None)
+    assert api.client.get(f"{BASE}/v1/scans", headers=_auth(token)).status_code == 200
+
+
+def test_tokens_can_be_shown_again(api):
+    from extensions.builtin.api.models import ApiToken
+
+    token = _token(api)
+    listed = api.client.get(f"{BASE}/admin/tokens").json()[0]
+    assert listed["can_show_token"] is True
+    shown = api.client.get(f"{BASE}/admin/tokens/{listed['id']}/token")
+    assert shown.json() == {"token": token}
+    forwarded = api.client.get(
+        f"{BASE}/admin/tokens/{listed['id']}/token",
+        headers={"X-Forwarded-For": "203.0.113.5"},
+    )
+    assert forwarded.status_code == 403
+
+    with api.store.session() as session:
+        row = session.get(ApiToken, listed["id"])
+        row.token_value = None
+        session.add(row)
+        session.commit()
+    assert api.client.get(f"{BASE}/admin/tokens").json()[0]["can_show_token"] is False
+    legacy = api.client.get(f"{BASE}/admin/tokens/{listed['id']}/token")
+    assert legacy.status_code == 409
+    assert api.client.get(f"{BASE}/v1/scans", headers=_auth(token)).status_code == 200
+
+
+def _sast_run_from_aespa(name="Started in AESPA") -> int:
+    with Session(get_engine()) as session:
+        run = SastRun(name=name, status="completed")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        return run.id
+
+
+def test_token_set_to_all_scans_sees_every_scan_its_scopes_allow(api):
+    own = _token(api)
+    created = _upload(api, own, name="From another token").json()
+    ui_run = _sast_run_from_aespa()
+    everything = _token(api, scopes=["sast"], scan_access="all")
+    web_only = _token(api, scopes=["web"], scan_access="all")
+
+    listed = api.client.get(f"{BASE}/v1/scans", headers=_auth(everything)).json()
+    ids = [item["id"] for item in listed["items"]]
+    assert ids == [f"sast-{ui_run}", created["id"]]
+    assert listed["total"] == 2
+    page = api.client.get(
+        f"{BASE}/v1/scans?limit=1&offset=1", headers=_auth(everything)
+    ).json()
+    assert [item["id"] for item in page["items"]] == [created["id"]]
+
+    ui_scan = api.client.get(
+        f"{BASE}/v1/scans/sast-{ui_run}", headers=_auth(everything)
+    ).json()
+    assert (ui_scan["name"], ui_scan["state"], ui_scan["callbacks"]) == (
+        "Started in AESPA",
+        "completed",
+        None,
+    )
+    assert (
+        api.client.get(
+            f"{BASE}/v1/scans/sast-{ui_run}/deliveries", headers=_auth(everything)
+        ).json()
+        == []
+    )
+    assert (
+        api.client.get(
+            f"{BASE}/v1/scans/{created['id']}", headers=_auth(everything)
+        ).status_code
+        == 200
+    )
+    for token in (own, web_only):
+        assert (
+            api.client.get(
+                f"{BASE}/v1/scans/sast-{ui_run}", headers=_auth(token)
+            ).status_code
+            == 404
+        )
+    assert (
+        api.client.get(f"{BASE}/v1/scans", headers=_auth(web_only)).json()["total"] == 0
+    )
+    assert (
+        api.client.get(
+            f"{BASE}/v1/scans/web-{ui_run}", headers=_auth(everything)
+        ).status_code
+        == 404
+    )
+
+    token_id = next(
+        t["id"]
+        for t in api.client.get(f"{BASE}/admin/tokens").json()
+        if t["scan_access"] == "all" and t["scopes"] == ["sast"]
+    )
+    api.client.patch(f"{BASE}/admin/tokens/{token_id}", json={"scan_access": "own"})
+    assert (
+        api.client.get(f"{BASE}/v1/scans", headers=_auth(everything)).json()["total"]
+        == 0
+    )
+
+
+def test_upgrade_adds_token_columns_and_keeps_revoked_tokens_off(tmp_path):
+    from sqlalchemy import create_engine, inspect, text
+
+    from extensions.builtin.api import models
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE integrationapi_token (id INTEGER PRIMARY KEY, "
+                "name VARCHAR, token_hash VARCHAR, token_prefix VARCHAR, "
+                "scopes_json VARCHAR, webhook_url VARCHAR, webhook_secret VARCHAR, "
+                "created_at DATETIME, last_used_at DATETIME, revoked_at DATETIME)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO integrationapi_token (id, name, token_hash, "
+                "token_prefix, scopes_json, revoked_at) VALUES "
+                "(1, 'old', 'h1', 'p', '[]', '2026-01-01 00:00:00'), "
+                "(2, 'live', 'h2', 'p', '[]', NULL)"
+            )
+        )
+    models.upgrade(engine)
+    models.upgrade(engine)
+    columns = {c["name"] for c in inspect(engine).get_columns("integrationapi_token")}
+    assert {"token_value", "scan_access", "deactivated_at"} <= columns
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT id, scan_access, deactivated_at IS NOT NULL "
+                "FROM integrationapi_token ORDER BY id"
+            )
+        ).all()
+    assert rows == [(1, "own", 1), (2, "own", 0)]
 
 
 def test_token_management_is_local_only(api):
