@@ -1441,7 +1441,7 @@ async def _execute_alice_tool(
             return finding_rejection
 
         try:
-            saved = await _persist_dynamic_finding(
+            write_result = await _persist_dynamic_finding(
                 run_id=run_id,
                 llm_cfg=llm_cfg,
                 raw=finding_raw,
@@ -1457,6 +1457,7 @@ async def _execute_alice_tool(
                 run_id,
                 finding_raw.get("title"),
             )
+            saved = write_result.finding
             if saved is not None:
                 from aespa.services import validator as _validator_svc
 
@@ -1478,11 +1479,19 @@ async def _execute_alice_tool(
                     "outcome": (
                         f"Saved [{finding_raw.get('severity', '?')}] {finding_raw.get('title', 'Untitled')} (ID: {saved.id})"
                         if saved
-                        else f"Duplicate skipped: {finding_raw.get('title', 'Untitled')}"
+                        else (
+                            f"Duplicate skipped: {finding_raw.get('title', 'Untitled')}"
+                            if write_result.status == "duplicate"
+                            else f"Finding rejected: {write_result.reason}"
+                        )
                     ),
                     "_persist": True,
                 },
             )
+            if write_result.status == "rejected":
+                return f"Finding rejected: {write_result.reason}"
+            if write_result.status == "duplicate":
+                return f"Duplicate skipped: {finding_raw.get('title', 'Untitled')} already exists."
             return f"Finding '{finding_raw.get('title')}' recorded successfully."
         except Exception as exc:
             log.warning("A.L.I.C.E. write_finding failed: %s", exc)

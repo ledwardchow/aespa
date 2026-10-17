@@ -26,6 +26,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **Findings dropped during web scans**: A finding with no selected object check can now be saved when the Test Lead sends `0` for that optional field. Invalid check links and missing evidence are reported as rejections instead of duplicates. A.L.I.C.E. also reports whether its finding was saved, already existed, or was rejected.
+
 - **Workflow progress during crawls**: While a crawl tried workflows that it had not reached, the Activity Log showed only the start and the result of each workflow, and the crawler card on the Agents view did not change. Each step, such as signing in, opening the starting page, or choosing the next action, now appears in both places, along with how many workflows the crawler model suggested.
 
 - **Scans no longer fail on a single refused request**: When the model provider refused one request during a web or API scan, the whole run stopped and was marked failed. AESPA now retries a refused request once, and if it is refused again, skips that line of investigation and continues the scan on a different target. A scan fails only if the provider keeps refusing across many skipped requests.

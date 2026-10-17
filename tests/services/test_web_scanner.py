@@ -883,6 +883,96 @@ def test_unauthenticated_finding_requires_wire_level_no_auth_evidence():
     assert scanner._unauthenticated_finding_rejection(finding, denied_anonymous_result)
 
 
+def test_dynamic_health_finding_with_zero_object_check_saves(monkeypatch, engine):
+    async def no_rewrite(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(scanner.llm_svc, "rewrite_finding_writeup", no_rewrite)
+    with Session(engine) as session:
+        site = Site(name="bank", base_url="https://bank.local")
+        session.add(site)
+        session.flush()
+        run = TestRun(site_id=site.id, name="health")
+        session.add(run)
+        session.commit()
+        run_id = run.id
+
+    url = "https://bank.local/api/health"
+    raw = {
+        "title": "Unauthenticated health endpoint exposes secrets",
+        "owasp_category": "A05",
+        "severity": "high",
+        "affected_url": url,
+        "description": "The health response exposes secrets without credentials.",
+        "evidence": "The anonymous request returned the secret value.",
+        "request_evidence": "GET /api/health\nAuthorization: none\nCookies: none",
+        "response_evidence": 'HTTP 200\n{"secret":"redacted"}',
+        "object_check_id": "0",
+    }
+    result = asyncio.run(
+        scanner._persist_dynamic_finding(
+            run_id=run_id,
+            llm_cfg=object(),
+            raw=raw,
+            base_url="https://bank.local",
+            pages_snapshot=[],
+            first_page_id=None,
+            result_by_url={
+                url: {
+                    "status": 200,
+                    "request_evidence": raw["request_evidence"],
+                    "response_evidence": raw["response_evidence"],
+                }
+            },
+            skip_normalize=True,
+        )
+    )
+
+    with Session(engine) as session:
+        findings = session.exec(select(ScanFinding)).all()
+    assert result.status == "saved"
+    assert len(findings) == 1
+    assert findings[0].object_check_id is None
+
+    def write_finding(changes, evidence=None):
+        return asyncio.run(
+            scanner._persist_dynamic_finding(
+                run_id=run_id,
+                llm_cfg=object(),
+                raw={**raw, **changes},
+                base_url="https://bank.local",
+                pages_snapshot=[],
+                first_page_id=None,
+                result_by_url=evidence
+                if evidence is not None
+                else {
+                    url: {
+                        "status": 200,
+                        "request_evidence": raw["request_evidence"],
+                        "response_evidence": raw["response_evidence"],
+                    }
+                },
+                skip_normalize=True,
+            )
+        )
+
+    assert write_finding({}).status == "duplicate"
+    invalid_check = write_finding({"object_check_id": 999999})
+    assert invalid_check.status == "rejected"
+    assert invalid_check.reason
+    missing_proof = write_finding(
+        {
+            "title": "Another unauthenticated health exposure",
+            "request_evidence": "GET /api/health",
+        },
+        evidence={},
+    )
+    assert missing_proof.status == "rejected"
+    assert "Authorization: none" in missing_proof.reason
+    with Session(engine) as session:
+        assert len(session.exec(select(ScanFinding)).all()) == 1
+
+
 def test_finding_title_dedup_ignores_reporting_prefixes():
     assert scanner._canonical_finding_title(
         "[A01] [CRITICAL] Unauthenticated Access to Account Data"
@@ -1017,8 +1107,8 @@ def test_dynamic_finding_rewrites_matching_preliminary_finding(monkeypatch, engi
     with Session(engine) as session:
         findings = session.exec(select(ScanFinding)).all()
 
-    assert saved is not None
-    assert saved.id == finding_id
+    assert saved.status == "saved"
+    assert saved.finding.id == finding_id
     assert len(findings) == 1
     assert findings[0].title == "SQL injection in search"
     assert findings[0].severity == "high"

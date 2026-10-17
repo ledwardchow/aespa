@@ -1355,7 +1355,10 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "response_evidence": {"type": "string"},
                 "object_check_id": {
                     "type": "integer",
-                    "description": "Selected A01 object check ID backed by the same exact comparison.",
+                    "description": (
+                        "Optional selected A01 object check ID backed by the same exact "
+                        "comparison. Omit this field when no check was selected. Do not use 0."
+                    ),
                 },
                 "note": {"type": "string"},
             },

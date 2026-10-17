@@ -23,7 +23,7 @@ import ssl
 import time
 from contextvars import ContextVar as _ContextVar
 from datetime import datetime, timezone
-from typing import Any, NamedTuple, Optional
+from typing import Any, Literal, NamedTuple, Optional
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
@@ -4399,6 +4399,27 @@ def _find_dynamic_duplicate(
     )
 
 
+def _coerce_object_check_id(value: Any) -> int | None:
+    """Return a real object-check id, or None for an absent/sentinel value.
+
+    Models emit ``0``, ``"0"``, ``""``, or ``"none"``/``"null"`` to mean "no
+    object check selected". Obligation ids autoincrement from 1, so any value
+    that is not a positive integer is treated as no selection rather than a
+    link to a nonexistent check.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "0", "none", "null"):
+            return None
+    try:
+        check_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return check_id if check_id > 0 else None
+
+
 def _canonical_finding_title(title: str) -> str:
     """Normalize cosmetic report prefixes before exact-title deduplication."""
     normalized = str(title or "").strip()
@@ -4872,7 +4893,7 @@ async def _run_specialist_agent(
                 else REQUEST_TIMEOUT,
                 follow_redirects=True,
             ) as _hx:
-                saved = await _persist_dynamic_finding(
+                write_result = await _persist_dynamic_finding(
                     run_id=run_id,
                     llm_cfg=llm_cfg,
                     raw=raw,
@@ -4882,6 +4903,12 @@ async def _run_specialist_agent(
                     result_by_url={affected: result_dict},
                     writeup_source=f"specialist:{agent_id}",
                 )
+            saved = write_result.finding
+            write_outcome = (
+                "Duplicate skipped"
+                if write_result.status == "duplicate"
+                else f"Finding rejected: {write_result.reason}"
+            )
             if saved is not None:
                 findings_written[0] += 1
                 if post_finding_fn is not None:
@@ -4911,7 +4938,7 @@ async def _run_specialist_agent(
                     "outcome": (
                         f"Saved [{tool_input.get('severity', '?')}] {_fw_title} (ID: {saved.id})"
                         if saved
-                        else f"Duplicate skipped: {_fw_title}"
+                        else f"{write_outcome}: {_fw_title}"
                     ),
                     "_persist": True,
                 },
@@ -4923,7 +4950,7 @@ async def _run_specialist_agent(
                     "phase": event_phase,
                     "status": "complete",
                     "message": (
-                        f"[{agent_id}] Step {step}: {'recorded finding' if saved else 'skipped duplicate'} {_fw_title}"
+                        f"[{agent_id}] Step {step}: {'recorded finding' if saved else write_outcome.lower()} {_fw_title}"
                     ),
                     "data": {
                         **step_event_data,
@@ -4936,6 +4963,8 @@ async def _run_specialist_agent(
                     f'Finding recorded: "{tool_input.get("title")}" '
                     f"(severity: {tool_input.get('severity')}, ID: {saved.id})"
                 )
+            if write_result.status == "rejected":
+                return f"Finding rejected: {write_result.reason}"
             return f'Duplicate skipped: "{tool_input.get("title")}" already exists. Move to a different test vector.'
 
         if tool_name == "execute_python":
@@ -5741,6 +5770,12 @@ def dispatch_specialist_agent(
     )
 
 
+class FindingWriteResult(NamedTuple):
+    status: Literal["saved", "duplicate", "rejected"]
+    finding: ScanFinding | None = None
+    reason: str | None = None
+
+
 async def _persist_dynamic_finding(
     *,
     run_id: int,
@@ -5753,10 +5788,10 @@ async def _persist_dynamic_finding(
     writeup_source: str | None = None,
     skip_normalize: bool = False,
     is_api_run: bool = False,
-) -> ScanFinding | None:
+) -> FindingWriteResult:
     """Persist a dynamic finding as soon as the thinking loop has enough evidence."""
     affected = (raw.get("affected_url") or base_url).strip() or base_url
-    selected_check_id = raw.get("object_check_id")
+    selected_check_id = _coerce_object_check_id(raw.get("object_check_id"))
     raw = {**raw, "affected_url": affected}
     original_title = _as_text(raw.get("title"))
 
@@ -5796,11 +5831,13 @@ async def _persist_dynamic_finding(
     rejection = _unauthenticated_finding_rejection(raw, result_by_url)
     if rejection:
         log.warning("Dynamic finding rejected for run_id=%s: %s", run_id, rejection)
-        return None
+        return FindingWriteResult("rejected", reason=rejection)
 
     if selected_check_id is not None:
         if is_api_run:
-            return None
+            return FindingWriteResult(
+                "rejected", reason="Object checks are only available for web runs."
+            )
         from aespa.services.web_workprogram import validate_object_finding_link
 
         try:
@@ -5813,7 +5850,7 @@ async def _persist_dynamic_finding(
             )
         except (TypeError, ValueError) as exc:
             log.warning("Selected object finding rejected: %s", exc)
-            return None
+            return FindingWriteResult("rejected", reason=str(exc))
 
     lock = _persist_write_locks.setdefault(run_id, asyncio.Lock())
     async with lock:
@@ -5898,7 +5935,7 @@ async def _persist_dynamic_finding(
                                     f"merged {', '.join(additions) or 'matching evidence'}."
                                 ),
                             )
-                    return None
+                    return FindingWriteResult("duplicate")
 
             if finding is None:
                 finding = _finding_from_llm(
@@ -6031,7 +6068,7 @@ async def _persist_dynamic_finding(
                 _hk_exc,
             )
 
-    return finding
+    return FindingWriteResult("saved", finding=finding)
 
 
 def _capture_dynamic_writeup_if_enabled(
@@ -7921,7 +7958,7 @@ async def _do_thinking_scan(
                             )
                         )
                         continue
-                    saved = await _persist_dynamic_finding(
+                    write_result = await _persist_dynamic_finding(
                         run_id=run_id,
                         llm_cfg=llm_cfg,
                         raw=action,
@@ -7931,6 +7968,7 @@ async def _do_thinking_scan(
                         result_by_url={str(affected): result},
                         writeup_source="test_lead",
                     )
+                    saved = write_result.finding
                     if saved is not None:
                         progressive_findings_count += 1
                         findings_snapshot.append(
@@ -7958,13 +7996,18 @@ async def _do_thinking_scan(
                             "response_status": 200,
                             "response_headers": {"content-type": "application/json"},
                             "response_body": (
-                                f"{'Saved' if saved is not None else 'Skipped duplicate'} "
+                                f"{'Saved' if saved is not None else 'Skipped duplicate' if write_result.status == 'duplicate' else 'Rejected'} "
                                 f"finding: {action.get('title', 'Untitled finding')}. "
                                 + (
                                     "This finding already exists (recorded by a prior step). "
                                     "Do NOT write it again. Your next action MUST "
                                     "probe a completely different endpoint or attack category. "
-                                    if saved is None
+                                    if write_result.status == "duplicate"
+                                    else ""
+                                )
+                                + (
+                                    f"Reason: {write_result.reason}. "
+                                    if write_result.status == "rejected"
                                     else ""
                                 )
                                 + f"{str(action.get('evidence') or '')[:1200]}"
@@ -7986,7 +8029,7 @@ async def _do_thinking_scan(
                             "status": "complete",
                             "message": (
                                 f"Step {step}: "
-                                f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
+                                f"{'recorded finding' if saved is not None else 'skipped duplicate finding' if write_result.status == 'duplicate' else 'rejected finding'} "
                                 f"{action.get('title', 'Untitled finding')}"
                             ),
                             "data": {
@@ -10405,11 +10448,12 @@ async def _do_agentic_thinking_loop(
             finding_state = tool_input.get("state_key")
             finding_comparison = tool_input.get("comparison_actor_key")
             finding_body_identity = _handoff_body_identity(finding_body)
-            if tool_input.get("object_check_id") is not None and not is_api_run:
+            selected_check_id = _coerce_object_check_id(
+                tool_input.get("object_check_id")
+            )
+            if selected_check_id is not None and not is_api_run:
                 with Session(get_engine()) as scope_session:
-                    selected = scope_session.get(
-                        ScanObligation, int(tool_input["object_check_id"])
-                    )
+                    selected = scope_session.get(ScanObligation, selected_check_id)
                     if (
                         selected is not None
                         and selected.run_id == run_id
@@ -10475,7 +10519,7 @@ async def _do_agentic_thinking_loop(
             )
             if finding_rejection:
                 return finding_rejection
-            saved = await _persist_dynamic_finding(
+            write_result = await _persist_dynamic_finding(
                 run_id=run_id,
                 llm_cfg=llm_cfg,
                 raw=tool_input,
@@ -10485,6 +10529,12 @@ async def _do_agentic_thinking_loop(
                 result_by_url={affected: fw_result},
                 writeup_source="test_lead",
                 is_api_run=is_api_run,
+            )
+            saved = write_result.finding
+            write_outcome = (
+                "Duplicate skipped"
+                if write_result.status == "duplicate"
+                else f"Finding rejected: {write_result.reason}"
             )
             if saved is not None:
                 progressive_findings_count += 1
@@ -10515,12 +10565,17 @@ async def _do_agentic_thinking_loop(
                     "response_status": 200,
                     "response_headers": {"content-type": "application/json"},
                     "response_body": (
-                        f"{'Saved' if saved is not None else 'Skipped duplicate'} "
+                        f"{'Saved' if saved is not None else 'Skipped duplicate' if write_result.status == 'duplicate' else 'Rejected'} "
                         f"finding: {tool_input.get('title', 'Untitled')}. "
                         + (
                             "This finding already exists. Do NOT write it again. "
                             "Move to a completely different endpoint or attack category. "
-                            if saved is None
+                            if write_result.status == "duplicate"
+                            else ""
+                        )
+                        + (
+                            f"Reason: {write_result.reason}. "
+                            if write_result.status == "rejected"
                             else ""
                         )
                         + str(tool_input.get("evidence") or "")[:600]
@@ -10554,7 +10609,7 @@ async def _do_agentic_thinking_loop(
                     "outcome": (
                         f"Saved [{tool_input.get('severity', '?')}] {_fw_title} ({saved.reference or f'#{saved.id}'})"
                         if saved is not None
-                        else f"Duplicate skipped: {_fw_title}"
+                        else f"{write_outcome}: {_fw_title}"
                     ),
                     "_persist": True,
                 },
@@ -10567,7 +10622,7 @@ async def _do_agentic_thinking_loop(
                     "status": "complete",
                     "message": (
                         f"Step {step}: "
-                        f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
+                        f"{'recorded finding' if saved is not None else 'skipped duplicate finding' if write_result.status == 'duplicate' else 'rejected finding'} "
                         f"{_fw_title}"
                     ),
                     "data": {
@@ -10587,6 +10642,8 @@ async def _do_agentic_thinking_loop(
                     f"(severity: {tool_input.get('severity')}, "
                     f"OWASP: {tool_input.get('owasp_category')}, reference: {saved.reference or f'#{saved.id}'})"
                 )
+            if write_result.status == "rejected":
+                return f"Finding rejected: {write_result.reason}"
             return (
                 f'Duplicate skipped: "{tool_input.get("title")}" already exists. '
                 "Do NOT write it again. Move to a different attack surface."
@@ -12314,14 +12371,14 @@ async def _do_agentic_thinking_loop(
                     f"Target observation ID: {observation.id} "
                     f"(target {observation.target_id}, {observation.result}, {_actor_key}).\n\n"
                 )
-                if tool_input.get("object_check_id") is not None:
+                _check_id = _coerce_object_check_id(tool_input.get("object_check_id"))
+                if _check_id is not None:
                     from aespa.services.web_workprogram import (
                         evaluate_coverage_evidence,
                         record_object_check_result,
                         record_probe_execution,
                     )
 
-                    _check_id = int(tool_input["object_check_id"])
                     execution_id = record_probe_execution(
                         run_id,
                         _check_id,
