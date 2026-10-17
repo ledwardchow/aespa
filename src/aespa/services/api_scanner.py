@@ -1696,17 +1696,22 @@ async def _api_scan_task(api_run_id: int) -> None:
         run_pause_svc.save_pause(
             "api",
             api_run_id,
-            provider="openai_codex",
+            provider=(
+                "llm"
+                if isinstance(exc, llm_svc.LLMNetworkPauseError)
+                else "openai_codex"
+            ),
             message=str(exc),
             reset_at=exc.reset_at,
             snapshot=exc.snapshot,
             resume_stage="api_scan",
+            reason=exc.reason,
         )
         events_svc.emit(
             api_run_id,
             {
                 "type": "scan_paused",
-                "reason": "quota",
+                "reason": exc.reason,
                 "message": str(exc),
                 "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
             },

@@ -898,6 +898,168 @@ def test_agentic_loop_fails_after_refusal_skip_cap(monkeypatch):
         )
 
 
+class CredentialRetrievalError(Exception):
+    """Stands in for botocore's credential_process refresh failure."""
+
+
+_AWS_CREDENTIAL_REFRESH_ERROR = (
+    "Error when retrieving credentials from custom-process: operation error "
+    "RolesAnywhere: CreateSession, request send failed: dial tcp: lookup "
+    "rolesanywhere.ap-southeast-2.amazonaws.com: no such host"
+)
+
+
+def _bedrock_config() -> LLMConfig:
+    return LLMConfig(provider="bedrock", model="anthropic.claude-test")
+
+
+def test_transient_provider_error_covers_aws_credential_refresh():
+    assert llm.is_transient_provider_error(
+        CredentialRetrievalError(_AWS_CREDENTIAL_REFRESH_ERROR)
+    )
+    assert llm.is_transient_provider_error(RuntimeError("lookup x: no such host"))
+    # A wrapped network failure is found through the exception chain.
+    try:
+        try:
+            raise ConnectionError("reset")
+        except ConnectionError as inner:
+            raise RuntimeError("provider call failed") from inner
+    except RuntimeError as outer:
+        assert llm.is_transient_provider_error(outer)
+    assert not llm.is_transient_provider_error(
+        RuntimeError("ValidationException: Invalid `signature` in `thinking` block")
+    )
+
+
+def test_agentic_loop_retries_temporary_network_error_then_recovers(monkeypatch):
+    monkeypatch.setattr(llm, "AGENTIC_NETWORK_RETRY_DELAYS", (0.0, 0.0, 0.0))
+    calls = 0
+    events: list[dict] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise CredentialRetrievalError(_AWS_CREDENTIAL_REFRESH_ERROR)
+        block = {
+            "type": "tool_use",
+            "id": "d1",
+            "name": "done",
+            "input": {"summary": "ok"},
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            _bedrock_config(),
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+            emit_fn=events.append,
+        )
+    )
+
+    assert summary == "ok"
+    assert calls == 3
+    retries = [e for e in events if (e.get("data") or {}).get("network_retry")]
+    assert [e["data"]["network_retry"] for e in retries] == [1, 2]
+    assert all(e["status"] == "retrying" for e in retries)
+    assert not any(e.get("status") == "error" for e in events)
+
+
+def test_agentic_loop_pauses_when_provider_stays_unreachable(monkeypatch):
+    monkeypatch.setattr(llm, "AGENTIC_NETWORK_RETRY_DELAYS", (0.0, 0.0))
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        raise CredentialRetrievalError(_AWS_CREDENTIAL_REFRESH_ERROR)
+
+    async def fake_tool_executor(name, tool_input, step):
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(llm.LLMNetworkPauseError) as excinfo:
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                _bedrock_config(),
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=fake_tool_executor,
+            )
+        )
+
+    # One first attempt plus one per retry delay, then a resumable pause.
+    assert calls == 3
+    assert isinstance(excinfo.value, llm.LLMQuotaPauseError)
+    assert excinfo.value.reason == "network"
+    assert "no such host" in str(excinfo.value)
+
+
+def test_agentic_loop_stops_waiting_for_retry_when_scan_is_stopped(monkeypatch):
+    monkeypatch.setattr(llm, "AGENTIC_NETWORK_RETRY_DELAYS", (3600.0,))
+    stopped = False
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls, stopped
+        calls += 1
+        stopped = True
+        raise ConnectionError("connection reset")
+
+    async def fake_tool_executor(name, tool_input, step):
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    asyncio.run(
+        asyncio.wait_for(
+            llm.thinking_agentic_loop(
+                _bedrock_config(),
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=fake_tool_executor,
+                stop_check=lambda: stopped,
+            ),
+            timeout=5,
+        )
+    )
+    assert calls == 1
+
+
+def test_agentic_loop_does_not_retry_other_provider_errors(monkeypatch):
+    monkeypatch.setattr(llm, "AGENTIC_NETWORK_RETRY_DELAYS", (0.0, 0.0))
+    calls = 0
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("ValidationException: Invalid `signature` in `thinking`")
+
+    async def fake_tool_executor(name, tool_input, step):
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    with pytest.raises(RuntimeError, match="ValidationException"):
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                _bedrock_config(),
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=fake_tool_executor,
+            )
+        )
+    assert calls == 1
+
+
 def test_agentic_loop_keeps_tool_output_up_to_shared_limit(monkeypatch):
     config = LLMConfig(
         provider="azure_foundry_openai",
@@ -1775,12 +1937,15 @@ def test_agentic_loop_names_api_errors_with_no_message(monkeypatch):
     )
     emitted: list[dict] = []
 
+    class ProviderFailure(Exception):
+        pass
+
     async def fake_call_with_tools(*args, **kwargs):
-        raise TimeoutError
+        raise ProviderFailure
 
     monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(ProviderFailure):
         asyncio.run(
             llm.thinking_agentic_loop(
                 config,
@@ -1796,9 +1961,9 @@ def test_agentic_loop_names_api_errors_with_no_message(monkeypatch):
         for event in emitted
         if event.get("phase") == "llm_response" and event.get("status") == "error"
     ]
-    assert error_events[0]["message"].endswith("LLM API error — TimeoutError")
-    assert error_events[0]["data"]["error"] == "TimeoutError"
-    assert error_events[0]["data"]["error_type"] == "TimeoutError"
+    assert error_events[0]["message"].endswith("LLM API error — ProviderFailure")
+    assert error_events[0]["data"]["error"] == "ProviderFailure"
+    assert error_events[0]["data"]["error_type"] == "ProviderFailure"
 
 
 def test_agentic_loop_reports_quota_pause_as_warning(monkeypatch):

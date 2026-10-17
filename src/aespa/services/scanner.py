@@ -5433,14 +5433,18 @@ async def _run_specialist_agent(
                 handoff_id, status="cancelled", outcome="Specialist stopped."
             )
         raise
-    except llm_svc.LLMQuotaPauseError:
-        # A subscription allowance exhaustion must reach the outer scan task so
-        # it can pause the whole run and preserve a resumable checkpoint.
+    except llm_svc.LLMQuotaPauseError as exc:
+        # An exhausted allowance or an unreachable provider must reach the outer
+        # scan task so it can pause the whole run and keep a resumable checkpoint.
         if handoff_id is not None:
             handoff_svc.update_handoff(
                 handoff_id,
                 status="failed",
-                outcome="Specialist paused because the LLM allowance was exhausted.",
+                outcome=(
+                    "Specialist paused because the LLM provider could not be reached."
+                    if isinstance(exc, llm_svc.LLMNetworkPauseError)
+                    else "Specialist paused because the LLM allowance was exhausted."
+                ),
             )
         raise
     except Exception as exc:
@@ -6546,14 +6550,16 @@ async def _thinking_scan_task(run_id: int) -> None:
         _emit_thinking_status(run_id)
         from aespa.services import run_pause as run_pause_svc
 
+        is_network_pause = isinstance(exc, llm_svc.LLMNetworkPauseError)
         run_pause_svc.save_pause(
             "web",
             run_id,
-            provider="openai_codex",
+            provider="llm" if is_network_pause else "openai_codex",
             message=str(exc),
             reset_at=exc.reset_at,
             snapshot=exc.snapshot,
             resume_stage="thinking_scan",
+            reason=exc.reason,
         )
         with Session(get_engine()) as _s:
             _run = _s.get(TestRun, run_id)
@@ -6561,7 +6567,9 @@ async def _thinking_scan_task(run_id: int) -> None:
                 _run.status = "paused"
                 _run.phase = "scanning"
                 _run.outcome = "paused"
-                _run.terminal_reason = "provider_quota"
+                _run.terminal_reason = (
+                    "provider_unreachable" if is_network_pause else "provider_quota"
+                )
                 _run.error_message = str(exc)[:2000]
                 _s.add(_run)
                 _s.commit()
@@ -6569,7 +6577,7 @@ async def _thinking_scan_task(run_id: int) -> None:
             run_id,
             {
                 "type": "scan_paused",
-                "reason": "quota",
+                "reason": exc.reason,
                 "message": str(exc),
                 "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
             },

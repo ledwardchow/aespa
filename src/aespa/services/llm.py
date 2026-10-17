@@ -103,6 +103,69 @@ class LLMQuotaPauseError(RuntimeError):
         self.reset_at = reset_at
         self.snapshot = snapshot or {}
 
+    reason = "quota"
+
+
+class LLMNetworkPauseError(LLMQuotaPauseError):
+    """The LLM provider stayed unreachable after retries; the run should pause."""
+
+    reason = "network"
+
+
+# Seconds to wait before each retry of an LLM call that failed with a temporary
+# network or credential-refresh error. Together they ride out a few minutes of
+# lost connectivity (Wi-Fi drop, sleep/wake, DNS hiccup) before pausing.
+AGENTIC_NETWORK_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0, 60.0, 120.0)
+
+_TRANSIENT_PROVIDER_ERROR_MARKERS = (
+    "connectionerror",
+    "connecterror",
+    "apiconnectionerror",
+    "endpointconnectionerror",
+    "could not connect to the endpoint",
+    "timeout",
+    "temporarily unavailable",
+    "connection reset",
+    "connection refused",
+    "network is unreachable",
+    "name resolution",
+    "no such host",
+    "dns",
+    # AWS SDK credential refresh (for example IAM Roles Anywhere through a
+    # credential_process helper) fails this way when the network is down.
+    "credentialretrievalerror",
+    "error when retrieving credentials",
+)
+
+
+def is_transient_provider_error(exc: BaseException) -> bool:
+    """Return whether an LLM call failed for a reason a later retry may fix."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if _is_transient_provider_error_once(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _is_transient_provider_error_once(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    status_code = status_code or getattr(response, "status_code", None)
+    if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+        return True
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return any(
+        marker in name or marker in text for marker in _TRANSIENT_PROVIDER_ERROR_MARKERS
+    )
+
 
 class LLMContextLimitError(RuntimeError):
     """The fixed prompt and tool overhead cannot fit the configured window."""
@@ -7654,6 +7717,22 @@ def _stringify_agentic_tool_result(value: Any) -> str:
         return str(value)
 
 
+async def _sleep_unless_stopped(delay: float, stop_check=None) -> None:
+    """Sleep for ``delay`` seconds, returning early once ``stop_check`` is true."""
+    deadline = time.monotonic() + delay
+    while True:
+        if stop_check:
+            try:
+                if stop_check():
+                    return
+            except Exception:
+                pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(remaining, 1.0))
+
+
 async def thinking_agentic_loop(
     config: "LLMConfig",
     *,
@@ -7776,6 +7855,9 @@ async def thinking_agentic_loop(
     # drives the retry-once-then-skip behaviour; refusal_skips bounds total skips.
     consecutive_refusals = 0
     refusal_skips = 0
+    # Temporary network or credential-refresh failures retry the same request
+    # with backoff; a successful turn resets the count.
+    network_attempt = 0
 
     if resume_repair and emit_fn:
         try:
@@ -7983,8 +8065,69 @@ async def thinking_agentic_loop(
                 content_blocks, stop_reason, raw_content = _llm_fut.result()
                 # A completed turn means we are past any earlier refusal.
                 consecutive_refusals = 0
+                network_attempt = 0
             except Exception as exc:
                 error_message = describe_exception(exc)
+                if (
+                    not isinstance(exc, LLMQuotaPauseError)
+                    and not _is_llm_refusal(exc)
+                    and is_transient_provider_error(exc)
+                ):
+                    if network_attempt >= len(AGENTIC_NETWORK_RETRY_DELAYS):
+                        log.warning(
+                            "thinking_agentic_loop: LLM provider unreachable at "
+                            "step %d after %d retries: %s",
+                            tool_call_count + 1,
+                            network_attempt,
+                            error_message,
+                        )
+                        raise LLMNetworkPauseError(
+                            "The LLM provider could not be reached after "
+                            f"{network_attempt} retries, so the scan was paused at "
+                            "its last saved step. Check your network connection and "
+                            f"provider sign-in, then resume the scan. Last error: "
+                            f"{error_message}"
+                        ) from exc
+                    delay = AGENTIC_NETWORK_RETRY_DELAYS[network_attempt]
+                    network_attempt += 1
+                    log.warning(
+                        "thinking_agentic_loop: temporary LLM error at step %d; "
+                        "retry %d/%d in %ss: %s",
+                        tool_call_count + 1,
+                        network_attempt,
+                        len(AGENTIC_NETWORK_RETRY_DELAYS),
+                        delay,
+                        error_message,
+                    )
+                    if emit_fn:
+                        try:
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "llm_response",
+                                    "status": "retrying",
+                                    "message": (
+                                        f"Step {tool_call_count + 1}: could not reach "
+                                        f"the LLM provider. Retrying in {delay:g}s "
+                                        f"({network_attempt}/"
+                                        f"{len(AGENTIC_NETWORK_RETRY_DELAYS)})."
+                                    ),
+                                    "data": {
+                                        "step": tool_call_count + 1,
+                                        "error": error_message,
+                                        "error_type": type(exc).__name__,
+                                        "network_retry": network_attempt,
+                                        "network_retry_limit": len(
+                                            AGENTIC_NETWORK_RETRY_DELAYS
+                                        ),
+                                        "retry_delay_s": delay,
+                                    },
+                                }
+                            )
+                        except Exception:
+                            pass
+                    await _sleep_unless_stopped(delay, stop_check)
+                    continue
                 log.exception(
                     "thinking_agentic_loop: API error at step %d: %s",
                     tool_call_count + 1,

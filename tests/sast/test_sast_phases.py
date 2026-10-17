@@ -685,6 +685,41 @@ def test_checkpointed_agent_retries_from_last_saved_turn(
     assert checkpoint.idempotency_key == "agent:discovery"
 
 
+def test_checkpointed_agent_pauses_when_loop_reports_unreachable_provider(
+    isolated_db_engine, monkeypatch
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    from aespa.services import llm
+
+    calls = 0
+
+    async def fake_loop(_config, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise llm.LLMNetworkPauseError("provider unreachable after retries")
+
+    monkeypatch.setattr(llm, "thinking_agentic_loop", fake_loop)
+
+    with pytest.raises(sast_scanner.SastNetworkPause, match="unreachable"):
+        asyncio.run(
+            sast_scanner._run_checkpointed_agent(
+                sast_run_id=sast_run_id,
+                phase="discovery",
+                worker_key="discovery",
+                config=object(),
+                system_message="system",
+                initial_user_message="start",
+                tool_executor=lambda *_args: None,
+                emit_fn=lambda _event: None,
+                stop_check=lambda: False,
+                tools=[],
+                resume=False,
+            )
+        )
+    # The scan loop already retried, so the worker pauses without more attempts.
+    assert calls == 1
+
+
 def test_checkpointed_agent_compacts_provider_rejected_context(
     isolated_db_engine, monkeypatch
 ):

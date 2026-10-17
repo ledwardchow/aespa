@@ -170,3 +170,15 @@ def offline_retire_list(monkeypatch, tmp_path_factory):
 
     monkeypatch.setattr(retire_repository, "ensure_fresh", _no_download)
     return cache
+
+
+@pytest.fixture(autouse=True)
+def instant_llm_network_retries(monkeypatch):
+    """Retry temporary LLM errors without real backoff waits in tests."""
+    from aespa.services import llm
+
+    monkeypatch.setattr(
+        llm,
+        "AGENTIC_NETWORK_RETRY_DELAYS",
+        tuple(0.0 for _ in llm.AGENTIC_NETWORK_RETRY_DELAYS),
+    )

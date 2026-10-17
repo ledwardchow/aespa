@@ -6,7 +6,6 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
@@ -35,32 +34,9 @@ def _merge_persisted_coverage(
 
 
 def _is_transient_provider_error(exc: BaseException) -> bool:
-    if isinstance(exc, (TimeoutError, ConnectionError)):
-        return True
-    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
-        return True
-    status_code = getattr(exc, "status_code", None)
-    response = getattr(exc, "response", None)
-    status_code = status_code or getattr(response, "status_code", None)
-    if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
-        return True
-    name = type(exc).__name__.lower()
-    text = str(exc).lower()
-    return any(
-        marker in name or marker in text
-        for marker in (
-            "connectionerror",
-            "connecterror",
-            "apiconnectionerror",
-            "timeout",
-            "temporarily unavailable",
-            "connection reset",
-            "connection refused",
-            "network is unreachable",
-            "name resolution",
-            "dns",
-        )
-    )
+    from aespa.services.llm import is_transient_provider_error
+
+    return is_transient_provider_error(exc)
 
 
 def _normalize_tool_list(value: object) -> list:

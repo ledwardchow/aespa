@@ -20,6 +20,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Scans no longer fail on a single refused request**: When the model provider refused one request during a web or API scan, the whole run stopped and was marked failed. AESPA now retries a refused request once, and if it is refused again, skips that line of investigation and continues the scan on a different target. A scan fails only if the provider keeps refusing across many skipped requests.
 
+- **Scans pause instead of failing when the LLM provider can't be reached**: A short network drop, such as Wi-Fi reconnecting or a computer waking from sleep, could stop a long web, API, or SAST scan and mark it failed. This included failures to refresh AWS credentials for Amazon Bedrock. AESPA now retries the request several times over about four minutes. If the provider still can't be reached, the scan is paused at its last saved step and can be resumed once the connection is back.
+
 - **A.L.I.C.E. on API runs**: Endpoint lists, coverage, and finding commands in API-run chats no longer fail every time. Steering an active goal on an API run now works instead of returning a server error.
 
 - **API run sessions**: Renaming or turning off a saved session on an API run no longer fails, and the response hides cookie values, header values, and secret session details, as other session views already did.

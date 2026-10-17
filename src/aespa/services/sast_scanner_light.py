@@ -189,6 +189,9 @@ async def _run_checkpointed_agent(
                     done_check=done_check,
                     termination_check=termination_check,
                 )
+        except llm_svc.LLMNetworkPauseError as exc:
+            # The scan loop already retried with backoff; pause the SAST run.
+            raise SastNetworkPause(str(exc)) from exc
         except llm_svc.LLMQuotaPauseError:
             raise
         except asyncio.CancelledError:
