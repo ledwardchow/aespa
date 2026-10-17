@@ -571,32 +571,7 @@ async def resume_sast_scan(
     """Resume a user, network, quota, or restart-paused SAST scan."""
     from aespa.services import sast_scanner
 
-    _get_run_or_404(session, run_id)
-    from aespa.services import run_pause as run_pause_svc
-
-    run = session.get(SastRun, run_id)
-    pause = run_pause_svc.get_pause("sast", run_id)
-    resumable_terminal_run = bool(
-        run is not None
-        and run.status in {"completed", "failed", "cancelled"}
-        and sast_scanner.has_resumable_sast_work(run_id)
-    )
-    if run is None or not (
-        (run.status == "paused" and pause is not None) or resumable_terminal_run
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="SAST scan has no paused or failed worker work to resume",
-        )
-    if sast_scanner.is_sast_scan_running(run_id):
-        raise HTTPException(status_code=409, detail="SAST scan is already running")
-    if pause and pause.reset_at and pause.reset_at > datetime.now(_UTC):
-        raise HTTPException(
-            status_code=409,
-            detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
-        )
-    await sast_scanner.start_sast_scan(run_id, resume=True)
-    run_pause_svc.clear_pause("sast", run_id)
+    await sast_runs_svc.resume(session, run_id)
     return sast_scanner.get_sast_status(run_id)
 
 

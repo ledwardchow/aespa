@@ -17,10 +17,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import HTTPException
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import Credential, SastRun, Site, TestRun
+from aespa.models import Credential, LLMProfile, SastRun, Site, TestRun
 from aespa.schemas import (
     CredentialIn,
     SiteCreate,
@@ -28,7 +28,7 @@ from aespa.schemas import (
     StartCrawlBody,
     TestRunCreate,
 )
-from aespa.services import run_lifecycle, run_progress, run_results
+from aespa.services import run_lifecycle, run_progress, run_results, settings_profiles
 from aespa.services import sast_runs_service as sast_runs
 from aespa.services import sites as sites_service
 from aespa.services import web_runs_service as web_runs
@@ -126,6 +126,10 @@ class SastRunAccess:
     async def stop(self, run_id: int) -> bool:
         with _session() as session:
             return await sast_runs.stop(session, run_id)
+
+    async def resume(self, run_id: int) -> None:
+        with _session() as session:
+            await sast_runs.resume(session, run_id)
 
 
 class WebRunAccess:
@@ -250,6 +254,31 @@ class RunReadAccess:
             return session.get(SastRun, run_id) is not None
 
 
+class LlmReadAccess:
+    """Read the scan profiles a run can use. Available to every extension."""
+
+    def profiles(self) -> list[dict[str, Any]]:
+        """Scan profiles, most recently changed first. Never writes."""
+        with _session() as session:
+            available = settings_profiles.extension_profile_items()
+            rows = session.exec(
+                select(LLMProfile).order_by(LLMProfile.updated_at.desc())
+            ).all()
+            return [
+                {
+                    "id": out.id,
+                    "name": out.name,
+                    "active": out.is_active,
+                    "default_model": out.default_model_name,
+                }
+                for out in (
+                    settings_profiles.llm_profile_out(session, row)
+                    for row in rows
+                    if row.extension_ref is None or row.extension_ref in available
+                )
+            ]
+
+
 class CoreAccess:
     """What ``registry.core`` returns. Missing capabilities raise on access."""
 
@@ -257,6 +286,7 @@ class CoreAccess:
         self._capabilities = set(capabilities)
         self._subscribe = subscribe
         self.runs = RunReadAccess()
+        self.llm = LlmReadAccess()
 
     @property
     def sast(self) -> SastRunAccess:

@@ -214,6 +214,7 @@ def _sast_percent(session: Session, run_id: int) -> int | None:
 
 
 def _sast_progress(session: Session, run: SastRun) -> dict:
+    from aespa.services import sast_runs_service as sast_runs
     from aespa.services import sast_scanner, sast_sources
 
     run_id = run.id
@@ -260,6 +261,7 @@ def _sast_progress(session: Session, run: SastRun) -> dict:
         "message": message,
         "counts": {"findings": _severity_counts(list(leads))},
         "needs_action": None,
+        "resumable": state != "running" and sast_runs.can_resume(run),
         "error": run.error_message if state == "failed" else None,
         "created_at": _iso(run.created_at),
         "started_at": _iso(run.started_at),

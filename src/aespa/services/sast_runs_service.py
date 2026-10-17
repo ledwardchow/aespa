@@ -13,6 +13,7 @@ import uuid
 import zipfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -211,6 +212,43 @@ async def start(session: Session, run_id: int) -> None:
     from aespa.services import sast_scanner
 
     await sast_scanner.start_sast_scan(run_id)
+
+
+def can_resume(run: SastRun) -> bool:
+    """Whether ``resume`` can continue the run from its saved progress."""
+    from aespa.services import run_pause, sast_scanner
+
+    if sast_scanner.is_sast_scan_running(run.id):
+        return False
+    if run.status == "paused":
+        return run_pause.get_pause("sast", run.id) is not None
+    return run.status in {
+        "completed",
+        "failed",
+        "cancelled",
+    } and sast_scanner.has_resumable_sast_work(run.id)
+
+
+async def resume(session: Session, run_id: int) -> None:
+    """Continue a paused run, or a finished run with unfinished work."""
+    from aespa.services import run_pause, sast_scanner
+
+    run = get_run(session, run_id)
+    if sast_scanner.is_sast_scan_running(run_id):
+        raise HTTPException(status_code=409, detail="SAST scan is already running")
+    if not can_resume(run):
+        raise HTTPException(
+            status_code=409,
+            detail="SAST scan has no paused or failed worker work to resume",
+        )
+    pause = run_pause.get_pause("sast", run_id)
+    if pause and pause.reset_at and pause.reset_at > datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=409,
+            detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
+        )
+    await sast_scanner.start_sast_scan(run_id, resume=True)
+    run_pause.clear_pause("sast", run_id)
 
 
 async def stop(session: Session, run_id: int) -> bool:

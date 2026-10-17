@@ -156,7 +156,7 @@ def list_scan_profiles(session: Session) -> list[LLMProfile]:
     )
 
 
-def _extension_profile_items() -> dict[str, dict]:
+def extension_profile_items() -> dict[str, dict]:
     from aespa.extensions import get_extension_manager
 
     return {
@@ -167,7 +167,7 @@ def _extension_profile_items() -> dict[str, dict]:
 
 def _sync_extension_profiles(session: Session) -> dict[str, dict]:
     """Keep only stable core identity rows; definitions stay in extension storage."""
-    items = _extension_profile_items()
+    items = extension_profile_items()
     existing = {
         profile.extension_ref: profile
         for profile in session.exec(
@@ -195,7 +195,7 @@ def get_scan_profile(session: Session, profile_id: int) -> LLMProfile:
     prof = session.get(LLMProfile, profile_id)
     if prof is None:
         raise HTTPException(status_code=404, detail="Scan profile not found")
-    if prof.extension_ref and prof.extension_ref not in _extension_profile_items():
+    if prof.extension_ref and prof.extension_ref not in extension_profile_items():
         raise HTTPException(
             status_code=409, detail="Extension scan profile is unavailable"
         )
@@ -320,7 +320,7 @@ def _ensure_unique_scan_profile_name(
 
 def llm_profile_out(session: Session, prof: LLMProfile) -> LLMProfileOut:
     if prof.extension_ref:
-        item = _extension_profile_items().get(prof.extension_ref)
+        item = extension_profile_items().get(prof.extension_ref)
         if item is None:
             raise HTTPException(
                 status_code=409, detail="Extension scan profile is unavailable"

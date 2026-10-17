@@ -49,6 +49,7 @@ from .schemas import (
     CredentialOut,
     Delivery,
     FindingPage,
+    LlmProfile,
     ScanList,
     ScanStatus,
     Severity,
@@ -561,6 +562,24 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
 
         return await run_create(caller, idempotency_key, digest, create)
 
+    # ── LLM profiles ────────────────────────────────────────────────────────
+
+    @router.get(
+        "/v1/llm-profiles",
+        response_model=list[LlmProfile],
+        operation_id="listLlmProfiles",
+        summary="List scan profiles",
+        description=(
+            "Scan profiles choose the LLM models AESPA uses. Send a profile's id as "
+            "llm_profile_id when creating a scan, or leave it out to use the active "
+            "profile."
+        ),
+        tags=["LLM profiles"],
+        responses=ERRORS,
+    )
+    def list_llm_profiles(caller: Caller = Depends(require())):
+        return core.llm.profiles()
+
     # ── Read and control scans ──────────────────────────────────────────────
 
     @router.get(
@@ -687,6 +706,30 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
             payload.coverage_mode if payload else None
         ) or scans.start_options(row).get("coverage_mode")
         await core.web.start_scan(row.run_id, coverage_mode)
+        return status_for(row)
+
+    @router.post(
+        "/v1/sast/scans/{scan_id}/resume",
+        response_model=ScanStatus,
+        operation_id="resumeSastScan",
+        summary="Resume a paused SAST scan",
+        description=(
+            "Continues a paused SAST scan, or a finished one with unfinished work, "
+            "from its saved progress. Check the scan's resumable field first. "
+            "POST /scans/{scan_id}/start starts the scan over instead."
+        ),
+        tags=["SAST scans"],
+        responses=ERRORS,
+        openapi_extra=_scopes("sast"),
+    )
+    async def resume_sast_scan(
+        scan_id: ScanIdPath,
+        caller: Caller = Depends(require("sast")),
+    ):
+        row = scans.get_owned(store, caller, scan_id)
+        if row.kind != "sast":
+            raise HTTPException(status_code=409, detail="This is not a SAST scan.")
+        await core.sast.resume(row.run_id)
         return status_for(row)
 
     @router.post(

@@ -89,12 +89,25 @@ curl -s "$BASE/scans/sast-17" -H "Authorization: Bearer $AESPA_TOKEN"
 | `state` | `queued`, `preparing`, `running`, `needs_action`, `paused`, `completed`, `failed`, or `stopped` |
 | `phase` | Web: `crawling`, `scanning`, `reviewing`, `crawled`, `finished`. SAST: `preparing_source`, `analyzing`, `finished` |
 | `percent` | Share of planned tests done, or `null` when AESPA cannot measure it |
+| `resumable` | SAST only: `true` when the scan can be resumed from its saved progress |
 | `message`, `error`, `needs_action` | What is happening, why it failed, or what a person must do |
 | `counts.findings` | Findings so far by severity |
 
 `completed`, `failed`, and `stopped` are final. To avoid tight polling loops, add `?wait=30` and the previous response's `ETag` as `If-None-Match`. AESPA holds the request until the status changes or 30 seconds pass, and returns `304` if nothing changed.
 
 `GET /scans/{scan_id}/activity?after=<next_cursor>` returns the activity log. `POST /scans/{scan_id}/stop` stops a scan.
+
+A SAST scan can pause, for example when the LLM provider hits a rate limit. When its `resumable` field is `true`, `POST /sast/scans/{scan_id}/resume` continues it from its saved progress. `POST /scans/{scan_id}/start` starts it over from the beginning instead.
+
+## LLM profiles
+
+A scan profile chooses the LLM models AESPA uses. Scans use the active profile unless you send `llm_profile_id` when creating them.
+
+```bash
+curl -s "$BASE/llm-profiles" -H "Authorization: Bearer $AESPA_TOKEN"
+```
+
+Each profile has an `id`, a `name`, whether it is `active`, and its `default_model`. Any token can list profiles. Profiles are created and changed in AESPA under **Settings**.
 
 ## Results
 

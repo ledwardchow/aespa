@@ -1049,6 +1049,45 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "LlmProfile": {
+        "description": "A scan profile: which LLM models AESPA uses for a scan.",
+        "properties": {
+          "active": {
+            "description": "Used for scans created without llm_profile_id.",
+            "title": "Active",
+            "type": "boolean"
+          },
+          "default_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The profile's main model.",
+            "title": "Default Model"
+          },
+          "id": {
+            "description": "Send as llm_profile_id when creating a scan.",
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "active",
+          "default_model"
+        ],
+        "title": "LlmProfile",
+        "type": "object"
+      },
       "LoginFieldIn": {
         "properties": {
           "key": {
@@ -1444,6 +1483,18 @@
             ],
             "description": "Web: crawling, scanning, reviewing, crawled, finished. SAST: preparing_source, analyzing, finished.",
             "title": "Phase"
+          },
+          "resumable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "SAST: true when POST /sast/scans/{scan_id}/resume can continue the scan from its saved progress. Null for web scans.",
+            "title": "Resumable"
           },
           "scan_after_crawl": {
             "anyOf": [
@@ -2283,6 +2334,87 @@
         ]
       }
     },
+    "/v1/llm-profiles": {
+      "get": {
+        "description": "Scan profiles choose the LLM models AESPA uses. Send a profile's id as llm_profile_id when creating a scan, or leave it out to use the active profile.",
+        "operationId": "listLlmProfiles",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LlmProfile"
+                  },
+                  "title": "Response Listllmprofiles",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List scan profiles",
+        "tags": [
+          "LLM profiles"
+        ]
+      }
+    },
     "/v1/sast/scans": {
       "post": {
         "operationId": "createSastScan",
@@ -2570,6 +2702,103 @@
           }
         ],
         "summary": "Create a SAST scan from a source provider",
+        "tags": [
+          "SAST scans"
+        ],
+        "x-aespa-scopes": [
+          "sast"
+        ]
+      }
+    },
+    "/v1/sast/scans/{scan_id}/resume": {
+      "post": {
+        "description": "Continues a paused SAST scan, or a finished one with unfinished work, from its saved progress. Check the scan's resumable field first. POST /scans/{scan_id}/start starts the scan over instead.",
+        "operationId": "resumeSastScan",
+        "parameters": [
+          {
+            "description": "Scan ID returned when the scan was created, such as web-42.",
+            "in": "path",
+            "name": "scan_id",
+            "required": true,
+            "schema": {
+              "description": "Scan ID returned when the scan was created, such as web-42.",
+              "examples": [
+                "web-42"
+              ],
+              "pattern": "^(web|sast)-[0-9]+$",
+              "title": "Scan Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Resume a paused SAST scan",
         "tags": [
           "SAST scans"
         ],

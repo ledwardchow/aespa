@@ -294,6 +294,13 @@ class ScanStatus(BaseModel):
     message: str
     counts: Counts
     needs_action: NeedsAction | None
+    resumable: bool | None = Field(
+        default=None,
+        description=(
+            "SAST: true when POST /sast/scans/{scan_id}/resume can continue the scan "
+            "from its saved progress. Null for web scans."
+        ),
+    )
     error: str | None
     site_id: int | None = None
     scan_after_crawl: bool | None = None
@@ -401,6 +408,15 @@ class Delivery(BaseModel):
     created_at: str | None
     delivered_at: str | None
     next_attempt_at: str | None
+
+
+class LlmProfile(BaseModel):
+    """A scan profile: which LLM models AESPA uses for a scan."""
+
+    id: int = Field(description="Send as llm_profile_id when creating a scan.")
+    name: str
+    active: bool = Field(description="Used for scans created without llm_profile_id.")
+    default_model: str | None = Field(description="The profile's main model.")
 
 
 class StopResult(BaseModel):

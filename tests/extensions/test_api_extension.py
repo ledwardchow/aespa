@@ -18,8 +18,16 @@ from sqlalchemy import event
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import SastRun, ScanFinding, ScanLead, Site, TestRun
-from aespa.services import events, run_lifecycle, run_progress
+from aespa.models import (
+    LLMConfig,
+    LLMProfile,
+    SastRun,
+    ScanFinding,
+    ScanLead,
+    Site,
+    TestRun,
+)
+from aespa.services import events, run_lifecycle, run_pause, run_progress
 from extensions.builtin.api import callbacks as api_callbacks
 from extensions.builtin.api.models import ApiDelivery, ApiScan, now
 
@@ -51,14 +59,14 @@ def api(client, monkeypatch, tmp_path, data_dir):
         EXTENSION
     ].error
 
-    started = {"crawl": [], "scheduled": [], "sast": []}
+    started = {"crawl": [], "scheduled": [], "sast": [], "sast_resumed": []}
 
     async def fake_start_crawl(run_id):
         started["crawl"].append(run_id)
         return object()
 
     async def fake_start_sast(run_id, *, resume=False):
-        started["sast"].append(run_id)
+        started["sast_resumed" if resume else "sast"].append(run_id)
 
     from aespa.services import crawl_then_pentest, crawler, sast_scanner
 
@@ -915,6 +923,86 @@ def test_stop_scan(api, monkeypatch):
     )
 
 
+def _set_sast(run_id, **values):
+    with Session(get_engine()) as session:
+        run = session.get(SastRun, run_id)
+        for key, value in values.items():
+            setattr(run, key, value)
+        session.add(run)
+        session.commit()
+
+
+def test_resume_paused_sast_scan(api):
+    token = _token(api)
+    scan = _upload(api, token).json()
+    run_id = int(scan["id"].split("-")[1])
+    url = f"{BASE}/v1/scans/{scan['id']}"
+    resume = f"{BASE}/v1/sast/scans/{scan['id']}/resume"
+    assert scan["resumable"] is False
+
+    refused = api.client.post(resume, headers=_auth(token))
+    assert refused.status_code == 409
+    assert api.started["sast_resumed"] == []
+
+    _set_sast(run_id, status="paused")
+    run_pause.save_pause(
+        "sast", run_id, provider="openai", message="Rate limited", reason="network"
+    )
+    paused = api.client.get(url, headers=_auth(token)).json()
+    assert (paused["state"], paused["resumable"]) == ("paused", True)
+
+    assert (
+        api.client.post(resume, headers=_auth(_token(api, scopes=["web"]))).status_code
+        == 403
+    )
+    resumed = api.client.post(resume, headers=_auth(token))
+    assert resumed.status_code == 200, resumed.text
+    assert api.started["sast_resumed"] == [run_id]
+    assert run_pause.get_pause("sast", run_id) is None
+
+
+def test_resume_is_only_for_sast_scans(api):
+    token = _token(api)
+    web = api.client.post(
+        f"{BASE}/v1/web/scans", headers=_auth(token), json={"site": _site()}
+    ).json()
+    assert web["resumable"] is None
+    response = api.client.post(
+        f"{BASE}/v1/sast/scans/{web['id']}/resume", headers=_auth(token)
+    )
+    assert response.status_code == 409
+
+
+def test_llm_profiles_are_listed_for_any_token(api):
+    with Session(get_engine()) as session:
+        model = LLMConfig(name="Claude", model="claude-opus-5-5")
+        session.add(model)
+        session.commit()
+        session.refresh(model)
+        session.add(LLMProfile(name="Quick", default_model_id=model.id))
+        session.add(LLMProfile(name="Thorough", is_active=True))
+        session.add(LLMProfile(name="Gone", extension_ref="missing.ext:profile"))
+        session.commit()
+
+    response = api.client.get(
+        f"{BASE}/v1/llm-profiles", headers=_auth(_token(api, scopes=["sast"]))
+    )
+    assert response.status_code == 200, response.text
+    by_name = {item["name"]: item for item in response.json()}
+    assert set(by_name) == {"Quick", "Thorough"}
+    assert by_name["Quick"]["default_model"] == "Claude"
+    assert by_name["Thorough"]["active"] is True
+    assert set(by_name["Quick"]) == {"id", "name", "active", "default_model"}
+
+    profile_id = by_name["Quick"]["id"]
+    created = _upload(api, _token(api), llm_profile_id=str(profile_id))
+    assert created.status_code == 201, created.text
+    with Session(get_engine()) as session:
+        run = session.get(SastRun, int(created.json()["id"].split("-")[1]))
+        assert run.llm_profile_id == profile_id
+    assert api.client.get(f"{BASE}/v1/llm-profiles").status_code == 401
+
+
 # ── Callbacks ────────────────────────────────────────────────────────────────
 
 
@@ -1146,6 +1234,10 @@ def test_extension_writes_to_main_database_only_through_core_services(api):
         api.client.get(f"{BASE}/v1/scans/{scan['id']}", headers=_auth(token))
         api.client.get(f"{BASE}/v1/scans/{scan['id']}/findings", headers=_auth(token))
         api.client.get(f"{BASE}/v1/scans/{scan['id']}/sarif", headers=_auth(token))
+        api.client.get(f"{BASE}/v1/llm-profiles", headers=_auth(token))
+        api.client.post(
+            f"{BASE}/v1/sast/scans/{scan['id']}/resume", headers=_auth(token)
+        )
         api.client.post(
             f"{BASE}/v1/web/scans",
             headers=_auth(token),
