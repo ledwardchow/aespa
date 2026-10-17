@@ -1228,6 +1228,14 @@ async def _completion_with_tools_once(
             _emit_usage(usage_callback, config.model, delta, quota)
             continue
         if event_type == "item/tool/call" or event_type == "tool":
+            if conversation.daybreak_program:
+                usage_callback(
+                    config.model,
+                    0,
+                    0,
+                    daybreak_program=conversation.daybreak_program,
+                )
+                conversation.daybreak_program = None
             call_id = str(params.get("callId") or params.get("id") or "")
             arguments = params.get("arguments") or {}
             if isinstance(arguments, str):

@@ -18,6 +18,55 @@ from aespa.models import LLMConfig
 from aespa.services import chatgpt_plan, llm
 
 
+def test_plan_text_stream_records_completed_usage_and_daybreak(monkeypatch):
+    response = SimpleNamespace(
+        usage=SimpleNamespace(input_tokens=8, output_tokens=3),
+        access_programs={"cyber": "daybreak_blue"},
+    )
+    recorded = []
+
+    class Responses:
+        async def create(self, **kwargs):
+            async def events():
+                yield SimpleNamespace(type="response.output_text.delta", delta="hello")
+                yield SimpleNamespace(type="response.completed", response=response)
+
+            return events()
+
+    async def client(_config):
+        return SimpleNamespace(responses=Responses())
+
+    async def add_access(_config, kwargs):
+        kwargs["extra_body"] = {"access_programs": {"cyber": "daybreak_blue"}}
+
+    monkeypatch.setattr(llm, "_make_chatgpt_plan_client", client)
+    monkeypatch.setattr(llm, "_add_daybreak_access", add_access)
+    monkeypatch.setattr(
+        llm, "_record_responses_usage", lambda *args, **kwargs: recorded.append(kwargs)
+    )
+    config = SimpleNamespace(
+        provider="openai_chatgpt_plan",
+        model="gpt-5.6-sol",
+        base_url=None,
+        max_tokens=100,
+        reasoning_effort=None,
+        temperature=None,
+        service_tier=None,
+    )
+
+    async def consume():
+        return [
+            part
+            async for part in llm._stream_chat_completion_impl(
+                config, "system", [{"role": "user", "content": "hello"}]
+            )
+        ]
+
+    assert asyncio.run(consume()) == ["hello"]
+    assert len(recorded) == 1
+    assert recorded[0]["daybreak_program"] == "daybreak_blue"
+
+
 @pytest.mark.parametrize(
     ("payload", "expected_client_id"),
     [

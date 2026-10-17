@@ -2402,6 +2402,7 @@ async def _stream_chat_completion_impl(
                 await _add_daybreak_access(config, request_kwargs)
             stream = await _create_response(client, request_kwargs)
             completed = False
+            completed_response = None
             async for event in stream:
                 if getattr(event, "type", None) == "response.output_text.delta":
                     delta = getattr(event, "delta", None)
@@ -2411,6 +2412,7 @@ async def _stream_chat_completion_impl(
                     event_type = getattr(event, "type", None)
                     if event_type == "response.completed":
                         completed = True
+                        completed_response = getattr(event, "response", None)
                     elif event_type == "response.failed":
                         response = getattr(event, "response", None)
                         error = getattr(response, "error", None)
@@ -2427,6 +2429,18 @@ async def _stream_chat_completion_impl(
                         raise RuntimeError("ChatGPT plan response was incomplete")
             if config.provider == "openai_chatgpt_plan" and not completed:
                 raise RuntimeError("ChatGPT plan stream ended early")
+            if (
+                config.provider == "openai_chatgpt_plan"
+                and completed_response is not None
+            ):
+                _record_responses_usage(
+                    config,
+                    completed_response,
+                    requested_prompt_cache_key=request_kwargs.get("prompt_cache_key"),
+                    daybreak_program=_response_daybreak_program(
+                        completed_response, request_kwargs
+                    ),
+                )
         except LLMQuotaPauseError:
             raise
         except Exception as e:

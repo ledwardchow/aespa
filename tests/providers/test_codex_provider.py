@@ -88,6 +88,48 @@ def test_codex_missing_catalog_metadata_is_unknown(monkeypatch):
     assert asyncio.run(codex_provider._daybreak_access_summary()) is None
 
 
+def test_codex_tool_call_records_daybreak_before_turn_completion(monkeypatch):
+    messages = [{"role": "user", "content": "test"}]
+    recorded = []
+
+    class Client:
+        async def request(self, method, params):
+            if method == "account/rateLimits/read":
+                return None
+            raise AssertionError(method)
+
+    client = Client()
+
+    async def get_client():
+        return client
+
+    async def run():
+        conversation = codex_provider._Conversation(
+            thread_id="thread", last_message_count=len(messages), client=client
+        )
+        conversation.daybreak_program = "daybreak_blue"
+        await conversation.events.put(
+            ("tool", {"callId": "call-1", "tool": "check", "arguments": {}})
+        )
+        codex_provider._conversations[id(messages)] = conversation
+        try:
+            result = await codex_provider._completion_with_tools_once(
+                SimpleNamespace(model="gpt-5.6-sol"),
+                "system",
+                messages,
+                [{"name": "check"}],
+                lambda *args, **kwargs: recorded.append(kwargs),
+            )
+            assert conversation.daybreak_program is None
+            return result
+        finally:
+            codex_provider._conversations.pop(id(messages), None)
+
+    monkeypatch.setattr(codex_provider, "_get_client", get_client)
+    assert asyncio.run(run())[1] == "tool_use"
+    assert recorded == [{"daybreak_program": "daybreak_blue"}]
+
+
 class _AsyncLines:
     def __init__(self, *values):
         self._values = iter(values)
