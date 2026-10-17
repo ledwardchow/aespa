@@ -13,6 +13,7 @@ export function WebRunCrawlProgress({ run, crawlerTask, crawlerActive }) {
   const phaseLabel =
     {
       crawling: "Crawling and analysing pages",
+      exploring_workflows: "Trying workflows the crawl did not reach",
       reconciling: "Checking direct access for each user",
       finalizing: "Finalising crawl results",
     }[run.phase] || (isRunning ? "Crawl in progress" : "Crawl is not running");

@@ -26,6 +26,17 @@ DEFAULT_CREDIT_PRICES: dict[str, tuple[float, str]] = {
 
 SUBSCRIPTION_PROVIDERS = {"google_antigravity"}
 
+# OpenAI's priority processing, which Fast speed uses, costs about twice the
+# standard rate. Used only when neither a saved price nor the price feed gives
+# a Fast price for the model.
+FAST_TIER_PRICE_MULTIPLIER = 2.0
+_PRICE_KEYS = (
+    "input_price_usd_per_million",
+    "output_price_usd_per_million",
+    "cache_read_price_usd_per_million",
+    "cache_write_price_usd_per_million",
+)
+
 OPENAI_MODEL_DOCS_URL = "https://developers.openai.com/api/docs/models"
 _CODEX_PRICE_ALIASES = {
     "daybreak-blue-latest": "gpt-5.6-sol",
@@ -153,6 +164,7 @@ def resolve_price(
     provider: str,
     model: str,
     feed: dict[str, Any],
+    service_tier: str = "",
 ) -> dict[str, Any] | None:
     """Resolve a LiteLLM entry without broad fuzzy matching.
 
@@ -182,6 +194,13 @@ def resolve_price(
             confidence = "alias"
     if selected is None:
         return None
+    if service_tier:
+        # LiteLLM lists priority-processing prices under a ``_priority`` suffix.
+        selected = {
+            key.removesuffix("_priority"): value
+            for key, value in selected.items()
+            if key.endswith("_priority")
+        }
 
     input_rate = _as_price(selected.get("input_cost_per_token"))
     output_rate = _as_price(selected.get("output_cost_per_token"))
@@ -240,7 +259,71 @@ def _official_codex_rates(model: str) -> dict[str, Any] | None:
     }
 
 
-def _rates_for(session: Session, provider: str, model: str) -> dict[str, Any]:
+def _rates_for(
+    session: Session, provider: str, model: str, service_tier: str = ""
+) -> dict[str, Any]:
+    if provider in SUBSCRIPTION_PROVIDERS or not service_tier:
+        return _standard_rates_for(session, provider, model)
+    catalog = _catalog_rates(session, provider, model, service_tier)
+    if catalog:
+        return catalog
+    resolved = resolve_price(provider, model, _feed(session), service_tier)
+    if resolved:
+        resolved.setdefault("credit_price_usd_per_million", None)
+        resolved.setdefault("credit_unit", None)
+        resolved.setdefault("manual_override", False)
+        return resolved
+    return _fast_fallback(_standard_rates_for(session, provider, model))
+
+
+def _fast_fallback(standard: dict[str, Any]) -> dict[str, Any]:
+    if not any(standard.get(key) is not None for key in _PRICE_KEYS):
+        return standard
+    return {
+        **standard,
+        **{
+            key: standard[key] * FAST_TIER_PRICE_MULTIPLIER
+            for key in _PRICE_KEYS
+            if standard.get(key) is not None
+        },
+        "price_source": f"{standard.get('price_source') or 'standard'} × "
+        f"{FAST_TIER_PRICE_MULTIPLIER:g}",
+        "price_confidence": "fallback",
+        "manual_override": False,
+    }
+
+
+def _catalog_rates(
+    session: Session, provider: str, model: str, service_tier: str
+) -> dict[str, Any] | None:
+    catalog = session.exec(
+        select(LLMPriceCatalog).where(
+            LLMPriceCatalog.provider == provider,
+            LLMPriceCatalog.model == model,
+            LLMPriceCatalog.service_tier == service_tier,
+        )
+    ).first()
+    if catalog is None:
+        return None
+    rates = {
+        key: getattr(catalog, key)
+        for key in (
+            *_PRICE_KEYS,
+            "credit_price_usd_per_million",
+            "credit_unit",
+            "price_source",
+            "price_confidence",
+            "manual_override",
+        )
+    }
+    credit_price, credit_unit = _native_credit_defaults(provider)
+    if rates["credit_price_usd_per_million"] is None:
+        rates["credit_price_usd_per_million"] = credit_price
+    rates["credit_unit"] = rates["credit_unit"] or credit_unit
+    return rates
+
+
+def _standard_rates_for(session: Session, provider: str, model: str) -> dict[str, Any]:
     if provider in SUBSCRIPTION_PROVIDERS:
         return {
             "input_price_usd_per_million": None,
@@ -253,35 +336,9 @@ def _rates_for(session: Session, provider: str, model: str) -> dict[str, Any]:
             "price_confidence": "not_applicable",
             "manual_override": False,
         }
-    catalog = session.exec(
-        select(LLMPriceCatalog).where(
-            LLMPriceCatalog.provider == provider,
-            LLMPriceCatalog.model == model,
-        )
-    ).first()
+    catalog = _catalog_rates(session, provider, model, "")
     if catalog:
-        rates = {
-            key: getattr(catalog, key)
-            for key in (
-                "input_price_usd_per_million",
-                "output_price_usd_per_million",
-                "cache_read_price_usd_per_million",
-                "cache_write_price_usd_per_million",
-                "credit_price_usd_per_million",
-                "credit_unit",
-                "price_source",
-                "price_confidence",
-                "manual_override",
-            )
-        }
-        credit_price, credit_unit = _native_credit_defaults(provider)
-        rates["credit_price_usd_per_million"] = (
-            rates["credit_price_usd_per_million"]
-            if rates["credit_price_usd_per_million"] is not None
-            else credit_price
-        )
-        rates["credit_unit"] = rates["credit_unit"] or credit_unit
-        return rates
+        return catalog
     if provider == "openai_codex":
         return _official_codex_rates(model) or {}
     resolved = resolve_price(provider, model, _feed(session)) or {}
@@ -417,6 +474,7 @@ def _row_dict(row: LLMUsageMonth) -> dict[str, Any]:
         "month": row.month,
         "provider": row.provider,
         "model": row.model,
+        "service_tier": row.service_tier,
         "base_url": row.base_url,
         "requests": row.requests,
         "input_tokens": row.input_tokens,
@@ -449,6 +507,7 @@ def record_usage(
     provider: str,
     model: str,
     *,
+    service_tier: str = "",
     base_url: str | None = None,
     input_tokens: int = 0,
     output_tokens: int = 0,
@@ -467,11 +526,12 @@ def record_usage(
     month = month or local_month()
     now = _utcnow()
     with Session(get_engine()) as session:
-        rates = _rates_for(session, provider, model)
+        rates = _rates_for(session, provider, model, service_tier)
         values = {
             "month": month,
             "provider": provider,
             "model": model,
+            "service_tier": service_tier,
             "base_url": base_url,
             "requests": max(0, int(requests)),
             "input_tokens": max(0, int(input_tokens)),
@@ -505,7 +565,7 @@ def record_usage(
         increments["base_url"] = func.coalesce(table.base_url, excluded.base_url)
         increments["updated_at"] = excluded.updated_at
         stmt = stmt.on_conflict_do_update(
-            index_elements=["month", "provider", "model"],
+            index_elements=["month", "provider", "model", "service_tier"],
             set_=increments,
         )
         session.exec(stmt)
@@ -519,7 +579,9 @@ def get_statistics(session: Session, month: str | None = None) -> dict[str, Any]
         session.exec(
             select(LLMUsageMonth)
             .where(LLMUsageMonth.month == selected_month)
-            .order_by(LLMUsageMonth.provider, LLMUsageMonth.model)
+            .order_by(
+                LLMUsageMonth.provider, LLMUsageMonth.model, LLMUsageMonth.service_tier
+            )
         )
     )
     row_values = [_row_dict(row) for row in rows]
@@ -618,6 +680,10 @@ def refresh_prices(session: Session) -> dict[str, Any]:
             if row.provider == "openai_codex"
             else resolve_price(row.provider, row.model, payload)
         ) or {}
+        if row.service_tier:
+            rates = resolve_price(
+                row.provider, row.model, payload, row.service_tier
+            ) or _fast_fallback(rates)
         credit_price, credit_unit = _native_credit_defaults(row.provider)
         for key, value in rates.items():
             setattr(row, key, value)
@@ -629,7 +695,7 @@ def refresh_prices(session: Session) -> dict[str, Any]:
         row.updated_at = now
         updated += 1
     for catalog in list(session.exec(select(LLMPriceCatalog))):
-        if catalog.manual_override:
+        if catalog.manual_override or catalog.service_tier:
             continue
         rates = (
             _official_codex_rates(catalog.model)
@@ -651,6 +717,7 @@ def set_prices(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
     month = str(payload.get("month") or local_month())
     provider = str(payload.get("provider") or "").strip()
     model = str(payload.get("model") or "").strip()
+    service_tier = str(payload.get("service_tier") or "").strip()
     if not provider or not model or len(month) != 7:
         raise ValueError("month, provider, and model are required")
     allowed = {
@@ -671,10 +738,13 @@ def set_prices(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
             LLMUsageMonth.month == month,
             LLMUsageMonth.provider == provider,
             LLMUsageMonth.model == model,
+            LLMUsageMonth.service_tier == service_tier,
         )
     ).first()
     if row is None:
-        row = LLMUsageMonth(month=month, provider=provider, model=model)
+        row = LLMUsageMonth(
+            month=month, provider=provider, model=model, service_tier=service_tier
+        )
         session.add(row)
     for key, value in values.items():
         setattr(row, key, value)
@@ -688,10 +758,13 @@ def set_prices(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
             select(LLMPriceCatalog).where(
                 LLMPriceCatalog.provider == provider,
                 LLMPriceCatalog.model == model,
+                LLMPriceCatalog.service_tier == service_tier,
             )
         ).first()
         if catalog is None:
-            catalog = LLMPriceCatalog(provider=provider, model=model)
+            catalog = LLMPriceCatalog(
+                provider=provider, model=model, service_tier=service_tier
+            )
             session.add(catalog)
         for key, value in values.items():
             setattr(catalog, key, value)

@@ -443,13 +443,22 @@ class LLMUsageMonth(SQLModel, table=True):
 
     __tablename__ = "llm_usage_month"
     __table_args__ = (
-        UniqueConstraint("month", "provider", "model", name="uq_llm_usage_month_key"),
+        UniqueConstraint(
+            "month",
+            "provider",
+            "model",
+            "service_tier",
+            name="uq_llm_usage_month_key",
+        ),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     month: str = Field(index=True)
     provider: str = Field(index=True)
     model: str = Field(index=True)
+    # Empty for standard speed. Faster tiers are billed at higher rates, so
+    # they are counted on their own row.
+    service_tier: str = Field(default="")
     base_url: Optional[str] = Field(default=None, nullable=True)
     requests: int = Field(default=0)
     input_tokens: int = Field(default=0)
@@ -481,12 +490,15 @@ class LLMPriceCatalog(SQLModel, table=True):
 
     __tablename__ = "llm_price_catalog"
     __table_args__ = (
-        UniqueConstraint("provider", "model", name="uq_llm_price_catalog_key"),
+        UniqueConstraint(
+            "provider", "model", "service_tier", name="uq_llm_price_catalog_key"
+        ),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     provider: str = Field(index=True)
     model: str = Field(index=True)
+    service_tier: str = Field(default="")
     input_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
     output_price_usd_per_million: Optional[float] = Field(default=None, nullable=True)
     cache_read_price_usd_per_million: Optional[float] = Field(

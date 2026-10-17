@@ -1072,3 +1072,74 @@ def test_sign_in_error_stops_the_run_using_the_provider(monkeypatch):
     with pytest.raises(chatgpt_plan.ChatGPTSignInRequired):
         asyncio.run(call())
     assert stops == [("api", 42, "Sign in again")]
+
+
+def test_plan_fast_speed_usage_is_recorded_under_its_tier(
+    monkeypatch, isolated_db_engine
+):
+    from sqlmodel import Session, select
+
+    from aespa.models import LLMUsageMonth
+
+    response = SimpleNamespace(
+        output=[],
+        usage=SimpleNamespace(
+            input_tokens=100,
+            output_tokens=20,
+            input_tokens_details=SimpleNamespace(cached_tokens=0),
+        ),
+        prompt_cache_key=None,
+    )
+
+    class Responses:
+        async def create(self, **kwargs):
+            async def events():
+                yield SimpleNamespace(type="response.output_item.done", item=tool_call)
+                yield SimpleNamespace(type="response.completed", response=response)
+
+            return events()
+
+    tool_call = SimpleNamespace(
+        type="function_call", call_id="call_1", name="aespa.check", arguments="{}"
+    )
+
+    async def client(_config):
+        return SimpleNamespace(responses=Responses())
+
+    async def access(_client_id, *, force=False):
+        return {"daybreak": {"blue": True, "red": True}}
+
+    monkeypatch.setattr(chatgpt_plan, "check_access", access)
+    monkeypatch.setattr(llm, "_make_chatgpt_plan_client", client)
+    config = SimpleNamespace(
+        provider="openai_chatgpt_plan",
+        base_url=None,
+        model="gpt-6.1-sol",
+        max_tokens=4096,
+        reasoning_effort="low",
+        service_tier="priority",
+        temperature=None,
+        force_tool_choice=False,
+    )
+    run_id = 991020
+    llm.set_run_context(run_id, emit_fn=None)
+    try:
+        asyncio.run(
+            llm._call_with_tools_impl(
+                config,
+                "Scan",
+                [{"role": "user", "content": "Go"}],
+                tools=[{"name": "check", "description": "Check", "input_schema": {}}],
+            )
+        )
+        usage = llm.get_run_token_usage(run_id)
+    finally:
+        llm.clear_run_context()
+        llm._run_token_usage.pop(("web", run_id), None)
+        llm._run_token_seeded.discard(("web", run_id))
+
+    assert usage["by_model"] == {}
+    assert usage["by_model_fast"]["gpt-6.1-sol"]["output"] == 20
+    with Session(isolated_db_engine) as session:
+        row = session.exec(select(LLMUsageMonth)).one()
+    assert row.service_tier == "priority"

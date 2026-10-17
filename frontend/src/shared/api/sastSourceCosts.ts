@@ -9,6 +9,7 @@ interface Usage {
   estimated_cost_available?: boolean;
   estimated_total_cost_usd?: number | null;
   by_model?: Record<string, { estimated_cost_available?: boolean }>;
+  by_model_fast?: Record<string, { estimated_cost_available?: boolean }>;
 }
 
 export interface SastSourceCost {
@@ -37,7 +38,10 @@ export async function getSastSourceCosts(
       ]);
       const estimate = usage?.estimated_total_cost_usd;
       // A partially priced run must not look like a complete cost estimate.
-      const models = Object.values(usage?.by_model || {});
+      const models = [
+        ...Object.values(usage?.by_model || {}),
+        ...Object.values(usage?.by_model_fast || {}),
+      ];
       const available =
         usage?.estimated_cost_available && models.every((model) => model.estimated_cost_available);
       return {

@@ -14,13 +14,19 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Fast mode usage counted separately**: Calls made with Fast speed on a ChatGPT plan model are now recorded apart from standard calls, because Fast costs more. The Usage page lists them in their own Fast mode table, and the token breakdown on run pages lists them under Fast mode. Fast prices come from the downloaded price data when it includes them. Otherwise AESPA estimates them at twice the model's standard price. You can set your own Fast prices from the Prices button on that table without changing the standard price. Usage recorded before this update stays in the standard list.
+
 - **Testing business-logic flaws in forms**: During a web scan, AESPA can now change a form value that the page does not let a shopper edit — a hidden field, a disabled option, or a value the page never shows at all — and then submit the real form. This lets it test for flaws where the server trusts a value from the browser, such as a checkout that charges a total sent by the page, a saved payment method that belongs to another account, or a coupon reused by changing the order email. It drives the page's own form so the request stays valid, instead of replaying a captured request that the site would reject.
 
 - **Workflows on grouped pages**: Workflows found on one example page can use different items from the same group. AESPA checks the chosen item before trying the action, saves it for retries, and keeps it reserved while other workflows run. Named DAST workflow tests use the same item selection. Delete workflows remain blocked during crawling.
 
+- **ChatGPT Plan Usage tables**: The Readings and Measured intervals tables now show 10 rows at a time, with Previous and Next buttons when there are more.
+
 - **Finding review after web scans**: AESPA reviews batches of findings concurrently, up to the saved DAST LLM request limit. Failed requests and missing verdicts leave the affected findings unvalidated.
 
 ### Fixes
+
+- **Workflow progress during crawls**: While a crawl tried workflows that it had not reached, the Activity Log showed only the start and the result of each workflow, and the crawler card on the Agents view did not change. Each step, such as signing in, opening the starting page, or choosing the next action, now appears in both places, along with how many workflows the crawler model suggested.
 
 - **Scans no longer fail on a single refused request**: When the model provider refused one request during a web or API scan, the whole run stopped and was marked failed. AESPA now retries a refused request once, and if it is refused again, skips that line of investigation and continues the scan on a different target. A scan fails only if the provider keeps refusing across many skipped requests.
 

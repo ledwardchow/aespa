@@ -11,7 +11,12 @@ export function runSpendUsd(tokenUsage) {
 }
 
 function unpricedModels(tokenUsage) {
-  return Object.entries(tokenUsage?.by_model || {})
+  const standard = Object.entries(tokenUsage?.by_model || {});
+  const fast = Object.entries(tokenUsage?.by_model_fast || {}).map(([model, v]) => [
+    `${model} (Fast)`,
+    v,
+  ]);
+  return [...standard, ...fast]
     .filter(([, v]) => !v.estimated_cost_available)
     .map(([model]) => model);
 }

@@ -2086,6 +2086,20 @@ def test_workflows_run_at_once_in_separate_browser_sessions(monkeypatch):
         return {"action": "stop", "reason": "Nothing more to do."}
 
     notes = []
+    log_lines = []
+    progress_events = []
+    monkeypatch.setattr(
+        crawler,
+        "_crawl_log",
+        lambda _run_id, phase, _status, message, **_kwargs: log_lines.append(
+            (phase, message)
+        ),
+    )
+    monkeypatch.setattr(
+        crawler,
+        "_crawl_progress",
+        lambda _run_id, **kwargs: progress_events.append(kwargs),
+    )
     monkeypatch.setattr(playwright.async_api, "async_playwright", FakePlaywright)
     monkeypatch.setattr(crawl_workflows, "launch_playwright_browser", fake_launch)
     monkeypatch.setattr(crawl_workflows, "playwright_user_agent", lambda _b: "test")
@@ -2137,6 +2151,175 @@ def test_workflows_run_at_once_in_separate_browser_sessions(monkeypatch):
     assert sorted(name for name, _status in notes) == [
         f"Workflow {index}" for index in range(5)
     ]
+    # Without a progress callback (the crawl path) each step still reaches
+    # the Activity Log and the crawler agent card.
+    for index in range(5):
+        assert (
+            "crawl_workflow",
+            f"Workflow {index}: Choosing the next step",
+        ) in log_lines
+    assert {event["stage"] for event in progress_events} == {"workflow_step"}
+    assert any(
+        event["stage_label"] == "Workflow 0: Opening the starting page"
+        and event["username"] == "unauthenticated"
+        for event in progress_events
+    )
+
+
+def test_workflow_exploration_executes_action_and_reports_step(monkeypatch):
+    import playwright.async_api
+
+    from aespa.services import crawler
+
+    run_id = 9_734
+
+    class FakePage:
+        url = "https://shop.test/a"
+
+        async def goto(self, *_args, **_kwargs):
+            return SimpleNamespace(status=200)
+
+    class FakeContext:
+        closed = False
+
+        async def new_page(self):
+            return FakePage()
+
+        async def route(self, *_args, **_kwargs):
+            return None
+
+        async def set_extra_http_headers(self, *_args, **_kwargs):
+            return None
+
+        async def close(self):
+            self.closed = True
+
+    class FakeBrowser:
+        async def new_context(self, **_kwargs):
+            return FakeContext()
+
+        async def close(self):
+            return None
+
+    class FakePlaywright:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    notes = []
+    log_lines = []
+    progress_events = []
+    reported = []
+    decide_count = 0
+
+    async def fake_decide(*_args, **_kwargs):
+        nonlocal decide_count
+        decide_count += 1
+        if decide_count == 1:
+            return {"action": "click", "index": 0}
+        return {"action": "stop", "reason": "Completed successfully."}
+
+    async def fake_apply_action(page, decision, observation):
+        return {"action": "click", "name": "Submit", "selector": "#submit"}
+
+    async def no_wait(*_args, **_kwargs):
+        return None
+
+    async def fake_observe(_page):
+        return {
+            "url": "https://shop.test/a",
+            "fields": [],
+            "controls": [{"name": "Submit", "kind": "button", "submits": False}],
+        }
+
+    start_page = SimpleNamespace(
+        id=1, replay_credential_id=None, accessible_by="[]", req_auth=False
+    )
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_crawl_inventory",
+        lambda _run_id: (
+            [{"url": "https://shop.test/a"}],
+            {crawler._norm("https://shop.test/a"): start_page},
+        ),
+    )
+    monkeypatch.setattr(
+        crawler,
+        "_crawl_log",
+        lambda _run_id, phase, _status, message, **_kwargs: log_lines.append(
+            (phase, message)
+        ),
+    )
+    monkeypatch.setattr(
+        crawler,
+        "_crawl_progress",
+        lambda _run_id, **kwargs: progress_events.append(kwargs),
+    )
+    monkeypatch.setattr(playwright.async_api, "async_playwright", FakePlaywright)
+
+    async def fake_launch(*_a, **_k):
+        return FakeBrowser()
+
+    monkeypatch.setattr(crawl_workflows, "launch_playwright_browser", fake_launch)
+    monkeypatch.setattr(crawl_workflows, "playwright_user_agent", lambda _b: "test")
+    monkeypatch.setattr(
+        crawl_workflows, "protect_playwright_context", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        crawl_workflows.traffic_svc, "setup_playwright_logging", lambda *a, **k: None
+    )
+    monkeypatch.setattr(crawler, "_wait_for_content_settle", no_wait)
+    monkeypatch.setattr(crawl_workflows, "_observe", fake_observe)
+    monkeypatch.setattr(crawl_workflows, "_decide_with_corrections", fake_decide)
+    monkeypatch.setattr(crawl_workflows, "_apply_action", fake_apply_action)
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_record_note",
+        lambda _run_id, workflow, status, descriptions, detail, *_args, **_kwargs: (
+            notes.append((workflow["name"], status, descriptions, detail))
+        ),
+    )
+
+    workflows = [
+        {
+            "name": "Submit Form",
+            "goal": "Submit the form",
+            "reason": "Test form submission",
+            "start_url": "https://shop.test/a",
+            "destructive": False,
+        }
+    ]
+
+    asyncio.run(
+        crawl_workflows.explore_after_crawl(
+            run_id,
+            llm_cfg=None,
+            site=SimpleNamespace(base_url="https://shop.test", login_url=""),
+            creds=[],
+            shared=None,
+            max_pages=10,
+            browser_engine="chromium",
+            browser_visible=False,
+            pw_proxy={},
+            global_http_header={},
+            selected_workflows=workflows,
+            progress=lambda changes: reported.append(changes),
+        )
+    )
+
+    assert len(notes) == 1
+    name, status, descriptions, detail = notes[0]
+    assert name == "Submit Form"
+    assert status == "not_reached"
+    assert descriptions == ["click Submit"]
+    assert detail == "Completed successfully."
+    assert any(
+        msg == "Submit Form: Clicking a page control" for phase, msg in log_lines
+    )
+    assert any(msg == "Submit Form: Checking the result" for phase, msg in log_lines)
+    assert any(r.get("stage") == "finished" for r in reported)
 
 
 def test_inferred_workflows_after_payment_and_delete_are_all_tried(monkeypatch):

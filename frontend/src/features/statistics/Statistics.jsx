@@ -69,7 +69,13 @@ function PriceEditor({ row, month, onSaved, onCancel }) {
     setBusy(true);
     setError(null);
     try {
-      const payload = { month, provider: row.provider, model: row.model, ...form };
+      const payload = {
+        month,
+        provider: row.provider,
+        model: row.model,
+        service_tier: row.service_tier || "",
+        ...form,
+      };
       for (const key of [
         "input_price_usd_per_million",
         "output_price_usd_per_million",
@@ -183,12 +189,121 @@ function UsageSummary({ title, stats = {}, headerContent }) {
   );
 }
 
+function rowKey(row) {
+  return `${row.provider}:${row.model}:${row.service_tier || ""}`;
+}
+
+function UsageTable({ title, rows, month, emptyState, onSaved }) {
+  const [editing, setEditing] = useState(null);
+  const calls = rows.reduce((sum, row) => sum + (row.requests || 0), 0);
+  return (
+    <div className="panel">
+      <div className="panel-header">
+        <h2>{title}</h2>
+        <span className="subtle">{fmtCount(calls)} calls</span>
+      </div>
+      {rows.length === 0 ? (
+        emptyState
+      ) : (
+        <div className="table-wrap">
+          <table className="stats-table">
+            <colgroup>
+              <col className="stats-provider-col" />
+              <col className="stats-calls-col" />
+              <col className="stats-token-col" />
+              <col className="stats-token-col" />
+              <col className="stats-token-col" />
+              <col className="stats-token-col" />
+              <col className="stats-credit-col" />
+              <col className="stats-cost-col" />
+              <col className="stats-action-col" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Provider / model</th>
+                <th>Calls</th>
+                <th>Input</th>
+                <th>Output</th>
+                <th>Cache read</th>
+                <th>Cache write</th>
+                <th>Native credits</th>
+                <th>Cost</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <React.Fragment key={rowKey(row)}>
+                  <tr>
+                    <td>
+                      <div>{providerLabel(row.provider)}</div>
+                      <div className="mono subtle">{row.model}</div>
+                      {row.base_url && (
+                        <div className="mono subtle stats-base-url" title={row.base_url}>
+                          {row.base_url}
+                        </div>
+                      )}
+                    </td>
+                    <td>{fmtCount(row.requests)}</td>
+                    <td>{fmtTok(row.input_tokens)}</td>
+                    <td>{fmtTok(row.output_tokens)}</td>
+                    <td>{fmtTok(row.cache_read_tokens)}</td>
+                    <td>{fmtTok(row.cache_write_tokens)}</td>
+                    <td>
+                      {row.ai_credits > 0
+                        ? `${fmtCount(row.ai_credits)} Copilot`
+                        : row.factory_credits > 0
+                          ? `${fmtCount(row.factory_credits)} Factory`
+                          : "—"}
+                    </td>
+                    <td title={row.prices?.confidence || ""}>
+                      {row.provider === "google_antigravity"
+                        ? "Included"
+                        : fmtUsd(row.estimated_total_cost_usd)}
+                    </td>
+                    <td>
+                      {row.provider === "google_antigravity" ? (
+                        <span className="subtle">Included</span>
+                      ) : (
+                        <button
+                          className="btn ghost sm"
+                          onClick={() => setEditing(editing === rowKey(row) ? null : rowKey(row))}
+                        >
+                          Prices
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                  {editing === rowKey(row) && (
+                    <tr>
+                      <td colSpan="9">
+                        <PriceEditor
+                          row={row}
+                          month={month}
+                          onSaved={() => {
+                            setEditing(null);
+                            onSaved();
+                          }}
+                          onCancel={() => setEditing(null)}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function StatisticsPage() {
   const [month, setMonth] = useState(currentMonth);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [editing, setEditing] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -239,6 +354,9 @@ export function StatisticsPage() {
     }
   };
 
+  const rows = data?.rows || [];
+  const standardRows = rows.filter((row) => !row.service_tier);
+  const fastRows = rows.filter((row) => row.service_tier);
   const totals = data?.totals || {};
   const lifetime = data?.lifetime || {};
   const monthlyHeader = (
@@ -298,114 +416,23 @@ export function StatisticsPage() {
             stats={totals}
             headerContent={monthlyHeader}
           />
-          <div className="panel">
-            <div className="panel-header">
-              <h2>Provider and model breakdown</h2>
-              <span className="subtle">{fmtCount(totals.requests)} calls</span>
-            </div>
-            {!data || data.rows.length === 0 ? (
-              <div className="empty-state">
-                <strong>No usage recorded for {monthLabel(month)}</strong>
-                <span>LLM calls will appear here as they complete.</span>
-              </div>
-            ) : (
-              <div className="table-wrap">
-                <table className="stats-table">
-                  <colgroup>
-                    <col className="stats-provider-col" />
-                    <col className="stats-calls-col" />
-                    <col className="stats-token-col" />
-                    <col className="stats-token-col" />
-                    <col className="stats-token-col" />
-                    <col className="stats-token-col" />
-                    <col className="stats-credit-col" />
-                    <col className="stats-cost-col" />
-                    <col className="stats-action-col" />
-                  </colgroup>
-                  <thead>
-                    <tr>
-                      <th>Provider / model</th>
-                      <th>Calls</th>
-                      <th>Input</th>
-                      <th>Output</th>
-                      <th>Cache read</th>
-                      <th>Cache write</th>
-                      <th>Native credits</th>
-                      <th>Cost</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.rows.map((row) => (
-                      <React.Fragment key={`${row.provider}:${row.model}`}>
-                        <tr>
-                          <td>
-                            <div>{providerLabel(row.provider)}</div>
-                            <div className="mono subtle">{row.model}</div>
-                            {row.base_url && (
-                              <div className="mono subtle stats-base-url" title={row.base_url}>
-                                {row.base_url}
-                              </div>
-                            )}
-                          </td>
-                          <td>{fmtCount(row.requests)}</td>
-                          <td>{fmtTok(row.input_tokens)}</td>
-                          <td>{fmtTok(row.output_tokens)}</td>
-                          <td>{fmtTok(row.cache_read_tokens)}</td>
-                          <td>{fmtTok(row.cache_write_tokens)}</td>
-                          <td>
-                            {row.ai_credits > 0
-                              ? `${fmtCount(row.ai_credits)} Copilot`
-                              : row.factory_credits > 0
-                                ? `${fmtCount(row.factory_credits)} Factory`
-                                : "—"}
-                          </td>
-                          <td title={row.prices?.confidence || ""}>
-                            {row.provider === "google_antigravity"
-                              ? "Included"
-                              : fmtUsd(row.estimated_total_cost_usd)}
-                          </td>
-                          <td>
-                            {row.provider === "google_antigravity" ? (
-                              <span className="subtle">Included</span>
-                            ) : (
-                              <button
-                                className="btn ghost sm"
-                                onClick={() =>
-                                  setEditing(
-                                    editing === `${row.provider}:${row.model}`
-                                      ? null
-                                      : `${row.provider}:${row.model}`,
-                                  )
-                                }
-                              >
-                                Prices
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                        {editing === `${row.provider}:${row.model}` && (
-                          <tr>
-                            <td colSpan="9">
-                              <PriceEditor
-                                row={row}
-                                month={month}
-                                onSaved={() => {
-                                  setEditing(null);
-                                  load();
-                                }}
-                                onCancel={() => setEditing(null)}
-                              />
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
+          {(standardRows.length > 0 || fastRows.length === 0) && (
+            <UsageTable
+              title="Provider and model breakdown"
+              rows={standardRows}
+              month={month}
+              onSaved={load}
+              emptyState={
+                <div className="empty-state">
+                  <strong>No usage recorded for {monthLabel(month)}</strong>
+                  <span>LLM calls will appear here as they complete.</span>
+                </div>
+              }
+            />
+          )}
+          {fastRows.length > 0 && (
+            <UsageTable title="Fast mode" rows={fastRows} month={month} onSaved={load} />
+          )}
         </div>
       </div>
     </>

@@ -49,3 +49,15 @@
   display: flex;
   gap: 8px;
 }
+.plan-usage-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.plan-usage-pager span {
+  margin-right: auto;
+}

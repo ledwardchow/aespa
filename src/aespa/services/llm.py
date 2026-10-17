@@ -218,6 +218,7 @@ _run_kind_var: ContextVar[str] = ContextVar("_run_kind", default="web")
 _emit_fn_var: ContextVar[Any | None] = ContextVar("_emit_fn", default=None)
 _provider_var: ContextVar[str | None] = ContextVar("_provider", default=None)
 _base_url_var: ContextVar[str | None] = ContextVar("_base_url", default=None)
+_service_tier_var: ContextVar[str] = ContextVar("_service_tier", default="")
 _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
@@ -274,6 +275,15 @@ _pending_run_calls: dict[tuple[str, int], dict[int, dict[str, Any]]] = {}
 
 # Tracks which (run_kind, run_id) tuples have already been seeded from DB this process lifetime.
 _run_token_seeded: set[tuple[str, int]] = set()
+
+
+def _bucket_key(model: str, service_tier: str) -> str:
+    """Key run usage so a faster, pricier speed tier gets its own entry."""
+    return f"{model}#{service_tier}" if service_tier else model
+
+
+def _bucket_model(key: str, counts: dict[str, Any]) -> str:
+    return str(counts.get("model") or key)
 
 
 # ── Rate Limiting Core ────────────────────────────────────────────────────────
@@ -664,9 +674,10 @@ def _load_bucket_from_db(
                 if not isinstance(bucket, dict):
                     return {}
                 changed = False
-                for model, counts in bucket.items():
+                for key, counts in bucket.items():
                     if not isinstance(counts, dict):
                         continue
+                    model = _bucket_model(key, counts)
                     explicit_provider = str(counts.get("provider") or "").strip()
                     provider = (
                         explicit_provider if explicit_provider != "unknown" else ""
@@ -698,7 +709,9 @@ def _load_bucket_from_db(
                         )
                         counts["bedrock_input_inclusive"] = True
                         changed = True
-                    rates = statistics_service._rates_for(s, provider, model)
+                    rates = statistics_service._rates_for(
+                        s, provider, model, counts.get("service_tier") or ""
+                    )
                     cost = statistics_service.estimate_usage_cost(
                         provider,
                         input_tokens=counts.get("input", 0),
@@ -709,9 +722,9 @@ def _load_bucket_from_db(
                         factory_credits=counts.get("factory_credits", 0),
                         rates=rates,
                     )
-                    for key, value in cost.items():
-                        if counts.get(key) != value:
-                            counts[key] = value
+                    for cost_key, value in cost.items():
+                        if counts.get(cost_key) != value:
+                            counts[cost_key] = value
                             changed = True
                 if changed:
                     run.token_usage_json = json.dumps(bucket)
@@ -733,13 +746,18 @@ def _reprice_bucket(bucket: dict[str, dict[str, Any]]) -> bool:
         from aespa.services import statistics as statistics_service
 
         with _Session(get_engine()) as session:
-            for model, counts in bucket.items():
+            for key, counts in bucket.items():
                 if not isinstance(counts, dict):
                     continue
                 provider = str(counts.get("provider") or "").strip()
                 if not provider or provider == "unknown":
                     continue
-                rates = statistics_service._rates_for(session, provider, model)
+                rates = statistics_service._rates_for(
+                    session,
+                    provider,
+                    _bucket_model(key, counts),
+                    counts.get("service_tier") or "",
+                )
                 cost = statistics_service.estimate_usage_cost(
                     provider,
                     input_tokens=counts.get("input", 0),
@@ -750,9 +768,9 @@ def _reprice_bucket(bucket: dict[str, dict[str, Any]]) -> bool:
                     factory_credits=counts.get("factory_credits", 0),
                     rates=rates,
                 )
-                for key, value in cost.items():
-                    if counts.get(key) != value:
-                        counts[key] = value
+                for cost_key, value in cost.items():
+                    if counts.get(cost_key) != value:
+                        counts[cost_key] = value
                         changed = True
     except Exception:
         log.debug("Failed to reprice accumulated run usage", exc_info=True)
@@ -844,7 +862,7 @@ def set_run_context(run_id: int, emit_fn: Any, run_kind: str = "web") -> None:
                     "requests",
                 ):
                     bucket[model][k] = max(bucket[model].get(k, 0), counts.get(k, 0))
-                for k in ("provider", "copilot_quota"):
+                for k in ("provider", "copilot_quota", "model", "service_tier"):
                     if counts.get(k) is not None:
                         bucket[model][k] = counts[k]
                 if counts.get("bedrock_input_inclusive"):
@@ -923,12 +941,18 @@ def _usage_totals(
         )
 
     pending = pending_calls or {}
-    by_model = {
-        model: {**counts, "uncached_input": _uncached_run_input(model, counts)}
-        for model, counts in bucket.items()
-    }
+    by_model: dict[str, dict[str, Any]] = {}
+    by_model_fast: dict[str, dict[str, Any]] = {}
+    for key, counts in bucket.items():
+        model = _bucket_model(key, counts)
+        target = by_model_fast if counts.get("service_tier") else by_model
+        target[model] = {
+            **counts,
+            "uncached_input": _uncached_run_input(model, counts),
+        }
+    entries = [*by_model.values(), *by_model_fast.values()]
     return {
-        "total_uncached_input": sum(v["uncached_input"] for v in by_model.values()),
+        "total_uncached_input": sum(v["uncached_input"] for v in entries),
         "total_input": sum(v.get("input", 0) for v in bucket.values()),
         "total_output": sum(v.get("output", 0) for v in bucket.values()),
         "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
@@ -954,6 +978,7 @@ def _usage_totals(
         "copilot_quota": latest_quota("copilot_quota"),
         "codex_quota": latest_quota("codex_quota"),
         "by_model": by_model,
+        "by_model_fast": by_model_fast,
     }
 
 
@@ -1020,6 +1045,7 @@ def _record_usage(
     codex_quota: dict[str, Any] | None = None,
     thinking_tokens: int = 0,
     input_includes_cache: bool | None = None,
+    service_tier: str | None = None,
     **kwargs: Any,
 ) -> None:
     """Accumulate provider usage for a run and the independent monthly ledger."""
@@ -1030,6 +1056,9 @@ def _record_usage(
     context = usage_context or _capture_usage_context()
     usage_provider = provider or _provider_var.get() or "unknown"
     usage_base_url = base_url if base_url is not None else _base_url_var.get()
+    usage_service_tier = (
+        service_tier if service_tier is not None else _service_tier_var.get()
+    )
     # Bedrock Converse reports only uncached tokens in inputTokens. Keep the
     # run's input total inclusive while retaining separate cache counters.
     reported_input = (
@@ -1078,6 +1107,7 @@ def _record_usage(
         usage_rates = statistics_service.record_usage(
             usage_provider,
             model,
+            service_tier=usage_service_tier,
             base_url=usage_base_url,
             input_tokens=normalized_input,
             output_tokens=output_tokens,
@@ -1097,8 +1127,12 @@ def _record_usage(
     key = (run_kind, run_id)
     bucket = _run_token_usage.setdefault(key, {})
     entry = bucket.setdefault(
-        model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        _bucket_key(model, usage_service_tier),
+        {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
     )
+    if usage_service_tier:
+        entry["model"] = model
+        entry["service_tier"] = usage_service_tier
     entry["input"] += reported_input
     entry["output"] += output_tokens
     entry["cache_read"] += cache_read_tokens
@@ -1139,6 +1173,7 @@ def _record_usage(
                 {
                     "type": "token_usage_update",
                     "model": model,
+                    "service_tier": usage_service_tier,
                     "input_tokens": reported_input,
                     "output_tokens": output_tokens,
                     "cache_read_tokens": cache_read_tokens,
@@ -1861,6 +1896,7 @@ async def _call_impl(
 ) -> str:
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
+    _service_tier_var.set(getattr(config, "service_tier", None) or "")
     _last_call_tokens_var.set(None)
     _last_response_cache_telemetry_var.set(None)
     limiter = get_limiter_for_config(config)
@@ -2142,6 +2178,7 @@ async def _stream_chat_completion_impl(
     """Stream a chat completion from the configured LLM provider in real-time."""
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
+    _service_tier_var.set(getattr(config, "service_tier", None) or "")
     if config.provider in (
         "claude_cli",
         "factory_droid",
@@ -6634,6 +6671,7 @@ async def _call_with_tools_impl(
     """
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
+    _service_tier_var.set(getattr(config, "service_tier", None) or "")
     _active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
     if config.provider == "claude_cli":
         from aespa.services import claude_cli_provider

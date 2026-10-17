@@ -16,6 +16,52 @@ export function fmtCredits(n) {
 
 export { fmtUsd };
 
+function ModelUsageRow({ model, v }) {
+  return (
+    <div className="token-breakdown-row">
+      <span className="token-model-name">{model}</span>
+      {v.factory_credits > 0 ? (
+        <span className="token-in">{fmtTok(v.factory_credits)} Droid credits</span>
+      ) : null}
+      {v.ai_credits > 0 ? (
+        <span className="token-in">{fmtCredits(v.ai_credits)} credits</span>
+      ) : null}
+      {v.premium_requests > 0 ? (
+        <span className="token-in">{fmtCredits(v.premium_requests)} premium</span>
+      ) : null}
+      {v.requests > 0 ? <span className="token-out">{fmtTok(v.requests)} calls</span> : null}
+      {v.input > 0 || v.cache_read > 0 || v.cache_write > 0 ? (
+        <span className="token-in" title="Input tokens excluding cache reads and writes">
+          ↑{fmtTok(v.uncached_input ?? v.input)}
+        </span>
+      ) : null}
+      {v.output > 0 ? <span className="token-out">↓{fmtTok(v.output)}</span> : null}
+      {v.cache_read > 0 || v.cache_write > 0 ? (
+        <>
+          {v.cache_read > 0 ? (
+            <span className="token-cache-read" title="Cache read">
+              ⚡{fmtTok(v.cache_read)}
+            </span>
+          ) : null}
+          {v.cache_write > 0 ? (
+            <span className="token-cache-write" title="Cache write">
+              ✎{fmtTok(v.cache_write)}
+            </span>
+          ) : null}
+        </>
+      ) : null}
+      {v.estimated_cost_available && v.estimated_total_cost_usd != null ? (
+        <span
+          className="token-cost"
+          title="Estimated cost based on recorded usage and model pricing"
+        >
+          ≈{fmtUsd(v.estimated_total_cost_usd)} est.
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function TokenUsageBar({
   tokenUsage,
   tokenExpanded,
@@ -32,7 +78,12 @@ export function TokenUsageBar({
   const pendingInputTokens = Number(tokenUsage?.pending_input_tokens || 0);
   const pendingRequests = Number(tokenUsage?.pending_requests || 0);
   const hasPendingUsage = pendingRequests > 0 || pendingInputTokens > 0;
-  const providers = new Set(Object.values(tokenUsage?.by_model || {}).map((v) => v.provider));
+  const fastModels = Object.entries(tokenUsage?.by_model_fast || {});
+  const providers = new Set(
+    [...Object.values(tokenUsage?.by_model || {}), ...fastModels.map(([, v]) => v)].map(
+      (v) => v.provider,
+    ),
+  );
   const hasCopilot = providers.has("github_copilot");
   const hasDroid = providers.has("factory_droid");
   const hasCodex = providers.has("openai_codex");
@@ -190,50 +241,16 @@ export function TokenUsageBar({
             </div>
           ) : null}
           {Object.entries(tokenUsage.by_model || {}).map(([model, v]) => (
-            <div key={model} className="token-breakdown-row">
-              <span className="token-model-name">{model}</span>
-              {v.factory_credits > 0 ? (
-                <span className="token-in">{fmtTok(v.factory_credits)} Droid credits</span>
-              ) : null}
-              {v.ai_credits > 0 ? (
-                <span className="token-in">{fmtCredits(v.ai_credits)} credits</span>
-              ) : null}
-              {v.premium_requests > 0 ? (
-                <span className="token-in">{fmtCredits(v.premium_requests)} premium</span>
-              ) : null}
-              {v.requests > 0 ? (
-                <span className="token-out">{fmtTok(v.requests)} calls</span>
-              ) : null}
-              {v.input > 0 || v.cache_read > 0 || v.cache_write > 0 ? (
-                <span className="token-in" title="Input tokens excluding cache reads and writes">
-                  ↑{fmtTok(v.uncached_input ?? v.input)}
-                </span>
-              ) : null}
-              {v.output > 0 ? <span className="token-out">↓{fmtTok(v.output)}</span> : null}
-              {v.cache_read > 0 || v.cache_write > 0 ? (
-                <>
-                  {v.cache_read > 0 ? (
-                    <span className="token-cache-read" title="Cache read">
-                      ⚡{fmtTok(v.cache_read)}
-                    </span>
-                  ) : null}
-                  {v.cache_write > 0 ? (
-                    <span className="token-cache-write" title="Cache write">
-                      ✎{fmtTok(v.cache_write)}
-                    </span>
-                  ) : null}
-                </>
-              ) : null}
-              {v.estimated_cost_available && v.estimated_total_cost_usd != null ? (
-                <span
-                  className="token-cost"
-                  title="Estimated cost based on recorded usage and model pricing"
-                >
-                  ≈{fmtUsd(v.estimated_total_cost_usd)} est.
-                </span>
-              ) : null}
-            </div>
+            <ModelUsageRow key={model} model={model} v={v} />
           ))}
+          {fastModels.length > 0 ? (
+            <>
+              <div className="token-breakdown-heading">Fast mode</div>
+              {fastModels.map(([model, v]) => (
+                <ModelUsageRow key={`fast:${model}`} model={model} v={v} />
+              ))}
+            </>
+          ) : null}
         </div>
       )}
     </>

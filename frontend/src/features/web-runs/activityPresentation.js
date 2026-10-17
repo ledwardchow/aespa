@@ -128,7 +128,7 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
     activityLog
       .filter(
         (entry) =>
-          ["crawl", "reconcile"].includes(entry.phase) &&
+          ["crawl", "reconcile", "crawl_workflow"].includes(entry.phase) &&
           entry.data?.stage &&
           (entry.page_url || entry.data?.username),
       )

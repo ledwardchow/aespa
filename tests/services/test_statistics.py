@@ -460,3 +460,105 @@ def test_existing_run_token_usage_is_backfilled_and_persisted(isolated_db_engine
     with Session(isolated_db_engine) as session:
         saved = json.loads(session.get(TestRun, run_id).token_usage_json)
     assert saved[model]["estimated_total_cost_usd"] == 1.94
+
+
+def _add_standard_price(session, model):
+    session.add(
+        LLMPriceCatalog(
+            provider="openai_chatgpt_plan",
+            model=model,
+            input_price_usd_per_million=1,
+            output_price_usd_per_million=2,
+        )
+    )
+    session.commit()
+
+
+def test_fast_usage_gets_its_own_row_priced_above_standard(isolated_db_engine):
+    with Session(isolated_db_engine) as session:
+        _add_standard_price(session, "gpt-fast-test")
+    for tier in ("", "fast"):
+        statistics.record_usage(
+            "openai_chatgpt_plan",
+            "gpt-fast-test",
+            service_tier=tier,
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            month="2026-10",
+        )
+    with Session(isolated_db_engine) as session:
+        rows = {
+            row["service_tier"]: row
+            for row in statistics.get_statistics(session, "2026-10")["rows"]
+        }
+    assert rows[""]["requests"] == rows["fast"]["requests"] == 1
+    assert rows[""]["estimated_total_cost_usd"] == 3
+    assert rows["fast"]["estimated_total_cost_usd"] == 6
+    assert rows["fast"]["prices"]["confidence"] == "fallback"
+
+
+def test_fast_price_comes_from_feed_priority_prices():
+    feed = {
+        "gpt-test": {
+            "input_cost_per_token": 0.000001,
+            "output_cost_per_token": 0.000002,
+            "input_cost_per_token_priority": 0.0000025,
+            "output_cost_per_token_priority": 0.000005,
+        }
+    }
+    rates = statistics.resolve_price("openai", "gpt-test", feed, "fast")
+    assert rates["input_price_usd_per_million"] == 2.5
+    assert rates["output_price_usd_per_million"] == 5
+
+
+def test_fast_manual_price_does_not_change_standard_price(isolated_db_engine):
+    statistics.record_usage(
+        "openai_chatgpt_plan", "gpt-manual", service_tier="fast", month="2026-10"
+    )
+    with Session(isolated_db_engine) as session:
+        statistics.set_prices(
+            session,
+            {
+                "month": "2026-10",
+                "provider": "openai_chatgpt_plan",
+                "model": "gpt-manual",
+                "service_tier": "fast",
+                "input_price_usd_per_million": 7,
+            },
+        )
+        fast = statistics._rates_for(
+            session, "openai_chatgpt_plan", "gpt-manual", "fast"
+        )
+        standard = statistics._rates_for(session, "openai_chatgpt_plan", "gpt-manual")
+    assert fast["input_price_usd_per_million"] == 7
+    assert standard.get("input_price_usd_per_million") is None
+
+
+def test_run_usage_lists_fast_models_separately(isolated_db_engine):
+    model = "gpt-run-fast"
+    with Session(isolated_db_engine) as session:
+        _add_standard_price(session, model)
+    run_id = 991010
+    key = ("web", run_id)
+    llm.set_run_context(run_id, emit_fn=None)
+    try:
+        for tier in ("", "fast"):
+            llm._record_usage(
+                model,
+                input_tokens=1_000_000,
+                output_tokens=0,
+                provider="openai_chatgpt_plan",
+                service_tier=tier,
+            )
+        usage = llm.get_run_token_usage(run_id)
+    finally:
+        llm.clear_run_context()
+        llm._run_token_usage.pop(key, None)
+        llm._run_token_seeded.discard(key)
+
+    assert set(usage["by_model"]) == set(usage["by_model_fast"]) == {model}
+    assert usage["by_model"][model]["estimated_total_cost_usd"] == 1
+    assert usage["by_model_fast"][model]["estimated_total_cost_usd"] == 2
+    assert usage["by_model_fast"][model]["service_tier"] == "fast"
+    assert usage["total_input"] == 2_000_000
+    assert usage["estimated_total_cost_usd"] == 3

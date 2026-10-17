@@ -101,16 +101,20 @@ export function CampaignRunsTab({ systemId, campaign, resumeSource, resumeTarget
         estimated_total_cost_usd: 0,
         estimated_cost_available: false,
         by_model: {},
+        by_model_fast: {},
       };
       for (const r of results) {
         if (!r) continue;
         for (const key of Object.keys(totals)) {
-          if (key === "by_model") continue;
+          if (key === "by_model" || key === "by_model_fast") continue;
           if (key === "estimated_cost_available") totals[key] = totals[key] || r[key];
           else totals[key] += r[key] || 0;
         }
-        for (const [model, usage] of Object.entries(r.by_model || {})) {
-          const aggregate = (totals.by_model[model] ||= { provider: usage.provider });
+        for (const [list, model, usage] of [
+          ...Object.entries(r.by_model || {}).map(([m, u]) => ["by_model", m, u]),
+          ...Object.entries(r.by_model_fast || {}).map(([m, u]) => ["by_model_fast", m, u]),
+        ]) {
+          const aggregate = (totals[list][model] ||= { provider: usage.provider });
           for (const key of [
             "input",
             "uncached_input",

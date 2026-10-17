@@ -73,3 +73,28 @@ test("keeps cached-only usage visible with zero uncached input", () => {
   expect(screen.getByText("⚡300 cached")).toBeTruthy();
   expect(screen.queryByText("No usage data yet")).toBeNull();
 });
+
+test("lists fast mode usage separately from standard usage", () => {
+  render(
+    <TokenUsageBar
+      tokenExpanded
+      tokenUsage={{
+        total_input: 300,
+        total_output: 30,
+        by_model: { "gpt-6-sol": { provider: "openai_chatgpt_plan", input: 100, output: 10 } },
+        by_model_fast: {
+          "gpt-6-sol": {
+            provider: "openai_chatgpt_plan",
+            service_tier: "priority",
+            input: 200,
+            output: 20,
+          },
+        },
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Fast mode")).toBeTruthy();
+  expect(screen.getAllByText("gpt-6-sol")).toHaveLength(2);
+  expect(screen.getByText("↓20")).toBeTruthy();
+});

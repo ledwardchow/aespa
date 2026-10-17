@@ -1262,6 +1262,8 @@ async def explore_after_crawl(
 
     from aespa.services.crawler import (
         _authenticate,
+        _crawl_log,
+        _crawl_progress,
         _login_url_for_credential,
         _norm,
         _same_domain,
@@ -1288,6 +1290,12 @@ async def explore_after_crawl(
         proposals = selected_workflows
     else:
         saved_workflows = _saved_workflow_proposals(site)
+        _crawl_log(
+            run_id,
+            "crawl_workflow",
+            "info",
+            "Asking the crawler model which workflows to try",
+        )
         try:
             inferred = await _infer_workflows(
                 llm_cfg,
@@ -1337,6 +1345,13 @@ async def explore_after_crawl(
                     (page_id, workflow["name"].casefold(), workflow["goal"].casefold())
                 )
         proposals = pending
+        _crawl_log(
+            run_id,
+            "crawl_workflow",
+            "info",
+            f"Found {len(proposals)} workflow{'' if len(proposals) == 1 else 's'} "
+            "to try in the browser",
+        )
     if not proposals:
         return
 
@@ -1461,6 +1476,35 @@ async def explore_after_crawl(
             context, run_id, username=username, purpose="Post-crawl workflow"
         )
         page = await context.new_page()
+
+        def report_step(message: str, **changes) -> None:
+            report(message, **changes)
+            url = page.url if page.url.startswith("http") else workflow["start_url"]
+            label = f"{workflow['name']}: {message}"
+            if changes.get("stage") != "finished":
+                _crawl_log(
+                    run_id,
+                    "crawl_workflow",
+                    "info",
+                    label,
+                    page_url=url,
+                    data={
+                        "stage": "workflow_step",
+                        "stage_label": label,
+                        "username": username,
+                    },
+                )
+            _crawl_progress(
+                run_id,
+                username=username,
+                current_url=url,
+                pages_visited=0,
+                stage="workflow_step",
+                stage_label=label,
+                phase_index=0,
+                phase_total=0,
+            )
+
         steps: list[dict] = []
         descriptions: list[str] = []
         decision_feedback: list[str] = []
@@ -1474,7 +1518,7 @@ async def explore_after_crawl(
         attempted_action = "opening the starting page"
         try:
             if credential:
-                report("Signing in", stage="sign_in")
+                report_step("Signing in", stage="sign_in")
                 try:
                     await _authenticate(
                         page,
@@ -1497,7 +1541,7 @@ async def explore_after_crawl(
                     return
             rejected_urls: set[str] = set(workflow.get("excluded_target_urls") or [])
             while True:
-                report(
+                report_step(
                     "Opening the starting page",
                     stage="opening_page",
                     current_path=urlparse(workflow["start_url"]).path or "/",
@@ -1561,7 +1605,7 @@ async def explore_after_crawl(
             action_limit = (
                 _MAX_RETRY_ACTIONS if selected_workflows is not None else _MAX_ACTIONS
             )
-            report(
+            report_step(
                 "Checking the page",
                 stage="checking_page",
                 current_path=urlparse(page.url).path or "/",
@@ -1575,7 +1619,7 @@ async def explore_after_crawl(
                     detail = "Stopped by the user."
                     break
                 observation = await _observe(page)
-                report(
+                report_step(
                     "Choosing the next step",
                     stage="deciding",
                     current_path=urlparse(page.url).path or "/",
@@ -1596,7 +1640,7 @@ async def explore_after_crawl(
                     )
                     if evidence and evidence.casefold() in visible.casefold():
                         status = "crawled"
-                        report("Saving the reached page", stage="saving_page")
+                        report_step("Saving the reached page", stage="saving_page")
                         detail = (
                             "Reached the workflow with test data."
                             if workflow.get("user_instructions")
@@ -1662,7 +1706,7 @@ async def explore_after_crawl(
                     "select": "Choosing an option",
                     "check": "Choosing a radio option",
                 }.get(action, "Using a page control")
-                report(action_label, stage="acting")
+                report_step(action_label, stage="acting")
                 if action == "click":
                     attempted_action = "clicking a page control"
                 else:
@@ -1675,15 +1719,15 @@ async def explore_after_crawl(
                         if action == "select"
                         else f"checking {field_name}"
                     )
-                step = await _apply_action(page, decision, observation)
-                steps.append(step)
+                action_step = await _apply_action(page, decision, observation)
+                steps.append(action_step)
                 if action in {"fill", "select", "check"}:
                     prior_actions.add(_field_action_key(decision, observation))
                 _remember_generated_value(workflow, decision, observation)
                 descriptions.append(
-                    f"{decision['action']} {step.get('name') or step.get('selector')}"
+                    f"{decision['action']} {action_step.get('name') or action_step.get('selector')}"
                 )
-                report(
+                report_step(
                     "Checking the result",
                     stage="checking_page",
                     current_path=urlparse(page.url).path or "/",
@@ -1768,7 +1812,7 @@ async def explore_after_crawl(
                 request=request,
                 instructions=_instructions_with_generated_values(workflow),
             )
-            report(
+            report_step(
                 detail,
                 stage="finished",
                 current_path=urlparse(page.url).path or "/",

@@ -2,6 +2,7 @@ import * as planUsageApi from "../../shared/api/chatgptPlanUsage.js";
 import { useCallback, useEffect, useState } from "react";
 
 import { fmtTok } from "../../shared/ui/TokenUsageBar.jsx";
+import { usePagedRows } from "./Pager.jsx";
 import { UsageChart } from "./UsageChart.jsx";
 import { fmtPercent, fmtTime, fmtUsd } from "./format.js";
 import "./chatgpt-plan-usage.css";
@@ -132,6 +133,7 @@ function Summary({ data }) {
 }
 
 function Readings({ readings, onDelete, busy }) {
+  const { rows, pager } = usePagedRows(readings);
   return (
     <div className="panel">
       <div className="panel-header">
@@ -156,7 +158,7 @@ function Readings({ readings, onDelete, busy }) {
               </tr>
             </thead>
             <tbody>
-              {readings.map((row) => (
+              {rows.map((row) => (
                 <tr key={row.id}>
                   <td>{fmtTime(row.observed_at)}</td>
                   <td>{fmtPercent(row.used_percent)}</td>
@@ -178,11 +180,13 @@ function Readings({ readings, onDelete, busy }) {
           </table>
         </div>
       )}
+      {pager}
     </div>
   );
 }
 
 function Intervals({ segments }) {
+  const { rows, pager } = usePagedRows(segments);
   if (!segments.length) return null;
   return (
     <div className="panel">
@@ -205,7 +209,7 @@ function Intervals({ segments }) {
             </tr>
           </thead>
           <tbody>
-            {segments.map((row) => (
+            {rows.map((row) => (
               <tr key={`${row.start}-${row.end}`}>
                 <td>
                   {row.from_window_start
@@ -224,6 +228,7 @@ function Intervals({ segments }) {
           </tbody>
         </table>
       </div>
+      {pager}
     </div>
   );
 }

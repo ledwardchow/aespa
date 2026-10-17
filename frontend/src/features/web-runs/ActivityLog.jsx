@@ -110,6 +110,18 @@ export function ActivityLog({ runId, activityLog, sitePlanData, active, onClearL
             label: "Crawl",
             cls: "phase-sweep",
           },
+          crawl_workflow: {
+            label: "Workflows",
+            cls: "phase-sweep",
+          },
+          crawl_workflow_retry: {
+            label: "Workflow retry",
+            cls: "phase-sweep",
+          },
+          crawl_note: {
+            label: "Workflow result",
+            cls: entry.status === "complete" ? "phase-ok" : "phase-other",
+          },
           auth: {
             label: "Auth",
             cls: "phase-plan",

@@ -292,6 +292,14 @@
   gap: 8px;
   padding: 2px 0;
 }
+.token-breakdown-heading {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 6px 0 2px;
+}
 .token-model-name {
   font-size: 11px;
   color: var(--text-2);
