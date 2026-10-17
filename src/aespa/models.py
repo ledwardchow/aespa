@@ -1062,6 +1062,22 @@ class TargetAccessObservation(SQLModel, table=True):
     observed_at: datetime = Field(default_factory=_utcnow)
 
 
+class WorkflowTargetReservation(SQLModel, table=True):
+    __tablename__ = "workflow_target_reservation"
+    __table_args__ = (
+        UniqueConstraint("test_run_id", "owner_key", name="uq_workflow_target_owner"),
+        UniqueConstraint("test_run_id", "target_url", name="uq_workflow_target_url"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    test_run_id: int = Field(sa_column=_run_identity_fk())
+    owner_key: str
+    target_url: str
+    route_pattern: str
+    example_url: str
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 class PageOwaspTest(SQLModel, table=True):
     """One cell in the web workprogram: a (TestRun, CrawledPage, OWASP category) triple.
 

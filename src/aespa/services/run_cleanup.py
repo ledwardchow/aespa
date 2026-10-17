@@ -87,6 +87,7 @@ from aespa.models import (
     TestRun,
     TrafficEntry,
     WorkflowCoverageItem,
+    WorkflowTargetReservation,
 )
 
 
@@ -348,21 +349,31 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
     ).all():
         session.delete(obligation)
     session.flush()
-    for row in session.exec(select(TargetAccessObservation).where(TargetAccessObservation.test_run_id == run_id)).all():
+    for row in session.exec(
+        select(TargetAccessObservation).where(
+            TargetAccessObservation.test_run_id == run_id
+        )
+    ).all():
         session.delete(row)
-    for row in session.exec(select(TargetDiscovery).where(TargetDiscovery.test_run_id == run_id)).all():
+    for row in session.exec(
+        select(TargetDiscovery).where(TargetDiscovery.test_run_id == run_id)
+    ).all():
         session.delete(row)
     session.flush()
     for target in session.exec(
         select(DiscoveredTarget).where(DiscoveredTarget.test_run_id == run_id)
     ).all():
         session.delete(target)
+    for reservation in session.exec(
+        select(WorkflowTargetReservation).where(
+            WorkflowTargetReservation.test_run_id == run_id
+        )
+    ).all():
+        session.delete(reservation)
     session.flush()
 
     detach_finding_dependents(session, finding_ids)
-    detach_page_dependents(
-        session, [page.id for page in pages if page.id is not None]
-    )
+    detach_page_dependents(session, [page.id for page in pages if page.id is not None])
 
     # Findings and page workprogram cells must go before crawled pages because
     # both carry page references.

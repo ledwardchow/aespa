@@ -811,10 +811,34 @@ def seed_deep_tasks(run_id: int) -> int:
         remaining = campaign_limit - len(selected)
         leftovers = systemic[systemic_slots:] + workflows[workflow_slots:]
         selected.extend(leftovers[:remaining])
+        from aespa.services.workflow_workprogram import prepare_workflow_test
+
+        workflow_by_id = {item["id"]: item for item in workflow_items}
+        ready = []
+        session.commit()
         for campaign in selected:
+            workflow_test_id = campaign.get("workflow_test_id")
+            if workflow_test_id is not None:
+                item = workflow_by_id[workflow_test_id]
+                try:
+                    target = prepare_workflow_test(run_id, workflow_test_id)
+                except ValueError:
+                    continue
+                if target["route_pattern"]:
+                    campaign["target_url"] = target["target_url"]
+                    campaign["route_template"] = _canonical_route(target["target_url"])
+                    if target["target_url"] != item["reached_page_url"]:
+                        campaign["page_id"] = None
+                    for check in campaign["checks"]:
+                        check["hypothesis"] += (
+                            f" Use {target['target_url']} as the item for this test. "
+                            "Check that the action is available before changing it."
+                        )
+            ready.append(campaign)
+        for campaign in ready:
             _persist_campaign(session, run_id, campaign)
         session.commit()
-    return len(selected)
+    return len(ready)
 
 
 def _variant_fingerprint(task_id: int, strategy: str, purpose: str) -> str:

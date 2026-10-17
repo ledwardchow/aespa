@@ -12,6 +12,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Workflows on grouped pages**: Workflows found on one example page can use different items from the same group. AESPA checks the chosen item before trying the action, saves it for retries, and keeps it reserved while other workflows run. Named DAST workflow tests use the same item selection. Delete workflows remain blocked during crawling.
+
 - **Finding review after web scans**: AESPA reviews batches of findings concurrently, up to the saved DAST LLM request limit. Failed requests and missing verdicts leave the affected findings unvalidated.
 
 ### Fixes

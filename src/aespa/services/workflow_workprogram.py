@@ -169,6 +169,12 @@ def _workflow_inventory(notes: list[dict], pages: list[CrawledPage]) -> list[dic
                 "latest_note_id": note["id"],
                 "name": str(note.get("name") or "Workflow")[:100],
                 "goal": str(note.get("goal") or "")[:220],
+                "example_url": str(
+                    note.get("example_url") or note.get("start_url") or ""
+                ),
+                "target_url": str(note.get("target_url") or ""),
+                "route_pattern": str(note.get("route_pattern") or ""),
+                "target_owner": str(note.get("target_owner") or ""),
                 "url": page.url
                 if page
                 else str(note.get("start_url") or note.get("url") or ""),
@@ -281,6 +287,7 @@ def seed_workflow_tests(run_id: int) -> int:
 def list_workflow_tests(run_id: int) -> dict:
     with Session(get_engine()) as session:
         notes = list_workflow_notes(session, run_id)
+        notes_by_id = {note["id"]: note for note in notes}
         pages = list(
             session.exec(select(CrawledPage).where(CrawledPage.test_run_id == run_id))
         )
@@ -307,6 +314,7 @@ def list_workflow_tests(run_id: int) -> dict:
         for row in rows:
             if row.workflow_key not in workflow_keys:
                 continue
+            note = notes_by_id.get(row.latest_note_id or -1, {})
             totals[row.status] = totals.get(row.status, 0) + 1
             try:
                 evidence = json.loads(row.evidence_json or "{}")
@@ -322,6 +330,14 @@ def list_workflow_tests(run_id: int) -> dict:
                     "reached_page_url": row.reached_page_url,
                     "name": row.name,
                     "goal": row.goal,
+                    "example_url": str(
+                        note.get("example_url") or note.get("start_url") or ""
+                    ),
+                    "target_url": str(
+                        evidence.get("target_url") or note.get("target_url") or ""
+                    ),
+                    "route_pattern": str(note.get("route_pattern") or ""),
+                    "target_owner": str(note.get("target_owner") or ""),
                     "owasp_category": row.owasp_category,
                     "test_kind": row.test_kind,
                     "test_guidance": WORKFLOW_TEST_GUIDANCE.get(row.test_kind, ""),
@@ -352,6 +368,45 @@ def remaining_workflow_tests(run_id: int) -> list[dict]:
         for item in list_workflow_tests(run_id)["items"]
         if item["status"] not in _TERMINAL
     ]
+
+
+def prepare_workflow_test(
+    run_id: int, item_id: int, *, preferred_url: str | None = None
+) -> dict:
+    from aespa.services.workflow_targets import (
+        reserve_workflow_target,
+        workflow_group_for_example,
+    )
+
+    item = next(
+        (
+            entry
+            for entry in list_workflow_tests(run_id)["items"]
+            if entry["id"] == item_id
+        ),
+        None,
+    )
+    if item is None:
+        raise ValueError("Workflow test not found")
+    example_url = item["example_url"] or item["reached_page_url"]
+    pattern = workflow_group_for_example(run_id, example_url)
+    if pattern is None:
+        return {
+            "item_id": item_id,
+            "target_url": item["reached_page_url"],
+            "example_url": example_url,
+            "route_pattern": None,
+            "check": item["test_kind"],
+        }
+    target = reserve_workflow_target(
+        run_id,
+        item["target_owner"] or item["workflow_key"],
+        example_url,
+        preferred_url=preferred_url,
+    )
+    if target is None:
+        raise ValueError("No separate item is available for this workflow")
+    return {"item_id": item_id, **target, "check": item["test_kind"]}
 
 
 def record_workflow_test(
@@ -390,6 +445,22 @@ def record_workflow_test(
         item = session.get(WorkflowCoverageItem, item_id)
         if item is None or item.test_run_id != run_id:
             raise ValueError("Workflow test does not belong to this run")
+        target = None
+        if item.latest_note_id is not None:
+            note = next(
+                (
+                    entry
+                    for entry in list_workflow_notes(session, run_id)
+                    if entry["id"] == item.latest_note_id
+                ),
+                {},
+            )
+            owner = note.get("target_owner")
+            from aespa.services.workflow_targets import get_workflow_target
+
+            target = get_workflow_target(run_id, owner or item.workflow_key)
+            if status in _COVERED and owner and target is None:
+                raise ValueError("Reserve a workflow item before recording its result")
         for traffic_id in ids:
             row = session.get(TrafficEntry, traffic_id)
             if (
@@ -412,6 +483,7 @@ def record_workflow_test(
                 "expected_behavior": expected,
                 "observed_behavior": observed,
                 "evidence_traffic_ids": ids,
+                "target_url": target["target_url"] if target else None,
             }
         )
         item.updated_at = datetime.now(_UTC)

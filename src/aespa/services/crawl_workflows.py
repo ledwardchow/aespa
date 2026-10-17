@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -20,6 +21,7 @@ from aespa.models import (
     AuthMode,
     CrawledPage,
     Credential,
+    DiscoveredTarget,
     PageCredentialView,
     ScanLog,
     Site,
@@ -28,6 +30,8 @@ from aespa.models import (
 from aespa.schemas import SiteWorkflowInput
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
+from aespa.services import workflow_targets
+from aespa.services.target_catalog import actor_key, exact_url
 
 log = logging.getLogger("aespa.crawl_workflows")
 
@@ -38,6 +42,20 @@ _MAX_SAME_FORM_ERROR = 2
 _FIELD_SELECTOR = 'input:not([type="hidden"]),textarea,select'
 _CONTROL_SELECTOR = 'a[href],button,input[type="submit"],[role="button"]'
 _DELETE_ACTION = re.compile(r"\b(?:delete|remove|destroy|erase|purge)\b", re.I)
+_ITEM_ACTIONS = (
+    (
+        re.compile(r"\b(?:edit|update|change|modify)\b", re.I),
+        re.compile(r"\b(?:edit|update|change|modify)\b", re.I),
+    ),
+    (
+        re.compile(r"\b(?:review|rate)\b", re.I),
+        re.compile(r"\b(?:review|rate|comment)\b", re.I),
+    ),
+    (
+        re.compile(r"\b(?:add|create)\b", re.I),
+        re.compile(r"\b(?:add|create|new)\b", re.I),
+    ),
+)
 _PAYMENT_WORKFLOW = re.compile(
     r"\b(?:pay|payment|paying|checkout|purchase|charge|"
     r"(?:place|submit)\W+(?:an?\W+)?order|"
@@ -90,6 +108,14 @@ def _is_payment_workflow(workflow: dict) -> bool:
             f"{workflow.get('name') or ''} {workflow.get('goal') or ''}"
         )
     )
+
+
+def _item_action_pattern(workflow: dict) -> re.Pattern | None:
+    description = f"{workflow.get('name') or ''} {workflow.get('goal') or ''}"
+    for intent, control in _ITEM_ACTIONS:
+        if intent.search(description):
+            return control
+    return None
 
 
 def _can_generate_sample_data(workflow: dict) -> bool:
@@ -245,6 +271,30 @@ def _crawl_inventory(run_id: int) -> tuple[list[dict], dict[str, CrawledPage]]:
         )
         if len(inventory) >= 80:
             break
+    with Session(get_engine()) as session:
+        run = session.get(TestRun, run_id)
+        try:
+            groups = json.loads(run.route_groups_json or "[]") if run else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            groups = []
+        confirmed = {
+            group["route_pattern"]: group.get("links_seen", 0)
+            for group in groups
+            if isinstance(group, dict) and isinstance(group.get("route_pattern"), str)
+        }
+        urls = [exact_url(item["url"]) for item in inventory]
+        targets = session.exec(
+            select(DiscoveredTarget.url, DiscoveredTarget.route_pattern).where(
+                DiscoveredTarget.test_run_id == run_id,
+                DiscoveredTarget.url.in_(urls),
+            )
+        )
+        patterns = {url: pattern for url, pattern in targets if pattern in confirmed}
+    for item in inventory:
+        pattern = patterns.get(exact_url(item["url"]))
+        if pattern:
+            item["grouped_route"] = pattern
+            item["grouped_links_seen"] = confirmed[pattern]
     known_pages: dict[str, CrawledPage] = {}
     for page in pages:
         key = _norm(page.url)
@@ -304,7 +354,8 @@ def _workflow_identity(workflow: dict) -> tuple[str, str, str]:
 
     return (
         str(workflow.get("name") or "").strip().casefold(),
-        _norm(str(workflow.get("start_url") or "")),
+        str(workflow.get("route_pattern") or "")
+        or _norm(str(workflow.get("example_url") or workflow.get("start_url") or "")),
         str(workflow.get("goal") or "").strip().casefold(),
     )
 
@@ -380,6 +431,10 @@ async def _infer_workflows(
         "an item, saving a draft, or submitting a review. "
         "An interactive page with reached_from requires its recorded actions; "
         "choose reached_from as start_url if you need to reproduce that state. "
+        "A grouped_route means the observed page is one example of several saved "
+        "URLs. Describe the action for any suitable item in that group, while "
+        "using an observed URL as start_url. The runner chooses a separate item "
+        "when it exercises each workflow. "
         "Do not repeat these already noted workflows: "
         f"{json.dumps(sorted(prior_identities or set()))}. Each entry contains its name, "
         "starting URL, and goal. Do not invent a URL or claim "
@@ -401,6 +456,11 @@ async def _infer_workflows(
     page_ids = {
         page["page_id"] for page in inventory if isinstance(page.get("page_id"), int)
     }
+    grouped_urls = {
+        _norm(page["url"]): page["grouped_route"]
+        for page in inventory
+        if page.get("grouped_route")
+    }
     for raw in workflows:
         if not isinstance(raw, dict):
             continue
@@ -418,11 +478,18 @@ async def _infer_workflows(
         key = (
             f"page:{page_id}:{name.casefold()}:{goal.casefold()}"
             if page_id is not None
-            else f"unreached:{name.casefold()}:{_norm(start_url)}:{goal.casefold()}"
+            else f"unreached:{name.casefold()}:{grouped_urls.get(_norm(start_url)) or _norm(start_url)}:{goal.casefold()}"
         )
         if key in seen or (
             page_id is None
-            and _workflow_identity({"name": name, "start_url": start_url, "goal": goal})
+            and _workflow_identity(
+                {
+                    "name": name,
+                    "start_url": start_url,
+                    "route_pattern": grouped_urls.get(_norm(start_url)),
+                    "goal": goal,
+                }
+            )
             in (prior_identities or set())
         ):
             continue
@@ -434,6 +501,7 @@ async def _infer_workflows(
             "reason": reason,
             "reached_page_id": page_id,
             "inferred": True,
+            "route_pattern": grouped_urls.get(_norm(start_url)),
             "destructive": bool(
                 _DELETE_ACTION.search(f"{name} {goal}")
                 or (raw.get("destructive") and _DELETE_ACTION.search(reason))
@@ -1146,6 +1214,11 @@ def _record_note(
         "goal": workflow["goal"],
         "reason": workflow["reason"],
         "start_url": workflow["start_url"],
+        "example_url": workflow.get("example_url") or workflow["start_url"],
+        "target_url": workflow.get("target_url"),
+        "route_pattern": workflow.get("route_pattern"),
+        "target_owner": workflow.get("target_owner"),
+        "excluded_target_urls": workflow.get("excluded_target_urls") or [],
         "retry_of": workflow.get("retry_of"),
         "destructive": bool(workflow.get("destructive")),
         "status": status,
@@ -1270,10 +1343,13 @@ async def explore_after_crawl(
     for workflow in proposals:
         workflow["generate_sample_data"] = _can_generate_sample_data(workflow)
 
+    # Claim a useful item for ordinary workflows before recording blocked deletion.
+    proposals.sort(key=lambda workflow: bool(workflow.get("destructive")))
+
     for workflow in proposals:
-        if known_pages.get(_norm(workflow["start_url"])) is None and not (
-            workflow.get("saved_site_data")
-            and _same_domain(workflow["start_url"], base_netloc)
+        example_url = workflow.get("example_url") or workflow["start_url"]
+        if known_pages.get(_norm(example_url)) is None and not (
+            workflow.get("saved_site_data") and _same_domain(example_url, base_netloc)
         ):
             raise ValueError("Workflow start page is not in the saved crawl")
 
@@ -1285,18 +1361,16 @@ async def explore_after_crawl(
     async def explore_workflow(browser, workflow: dict) -> None:
         if run_id in _stop_requested:
             return
-        start_page = known_pages.get(_norm(workflow["start_url"]))
-        if workflow["destructive"]:
-            _record_note(
-                run_id,
-                workflow,
-                "not_attempted",
-                [],
-                "Not tried because this workflow appears to delete something.",
+        example_url = workflow.get("example_url") or workflow["start_url"]
+        start_page = known_pages.get(_norm(example_url))
+        destructive = bool(workflow["destructive"]) or bool(
+            _DELETE_ACTION.search(
+                f"{workflow.get('name') or ''} {workflow.get('goal') or ''}"
             )
-            return
+        )
         if (
-            _is_payment_workflow(workflow)
+            not destructive
+            and _is_payment_workflow(workflow)
             and not str(workflow.get("user_instructions") or "").strip()
         ):
             _record_note(
@@ -1312,7 +1386,7 @@ async def explore_after_crawl(
         credential, requires_credential = _workflow_credential(
             start_page, creds, historical_usernames
         )
-        if credential is None and requires_credential:
+        if credential is None and requires_credential and not destructive:
             _record_note(
                 run_id,
                 workflow,
@@ -1323,6 +1397,44 @@ async def explore_after_crawl(
             )
             return
         credential_id = credential.id if credential else None
+        route_pattern = workflow_targets.workflow_group_for_example(run_id, example_url)
+        if route_pattern:
+            owner = workflow.get("target_owner")
+            if not owner:
+                identity = json.dumps(
+                    _workflow_identity(workflow), separators=(",", ":")
+                )
+                owner = "crawl:" + hashlib.sha256(identity.encode()).hexdigest()
+            claim = workflow_targets.reserve_workflow_target(
+                run_id,
+                owner,
+                example_url,
+                actor_key=actor_key(credential_id),
+                exclude_urls=set(workflow.get("excluded_target_urls") or []),
+            )
+            if claim is None:
+                _record_note(
+                    run_id,
+                    workflow,
+                    "not_attempted",
+                    [],
+                    "Not tried because this workflow appears to delete something."
+                    if destructive
+                    else "No separate item is available for this workflow.",
+                )
+                return
+            workflow.update(claim)
+            workflow["target_owner"] = owner
+            workflow["start_url"] = claim["target_url"]
+        if destructive:
+            _record_note(
+                run_id,
+                workflow,
+                "not_attempted",
+                [],
+                "Not tried because this workflow appears to delete something.",
+            )
+            return
         if credential and credential.auth_mode in {
             AuthMode.guided,
             AuthMode.entra_id,
@@ -1383,20 +1495,68 @@ async def explore_after_crawl(
                     )
                     status = "not_attempted"
                     return
-            report(
-                "Opening the starting page",
-                stage="opening_page",
-                current_path=urlparse(workflow["start_url"]).path or "/",
-            )
-            await page.goto(
-                workflow["start_url"],
-                wait_until="domcontentloaded",
-                timeout=20_000,
-            )
-            await _wait_for_content_settle(page, max_wait_ms=1200)
-            if not _same_domain(page.url, base_netloc):
-                detail = "The starting page redirected outside the target site."
-                return
+            rejected_urls: set[str] = set(workflow.get("excluded_target_urls") or [])
+            while True:
+                report(
+                    "Opening the starting page",
+                    stage="opening_page",
+                    current_path=urlparse(workflow["start_url"]).path or "/",
+                )
+                try:
+                    response = await page.goto(
+                        workflow["start_url"],
+                        wait_until="domcontentloaded",
+                        timeout=20_000,
+                    )
+                except PlaywrightTimeoutError:
+                    if not workflow.get("target_url"):
+                        raise
+                    response = None
+                await _wait_for_content_settle(page, max_wait_ms=1200)
+                if not _same_domain(page.url, base_netloc):
+                    detail = "The starting page redirected outside the target site."
+                    return
+                opened = not workflow.get("target_url") or (
+                    _norm(page.url) == _norm(workflow["target_url"])
+                    and response is not None
+                    and response.status < 400
+                )
+                if opened and workflow.get("target_url") != example_url:
+                    action = _item_action_pattern(workflow)
+                    if action is not None:
+                        initial_observation = await _observe(page)
+                        controls = " ".join(
+                            str(control.get("name") or "")
+                            for control in initial_observation.get("controls", [])
+                        )
+                        opened = bool(
+                            action.search(controls) or initial_observation.get("fields")
+                        )
+                if opened:
+                    break
+                if not workflow.get("target_owner"):
+                    detail = "The starting page could not be opened."
+                    return
+                rejected_urls.add(workflow["target_url"])
+                workflow["excluded_target_urls"] = sorted(rejected_urls)
+                workflow_targets.release_workflow_target(
+                    run_id, workflow["target_owner"], workflow["target_url"]
+                )
+                if len(rejected_urls) >= 5:
+                    detail = "No accessible item with this workflow's action was found."
+                    return
+                next_target = workflow_targets.reserve_workflow_target(
+                    run_id,
+                    workflow["target_owner"],
+                    example_url,
+                    actor_key=actor_key(credential_id),
+                    exclude_urls=rejected_urls,
+                )
+                if next_target is None:
+                    detail = "No accessible item with this workflow's action was found."
+                    return
+                workflow.update(next_target)
+                workflow["start_url"] = next_target["target_url"]
             parent_id = start_page.id if start_page else None
             action_limit = (
                 _MAX_RETRY_ACTIONS if selected_workflows is not None else _MAX_ACTIONS
@@ -1690,6 +1850,11 @@ def start_workflow_retry(
         "goal": str(note.get("goal") or note.get("name") or "Workflow")[:220],
         "reason": str(note.get("reason") or "User-requested workflow retry")[:360],
         "start_url": str(note.get("start_url") or note.get("url") or ""),
+        "example_url": str(
+            note.get("example_url") or note.get("start_url") or note.get("url") or ""
+        ),
+        "target_owner": note.get("target_owner"),
+        "excluded_target_urls": note.get("excluded_target_urls") or [],
         "destructive": False,
         "retry_of": note["id"],
         "user_instructions": instructions,

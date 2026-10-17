@@ -7234,7 +7234,8 @@ async def _do_thinking_scan(
                     "\n\nNamed workflow security checks:\n"
                     + "\n".join(workflow_lines)
                     + "\nUse context_tool workflow_list for the full current list and "
-                    "workflow_detail for the reached state. Record a result only "
+                    "workflow_detail for the reached state. Call prepare_workflow_test "
+                    "before testing each workflow. Record a result only "
                     "after a targeted security test, with scan traffic as evidence."
                 )
         except Exception as workflow_exc:
@@ -10194,6 +10195,21 @@ async def _do_agentic_thinking_loop(
                 post_probe_fn=post_probe_fn,
                 requested_timeout_s=tool_input.get("timeout_s"),
             )
+
+        if tool_name == "prepare_workflow_test":
+            if is_api_run or coverage_mode == "sast_validate":
+                return "Workflow tests are available only in web coverage scans."
+            from aespa.services.workflow_workprogram import prepare_workflow_test
+
+            try:
+                target = prepare_workflow_test(
+                    run_id,
+                    int(tool_input.get("item_id")),
+                    preferred_url=tool_input.get("target_url"),
+                )
+            except (TypeError, ValueError) as exc:
+                return f"prepare_workflow_test rejected: {exc}"
+            return json.dumps(target, separators=(",", ":"))
 
         if tool_name == "record_workflow_test":
             if is_api_run or coverage_mode == "sast_validate":

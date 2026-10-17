@@ -536,6 +536,14 @@ workflows that stopped because the crawler lacked
 sample data or instructions. Users can supply test data there to continue one
 workflow. Submitting the data opens Workflows so the user can watch the retry.
 The workflow inventory includes the latest named crawl note for each retry chain.
+When the crawl groups similar pages, a workflow keeps the page where it was found
+as an example. Before trying it, AESPA chooses an exact saved link from the same
+confirmed group and reserves that item for the workflow. Other workflows choose
+different items. The choice is saved for retries, and the browser checks access
+and the action before changing anything. If the item cannot be opened, the
+crawler can try another saved link. The scanner uses the same reservations for
+named workflow checks, including Deep mode. Each test still records the exact
+item and traffic it used. Delete workflows remain blocked during the crawl.
 Input fields, business-logic tags, and navigation clicks alone do not create workflows.
 Unreached workflows appear in coverage with crawl progress and no security checks.
 Reached named workflows seed security checks. Each check belongs to the original note, so

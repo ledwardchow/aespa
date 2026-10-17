@@ -874,7 +874,16 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "  replay to execute a mutating crawler recipe.\n"
     "- Named workflows have separate security checks. Prioritize them in Standard mode. "
     "Call workflow_list and workflow_detail "
-    "to see their goals and reached states. Each check has a test type: sequence "
+    "to see their goals and reached states. Before testing a named workflow, "
+    "call prepare_workflow_test with its item_id. You may pass target_url for "
+    "an exact item shown in discovered_targets when you have evidence that the "
+    "account can access it. Use the returned exact target "
+    "for that workflow and verify that the required action is available to the "
+    "chosen account. Keep the same item for the whole test, including comparisons "
+    "between accounts. Another workflow may use a different item in the same "
+    "group. Replay steps describe the example item; check controls again when "
+    "the reserved item differs. If no item is available, report that check as blocked. "
+    "Each check has a test type: sequence "
     "(skip or reorder steps), access (another account or signed out), replay (resubmit "
     "or send copies at once), tampering (change amounts, prices, IDs, or hidden values), "
     "csrf (state change without a valid token or from another origin), or reauth "
@@ -1116,6 +1125,25 @@ THINKING_AGENT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "prepare_workflow_test",
+        "description": (
+            "Reserve an exact item for a named web workflow check. Call before "
+            "testing the workflow. Repeated calls for the same workflow return "
+            "its existing item. Verify access and the action on the live site."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "integer"},
+                "target_url": {
+                    "type": "string",
+                    "description": "Optional exact discovered item URL to reserve for this workflow.",
+                },
+            },
+            "required": ["item_id"],
+        },
+    },
+    {
         "name": "record_workflow_test",
         "description": (
             "Record the outcome of a named workflow security check after testing it. "
@@ -1191,7 +1219,11 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "technique": {"type": "string"},
                 "parameter": {"type": "string"},
             },
-            "required": ["target_id", "baseline_observation_id", "comparison_actor_key"],
+            "required": [
+                "target_id",
+                "baseline_observation_id",
+                "comparison_actor_key",
+            ],
         },
     },
     {
@@ -1503,7 +1535,8 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "state_key": {"type": "string"},
                 "comparison_actor_key": {"type": "string"},
                 "evidence_observation_ids": {
-                    "type": "array", "items": {"type": "integer"},
+                    "type": "array",
+                    "items": {"type": "integer"},
                     "description": "Direct access observation IDs that support this handoff.",
                 },
                 "page_id": {

@@ -28,6 +28,7 @@ from aespa.models import (
     TestRun,
     TestRunStatus,
     TrafficEntry,
+    WorkflowTargetReservation,
 )
 from aespa.schemas import (
     ActiveJobSummary,
@@ -168,26 +169,50 @@ def _clear_crawl_state(session: Session, run: TestRun) -> None:
         return
 
     executions = session.exec(
-        select(ProbeExecution).where(ProbeExecution.run_kind == "web").where(ProbeExecution.run_id == run_id)
+        select(ProbeExecution)
+        .where(ProbeExecution.run_kind == "web")
+        .where(ProbeExecution.run_id == run_id)
     ).all()
     for execution in executions:
-        for evidence in session.exec(select(CoverageEvidence).where(CoverageEvidence.execution_id == execution.id)).all():
+        for evidence in session.exec(
+            select(CoverageEvidence).where(
+                CoverageEvidence.execution_id == execution.id
+            )
+        ).all():
             session.delete(evidence)
         session.delete(execution)
     for row in session.exec(
-        select(ScanObligation).where(ScanObligation.run_kind == "web").where(ScanObligation.run_id == run_id)
+        select(ScanObligation)
+        .where(ScanObligation.run_kind == "web")
+        .where(ScanObligation.run_id == run_id)
     ).all():
         session.delete(row)
     session.flush()
-    for row in session.exec(select(TargetAccessObservation).where(TargetAccessObservation.test_run_id == run_id)).all():
+    for row in session.exec(
+        select(TargetAccessObservation).where(
+            TargetAccessObservation.test_run_id == run_id
+        )
+    ).all():
         session.delete(row)
-    for row in session.exec(select(TargetDiscovery).where(TargetDiscovery.test_run_id == run_id)).all():
+    for row in session.exec(
+        select(TargetDiscovery).where(TargetDiscovery.test_run_id == run_id)
+    ).all():
         session.delete(row)
     session.flush()
-    for cell in session.exec(select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)).all():
+    for cell in session.exec(
+        select(PageOwaspTest).where(PageOwaspTest.test_run_id == run_id)
+    ).all():
         session.delete(cell)
     session.flush()
-    for row in session.exec(select(DiscoveredTarget).where(DiscoveredTarget.test_run_id == run_id)).all():
+    for row in session.exec(
+        select(DiscoveredTarget).where(DiscoveredTarget.test_run_id == run_id)
+    ).all():
+        session.delete(row)
+    for row in session.exec(
+        select(WorkflowTargetReservation).where(
+            WorkflowTargetReservation.test_run_id == run_id
+        )
+    ).all():
         session.delete(row)
     session.flush()
 

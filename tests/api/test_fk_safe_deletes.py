@@ -31,6 +31,7 @@ from aespa.models import (
     TargetDiscovery,
     TestRun,
     WorkflowCoverageItem,
+    WorkflowTargetReservation,
 )
 from aespa.services import findings as findings_svc
 from aespa.services import run_cleanup
@@ -132,6 +133,15 @@ def test_web_run_delete_with_workflow_and_campaign_references(fk_engine):
         finding = _finding(s, test_run_id=run.id)
         _workflow_item(s, run.id, page_id=page.id, finding_id=finding.id)
         _campaign_reference(s, finding, run)
+        s.add(
+            WorkflowTargetReservation(
+                test_run_id=run.id,
+                owner_key="crawl:edit",
+                target_url=page.url,
+                route_pattern="/a",
+                example_url=page.url,
+            )
+        )
         s.commit()
         run_id = run.id
 
@@ -140,6 +150,7 @@ def test_web_run_delete_with_workflow_and_campaign_references(fk_engine):
 
         assert s.get(TestRun, run_id) is None
         assert s.exec(select(WorkflowCoverageItem)).all() == []
+        assert s.exec(select(WorkflowTargetReservation)).all() == []
         assert s.exec(select(CampaignFindingReference)).all() == []
 
 
@@ -234,6 +245,15 @@ def test_delete_page_clears_page_references(fk_engine, fk_client):
         run = _web_run(s)
         page = _page(s, run.id)
         item = _workflow_item(s, run.id, page_id=page.id)
+        s.add(
+            WorkflowTargetReservation(
+                test_run_id=run.id,
+                owner_key="crawl:edit",
+                target_url=page.url,
+                route_pattern="/a",
+                example_url=page.url,
+            )
+        )
         target = DiscoveredTarget(
             test_run_id=run.id, url="http://target.local/a", route_pattern="/a"
         )
@@ -272,6 +292,7 @@ def test_clear_crawl_state_with_workflow_page_link(fk_engine):
         s.commit()
 
         assert s.exec(select(CrawledPage)).all() == []
+        assert s.exec(select(WorkflowTargetReservation)).all() == []
         assert s.get(WorkflowCoverageItem, item.id).reached_page_id is None
 
 

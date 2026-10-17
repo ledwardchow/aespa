@@ -7,6 +7,7 @@ from sqlmodel import select
 
 from aespa.models import (
     CrawledPage,
+    DiscoveredTarget,
     ScanLog,
     Site,
     TestRun,
@@ -19,6 +20,7 @@ from aespa.services.web_workprogram import (
 )
 from aespa.services.workflow_workprogram import (
     list_workflow_tests,
+    prepare_workflow_test,
     record_workflow_test,
     remaining_workflow_tests,
     seed_workflow_tests,
@@ -137,6 +139,54 @@ def test_same_url_workflows_have_separate_checks_and_retry_keeps_result(db_sessi
     assert "Workflow checks still to cover" in directive
     assert "Place order" in directive
     assert "Write review" in directive
+
+
+def test_grouped_workflow_checks_reserve_different_items(db_session):
+    run = _run(db_session)
+    example_url = "https://target.local/products/1"
+    page = _page(db_session, run.id, url=example_url)
+    _note(db_session, run.id, page, "Edit product")
+    _note(db_session, run.id, page, "Review product")
+    run.route_groups_json = json.dumps(
+        [{"route_pattern": "/products/{value}", "links_seen": 2}]
+    )
+    db_session.add(run)
+    for url in (example_url, "https://target.local/products/2"):
+        db_session.add(
+            DiscoveredTarget(
+                test_run_id=run.id,
+                url=url,
+                route_pattern="/products/{value}",
+            )
+        )
+    db_session.commit()
+    seed_workflow_tests(run.id)
+    items = list_workflow_tests(run.id)["items"]
+    edit = next(item for item in items if item["name"] == "Edit product")
+    review = next(item for item in items if item["name"] == "Review product")
+    edit_target = prepare_workflow_test(run.id, edit["id"])
+    review_target = prepare_workflow_test(run.id, review["id"])
+    assert edit_target["target_url"] != review_target["target_url"]
+    assert prepare_workflow_test(run.id, edit["id"]) == edit_target
+    traffic = TrafficEntry(
+        test_run_id=run.id,
+        source="httpx",
+        method="POST",
+        url=edit_target["target_url"],
+    )
+    db_session.add(traffic)
+    db_session.commit()
+    db_session.refresh(traffic)
+    result = record_workflow_test(
+        run.id,
+        edit["id"],
+        status="passed",
+        attempted_sequence=["Save product changes"],
+        expected_behavior="Changes are saved",
+        observed_behavior="The product changed",
+        evidence_traffic_ids=[traffic.id],
+    )
+    assert result["target_url"] == edit_target["target_url"]
 
 
 def test_workflow_result_requires_scan_evidence_or_block_reason(db_session):

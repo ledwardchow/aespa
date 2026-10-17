@@ -1,20 +1,189 @@
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from sqlmodel import Session
+from sqlalchemy import create_engine
+from sqlmodel import Session, SQLModel, select
 
 from aespa.models import (
     CrawledPage,
     Credential,
+    DiscoveredTarget,
     PageCredentialView,
     ScanLog,
     Site,
+    TargetAccessObservation,
     TestRun,
 )
-from aespa.services import crawl_workflows, recon_summary, sites
+from aespa.services import crawl_workflows, recon_summary, sites, workflow_targets
+
+
+def test_grouped_workflows_reserve_distinct_exact_items_and_reuse_on_retry(
+    isolated_db_engine,
+):
+    urls = [f"https://shop.test/admin/products/{number}" for number in range(1, 4)]
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Shop", base_url="https://shop.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(
+            site_id=site.id,
+            name="Grouped crawl",
+            route_groups_json=json.dumps(
+                [
+                    {
+                        "route_pattern": "/admin/products/{value}",
+                        "example_urls": [urls[0]],
+                    }
+                ]
+            ),
+        )
+        session.add(run)
+        session.flush()
+        for url in urls:
+            session.add(
+                DiscoveredTarget(
+                    test_run_id=run.id,
+                    url=url,
+                    route_pattern="/admin/products/{value}",
+                )
+            )
+        session.flush()
+        targets = list(session.exec(select(DiscoveredTarget)))
+        session.add(
+            TargetAccessObservation(
+                test_run_id=run.id,
+                target_id=targets[2].id,
+                actor_key="credential:7",
+                source_kind="page",
+                source_id=1,
+                result="reached",
+            )
+        )
+        session.commit()
+        run_id = run.id
+
+    edit = workflow_targets.reserve_workflow_target(
+        run_id, "crawl:edit", urls[1], actor_key="credential:7"
+    )
+    delete = workflow_targets.reserve_workflow_target(
+        run_id, "crawl:delete", urls[1], actor_key="credential:7"
+    )
+    assert edit["target_url"] == urls[2]
+    assert delete["target_url"] == urls[1]
+    assert edit["route_pattern"] == "/admin/products/{value}"
+    assert workflow_targets.get_workflow_target(run_id, "crawl:edit") == edit
+    assert (
+        workflow_targets.reserve_workflow_target(run_id, "crawl:edit", urls[1]) == edit
+    )
+    assert (
+        workflow_targets.reserve_workflow_target(
+            run_id, "crawl:edit", urls[1], exclude_urls={edit["target_url"]}
+        )
+        == edit
+    )
+    assert (
+        workflow_targets.reserve_workflow_target(
+            run_id, "crawl:third", urls[1], preferred_url=urls[0]
+        )["target_url"]
+        == urls[0]
+    )
+    assert (
+        workflow_targets.reserve_workflow_target(run_id, "crawl:fourth", urls[1])
+        is None
+    )
+    assert (
+        workflow_targets.reserve_workflow_target(
+            run_id,
+            "crawl:unknown",
+            urls[1],
+            preferred_url="https://shop.test/admin/products/99",
+        )
+        is None
+    )
+
+
+def test_grouped_workflow_rejects_unconfirmed_and_unknown_item(isolated_db_engine):
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Shop", base_url="https://shop.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(site_id=site.id, name="Crawl", route_groups_json="[]")
+        session.add(run)
+        session.flush()
+        session.add(
+            DiscoveredTarget(
+                test_run_id=run.id,
+                url="https://shop.test/admin/products/1",
+                route_pattern="/admin/products/{value}",
+            )
+        )
+        session.commit()
+        run_id = run.id
+    assert (
+        workflow_targets.reserve_workflow_target(
+            run_id, "edit", "https://shop.test/admin/products/1"
+        )
+        is None
+    )
+    with Session(isolated_db_engine) as session:
+        run = session.get(TestRun, run_id)
+        run.route_groups_json = json.dumps(
+            [{"route_pattern": "/admin/products/{value}", "example_urls": []}]
+        )
+        session.commit()
+    assert (
+        workflow_targets.reserve_workflow_target(
+            run_id, "edit", "https://shop.test/admin/products/99"
+        )
+        is None
+    )
+
+
+def test_parallel_workflows_claim_different_items(tmp_path, monkeypatch):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'workflow-targets.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(workflow_targets, "get_engine", lambda: engine)
+    urls = [f"https://shop.test/products/{number}" for number in range(2)]
+    try:
+        with Session(engine) as session:
+            site = Site(name="Shop", base_url="https://shop.test")
+            session.add(site)
+            session.flush()
+            run = TestRun(
+                site_id=site.id,
+                name="Parallel workflows",
+                route_groups_json=json.dumps(
+                    [{"route_pattern": "/products/{value}", "links_seen": 2}]
+                ),
+            )
+            session.add(run)
+            session.flush()
+            for url in urls:
+                session.add(
+                    DiscoveredTarget(
+                        test_run_id=run.id,
+                        url=url,
+                        route_pattern="/products/{value}",
+                    )
+                )
+            session.commit()
+            run_id = run.id
+
+        def claim(owner):
+            return workflow_targets.reserve_workflow_target(run_id, owner, urls[0])
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = pool.map(claim, ("edit", "delete"))
+        assert {first["target_url"], second["target_url"]} == set(urls)
+    finally:
+        engine.dispose()
 
 
 def _retry_state(run_id: int, note_id: int) -> dict:
@@ -89,6 +258,37 @@ def test_inference_asks_for_actions_instead_of_generic_pages(monkeypatch):
     assert "specific goal" in prompts[0]
     assert "Do not list ordinary pages, page titles" in prompts[0]
     assert "Include each distinct reached function" not in prompts[0]
+
+
+def test_grouped_inference_names_one_workflow_for_several_items(monkeypatch):
+    urls = [f"https://shop.test/admin/products/{number}" for number in (1, 2)]
+
+    async def completion(_config, prompt):
+        assert "grouped_route" in prompt
+        return json.dumps(
+            {
+                "workflows": [
+                    {
+                        "name": "Edit a product",
+                        "start_url": url,
+                        "goal": "Save product changes",
+                        "reason": "The page shows an edit action",
+                    }
+                    for url in urls
+                ]
+            }
+        )
+
+    monkeypatch.setattr(crawl_workflows.llm_svc, "plain_completion", completion)
+    proposals = asyncio.run(
+        crawl_workflows._infer_workflows(
+            object(),
+            [{"url": url, "grouped_route": "/admin/products/{value}"} for url in urls],
+            set(urls),
+        )
+    )
+    assert len(proposals) == 1
+    assert proposals[0]["route_pattern"] == "/admin/products/{value}"
 
 
 def test_inference_keeps_distinct_reached_states_and_validates_page_ids(monkeypatch):
