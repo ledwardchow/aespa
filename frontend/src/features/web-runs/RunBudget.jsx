@@ -52,7 +52,8 @@ export function RunBudgetMeter({ run, tokenUsage, onRunUpdate, onError }) {
     return (
       <span className={styles.meter} onClick={stop}>
         <span className="token-bar-sep">·</span>
-        <span className={styles.label}>Budget $</span>
+        <span className={styles.label}>Budget</span>
+        <span className={styles.amount}>$</span>
         <input
           className={styles.input}
           type="number"
@@ -68,10 +69,10 @@ export function RunBudgetMeter({ run, tokenUsage, onRunUpdate, onError }) {
             if (e.key === "Escape") setDraft(null);
           }}
         />
-        <button type="button" className="btn sm" onClick={save}>
+        <button type="button" className={styles.link} onClick={save}>
           Save
         </button>
-        <button type="button" className="btn ghost sm" onClick={() => setDraft(null)}>
+        <button type="button" className={styles.link} onClick={() => setDraft(null)}>
           Cancel
         </button>
       </span>
@@ -82,7 +83,8 @@ export function RunBudgetMeter({ run, tokenUsage, onRunUpdate, onError }) {
     return (
       <span className={styles.meter} onClick={stop}>
         <span className="token-bar-sep">·</span>
-        <button type="button" className="btn ghost sm" onClick={() => setDraft("")}>
+        <span className={styles.label}>Budget</span>
+        <button type="button" className={styles.link} onClick={() => setDraft("")}>
           Set budget
         </button>
       </span>
@@ -101,7 +103,7 @@ export function RunBudgetMeter({ run, tokenUsage, onRunUpdate, onError }) {
       <span className={styles.amount}>
         {fmtUsd(spend)} of {fmtUsd(budget)}
       </span>
-      <button type="button" className="btn secondary sm" onClick={() => setDraft(String(budget))}>
+      <button type="button" className={styles.link} onClick={() => setDraft(String(budget))}>
         Edit
       </button>
       {unpriced.length > 0 ? (

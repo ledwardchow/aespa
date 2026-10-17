@@ -100,6 +100,7 @@ export function SiteDetail({ siteId }) {
       crawler_mode: run.crawler_mode || "url",
       page_selection: run.page_selection || "each_url",
       llm_profile_id: run.llm_profile_id || "",
+      llm_budget_usd: run.llm_budget_usd ?? "",
     });
     setEditingRun(run);
   };
@@ -112,6 +113,7 @@ export function SiteDetail({ siteId }) {
         crawler_mode: editForm.crawler_mode,
         page_selection: editForm.page_selection,
         llm_profile_id: editForm.llm_profile_id ? Number(editForm.llm_profile_id) : null,
+        llm_budget_usd: editForm.llm_budget_usd === "" ? null : Number(editForm.llm_budget_usd),
       });
       setRuns((rs) => rs.map((r) => (r.id === updated.id ? updated : r)));
       setEditingRun(null);
@@ -286,6 +288,26 @@ export function SiteDetail({ siteId }) {
                   </option>
                 ))}
               </select>
+            </div>
+            <div className="field" style={{ marginBottom: 14 }}>
+              <label>
+                LLM budget{" "}
+                <span className="field-optional">
+                  (leave blank for no limit; pauses all LLM work when estimated spend reaches it)
+                </span>
+              </label>
+              <div className="row" style={{ gap: 8 }}>
+                <span>$</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  placeholder="No limit"
+                  value={editForm.llm_budget_usd}
+                  onInput={(e) => setEditForm((f) => ({ ...f, llm_budget_usd: e.target.value }))}
+                  style={{ width: 120 }}
+                />
+              </div>
             </div>
             <div
               className="row"

@@ -161,3 +161,23 @@ def test_resume_refused_until_budget_is_raised(client, engine):
         resumed = client.post(f"/api/test-runs/{run_id}/thinking-scan/resume")
         assert resumed.status_code == 200
         resume.assert_awaited_once_with(run_id)
+
+
+def test_edit_run_sets_budget_and_keeps_it_when_omitted(client, engine):
+    run_id = _run(engine)
+    base = {"max_depth": 3, "max_pages": 100}
+
+    edited = client.patch(
+        f"/api/test-runs/{run_id}", json={**base, "llm_budget_usd": 15}
+    )
+    assert edited.json()["llm_budget_usd"] == 15
+
+    other_edit = client.patch(
+        f"/api/test-runs/{run_id}", json={**base, "max_pages": 200}
+    )
+    assert other_edit.json()["llm_budget_usd"] == 15
+
+    cleared = client.patch(
+        f"/api/test-runs/{run_id}", json={**base, "llm_budget_usd": None}
+    )
+    assert cleared.json()["llm_budget_usd"] is None

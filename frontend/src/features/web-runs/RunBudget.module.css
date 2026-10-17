@@ -1,18 +1,44 @@
 .meter {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
+  font-size: 12px;
 }
 
 .label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.amount {
+  font-weight: 600;
   color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.link:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
 }
 
 .track {
   display: inline-block;
-  width: 120px;
-  height: 5px;
-  border-radius: 3px;
+  width: 80px;
+  height: 4px;
+  border-radius: 2px;
   background: var(--border-2);
   overflow: hidden;
 }
@@ -33,10 +59,14 @@
 }
 
 .input {
-  width: 90px;
+  width: 80px;
+  height: 22px;
+  padding: 0 6px;
+  font-size: 12px;
 }
 
 .unpriced {
+  font-weight: 600;
   color: var(--warn);
 }
 

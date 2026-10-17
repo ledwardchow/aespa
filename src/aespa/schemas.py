@@ -1431,6 +1431,8 @@ class TestRunUpdate(BaseModel):
     page_selection: Literal["each_url", "group_similar"] | None = None
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
+    # Left unchanged when omitted; null removes the limit.
+    llm_budget_usd: float | None = Field(default=None, gt=0)
 
 
 class StartCrawlBody(BaseModel):

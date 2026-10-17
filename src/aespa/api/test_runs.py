@@ -541,6 +541,8 @@ def update_test_run(
         get_scan_profile(session, payload.llm_profile_id)
     run.llm_config_id = payload.llm_config_id
     run.llm_profile_id = payload.llm_profile_id
+    if "llm_budget_usd" in payload.model_fields_set:
+        run.llm_budget_usd = payload.llm_budget_usd
     session.add(run)
     session.commit()
     session.refresh(run)
