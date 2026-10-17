@@ -865,6 +865,12 @@ def set_run_context(run_id: int, emit_fn: Any, run_kind: str = "web") -> None:
                 for k in ("provider", "copilot_quota", "model", "service_tier"):
                     if counts.get(k) is not None:
                         bucket[model][k] = counts[k]
+                programs = counts.get("daybreak_programs")
+                if isinstance(programs, list):
+                    bucket[model]["daybreak_programs"] = sorted(
+                        set(bucket[model].get("daybreak_programs", []))
+                        | (set(programs) & {"daybreak_blue", "daybreak_red"})
+                    )
                 if counts.get("bedrock_input_inclusive"):
                     bucket[model]["bedrock_input_inclusive"] = True
         _run_token_seeded.add(key)
@@ -1046,6 +1052,7 @@ def _record_usage(
     thinking_tokens: int = 0,
     input_includes_cache: bool | None = None,
     service_tier: str | None = None,
+    daybreak_program: str | None = None,
     **kwargs: Any,
 ) -> None:
     """Accumulate provider usage for a run and the independent monthly ledger."""
@@ -1142,6 +1149,10 @@ def _record_usage(
     entry["factory_credits"] = entry.get("factory_credits", 0) + factory_credits
     entry["premium_requests"] = entry.get("premium_requests", 0) + premium_requests
     entry["requests"] = entry.get("requests", 0) + requests
+    if daybreak_program in {"daybreak_blue", "daybreak_red"}:
+        entry["daybreak_programs"] = sorted(
+            set(entry.get("daybreak_programs", [])) | {daybreak_program}
+        )
     if usage_provider == "bedrock":
         entry["bedrock_input_inclusive"] = True
     try:
@@ -1186,6 +1197,20 @@ def _record_usage(
             )
         except Exception:
             pass
+
+
+def _record_daybreak_program(model: str, program: str, context: _UsageContext) -> None:
+    if program not in {"daybreak_blue", "daybreak_red"} or context.run_id is None:
+        return
+    key = (context.run_kind, context.run_id)
+    bucket = _run_token_usage.setdefault(key, {})
+    entry = bucket.setdefault(
+        model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    )
+    entry["daybreak_programs"] = sorted(
+        set(entry.get("daybreak_programs", [])) | {program}
+    )
+    _persist_bucket_to_db(context.run_id, bucket, context.run_kind)
 
 
 def _record_google_usage(model: str, usage_metadata: Any | None) -> None:
@@ -3130,6 +3155,10 @@ def _codex_usage_callback() -> Any:
         cache_write_tokens: int = 0,
         **details: Any,
     ) -> None:
+        program = details.pop("daybreak_program", None)
+        if program:
+            _record_daybreak_program(model, program, usage_context)
+            return
         _record_usage(
             model,
             input_tokens,
@@ -3785,6 +3814,7 @@ def _record_responses_usage(
     resp: Any,
     *,
     requested_prompt_cache_key: str | None = None,
+    daybreak_program: str | None = None,
 ) -> dict[str, Any]:
     usage = getattr(resp, "usage", None)
     telemetry = _responses_cache_telemetry(
@@ -3803,6 +3833,7 @@ def _record_responses_usage(
             else 0
         ),
         requests=1,
+        daybreak_program=daybreak_program,
     )
     emit_fn = _emit_fn_var.get()
     if emit_fn is not None and (
@@ -3828,6 +3859,19 @@ def _record_responses_usage(
         except Exception:
             pass
     return telemetry
+
+
+def _response_daybreak_program(resp: Any, request_kwargs: dict[str, Any]) -> str | None:
+    programs = getattr(resp, "access_programs", None)
+    if isinstance(programs, dict):
+        actual = programs.get("cyber")
+    else:
+        actual = getattr(programs, "cyber", None)
+    if actual is not None:
+        return actual if actual in {"daybreak_blue", "daybreak_red"} else None
+    return (
+        (request_kwargs.get("extra_body") or {}).get("access_programs", {}).get("cyber")
+    )
 
 
 def _extract_responses_text(resp: Any) -> str:
@@ -3885,6 +3929,7 @@ async def _openai_responses(
         config,
         resp,
         requested_prompt_cache_key=request_kwargs.get("prompt_cache_key"),
+        daybreak_program=_response_daybreak_program(resp, request_kwargs),
     )
     return _extract_responses_text(resp)
 
@@ -7242,6 +7287,7 @@ async def _call_with_tools_impl(
             config,
             resp,
             requested_prompt_cache_key=r_kwargs.get("prompt_cache_key"),
+            daybreak_program=_response_daybreak_program(resp, r_kwargs),
         )
         return blocks, stop_reason, native_history or blocks
 

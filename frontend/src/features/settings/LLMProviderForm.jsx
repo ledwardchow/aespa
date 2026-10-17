@@ -186,6 +186,17 @@ function CodexConnectionCard() {
             : " Not signed in."}
         </div>
       )}
+      {state?.account && state.daybreak && (
+        <div className="field-hint" style={{ marginTop: 8 }}>
+          Daybreak Blue: {state.daybreak.blue ? "Available" : "Not available"}.{" "}
+          Daybreak Red: {state.daybreak.red ? "Available" : "Not available"}.
+        </div>
+      )}
+      {state?.account && state.daybreak === null && (
+        <div className="field-hint" style={{ marginTop: 8 }}>
+          Could not check Daybreak access with this Codex version.
+        </div>
+      )}
       {error && (
         <div className="alert error" style={{ marginTop: 8 }}>
           {error}

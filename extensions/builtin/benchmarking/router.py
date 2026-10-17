@@ -180,6 +180,23 @@ def result_out(row: ScanResult, core: Session | None = None) -> dict[str, Any]:
             not isinstance(scan_models, dict) or "primary" not in scan_models
         ):
             scan_models = scan_models_snapshot(core, row.run_kind, run)
+        elif run is not None and isinstance(scan_models, dict):
+            primary = scan_models.get("primary")
+            recorded = usage_model(run)
+            if (
+                isinstance(primary, dict)
+                and isinstance(recorded, dict)
+                and primary.get("model") == recorded.get("model")
+                and "daybreak_programs" not in primary
+                and "daybreak_programs" in recorded
+            ):
+                scan_models = {
+                    **scan_models,
+                    "primary": {
+                        **primary,
+                        "daybreak_programs": recorded["daybreak_programs"],
+                    },
+                }
     if breakdown is None:
         # Earlier snapshots contain only the dynamic run's cost. Include both
         # saved and current source links, without changing either database.
@@ -266,12 +283,18 @@ def usage_model(run: TestRun | ApiTestRun | SastRun) -> dict[str, Any] | None:
         return None
     # Use the model name to break ties consistently, regardless of JSON ordering.
     _, model, counts = min(candidates, key=lambda item: (-item[0], item[1]))
-    return {
+    model_info = {
         "id": None,
         "name": model,
         "model": model,
         "provider": counts.get("provider"),
     }
+    programs = counts.get("daybreak_programs")
+    if isinstance(programs, list):
+        model_info["daybreak_programs"] = sorted(
+            set(programs) & {"daybreak_blue", "daybreak_red"}
+        )
+    return model_info
 
 
 def scan_models_snapshot(

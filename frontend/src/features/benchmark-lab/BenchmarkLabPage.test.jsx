@@ -97,6 +97,15 @@ test("compares a Site scan and shows every ground truth finding", async () => {
   expect(screen.getByText("SAST model (Source scan): SAST agent (sast-model)")).toBeTruthy();
 });
 
+test("shows recorded Daybreak programs on a saved result", async () => {
+  const result = await benchmarkApi.createBenchmarkResult();
+  result.scan_models.primary.daybreak_programs = ["daybreak_blue", "daybreak_red"];
+  benchmarkApi.listBenchmarkResults.mockResolvedValue([result]);
+  render(<BenchmarkLabPage initialResultId={4} />);
+  expect(await screen.findByText("Daybreak Blue")).toBeTruthy();
+  expect(screen.getByText("Daybreak Red")).toBeTruthy();
+});
+
 test("saves the default model in Settings and removes per-run selection", async () => {
   const user = userEvent.setup();
   render(<BenchmarkLabPage />);

@@ -389,6 +389,27 @@ def test_plan_response_counts_one_request(monkeypatch):
     assert recorded[0]["requests"] == 1
 
 
+def test_plan_records_daybreak_program_from_completed_response(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        llm, "_record_usage", lambda *args, **kwargs: recorded.append(kwargs)
+    )
+    config = LLMConfig(provider="openai_chatgpt_plan", model="gpt-6-sol")
+    response = SimpleNamespace(
+        usage=SimpleNamespace(input_tokens=10, output_tokens=2),
+        access_programs={"cyber": "daybreak_red"},
+    )
+    request = {"extra_body": {"access_programs": {"cyber": "daybreak_blue"}}}
+    llm._record_responses_usage(
+        config,
+        response,
+        daybreak_program=llm._response_daybreak_program(response, request),
+    )
+    assert recorded[0]["daybreak_program"] == "daybreak_red"
+    response.access_programs = {"cyber": "standard"}
+    assert llm._response_daybreak_program(response, request) is None
+
+
 def test_plan_context_budget_keeps_full_output_space_for_plain_requests(monkeypatch):
     config = LLMConfig(
         provider="openai_chatgpt_plan",

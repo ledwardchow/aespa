@@ -1693,6 +1693,26 @@ def test_scan_model_uses_recorded_total_tokens(run_class, usage, expected):
     assert (selected["model"] if selected else None) == expected
 
 
+def test_scan_model_preserves_recorded_daybreak_programs():
+    router = importlib.import_module("aespa_external_aespa_benchmarking.router")
+    run = TestRun(
+        token_usage_json=json.dumps(
+            {
+                "gpt-6-sol": {
+                    "input": 20,
+                    "output": 10,
+                    "provider": "openai_codex",
+                    "daybreak_programs": ["daybreak_red", "daybreak_blue"],
+                }
+            }
+        )
+    )
+    assert router.usage_model(run)["daybreak_programs"] == [
+        "daybreak_blue",
+        "daybreak_red",
+    ]
+
+
 @pytest.mark.parametrize("kind", ["site", "api", "sast"])
 @pytest.mark.parametrize("saved_date", [{}, {"scan_started_at": None}])
 def test_older_saved_metadata_is_read_from_run(db_engine, kind, saved_date):

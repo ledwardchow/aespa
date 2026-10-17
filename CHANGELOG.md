@@ -16,6 +16,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Daybreak benchmark labels**: Benchmark results now show which Daybreak program a scan used when the provider reports or accepts one. Published results include the program for the main scan model. Codex checks available programs for each model before requesting one.
+
 - **Benchmark prices for Fast mode scans**: Published results use Normal mode prices for Fast mode calls so scan costs can be compared. The result comment also shows the estimated scan cost with Fast mode.
 
 - **Workflow retries during crawls**: You can continue an unfinished workflow while the main crawl is still running. Its progress stays separate from crawl progress. Payment and transfer workflows can open a signed-in browser and use account choices shown by the site. AESPA can also reuse clearly labeled account, address, or profile values from a live page opened with the same saved account. Payment amounts, card details, passwords, and verification codes still need values you supply. Stopping or deleting a run stops active workflow retries.

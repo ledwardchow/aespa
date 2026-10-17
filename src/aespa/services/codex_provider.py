@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -476,6 +477,7 @@ class _Conversation:
     )
     text: list[str] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
+    daybreak_program: str | None = None
 
 
 class _JsonRpcClient:
@@ -1017,6 +1019,30 @@ async def _send_turn(
     }
     if getattr(config, "reasoning_effort", None):
         params["effort"] = config.reasoning_effort
+    try:
+        cached = getattr(client, "_daybreak_options", None)
+        if cached is None or cached[0] < time.monotonic():
+            options = await discover_model_options()
+            client._daybreak_options = (time.monotonic() + 900, options)
+        else:
+            options = cached[1]
+        option = next((item for item in options if item["id"] == config.model), None)
+        available = (option or {}).get("daybreak_programs", [])
+        preferred = (
+            "daybreak_red"
+            if config.model in {"gpt-daybreak-red-latest", "gpt-5.6-cyber"}
+            else "daybreak_blue"
+        )
+        if preferred in available:
+            params["cyberAccessProgram"] = (
+                "daybreakRed" if preferred == "daybreak_red" else "daybreakBlue"
+            )
+            conversation.daybreak_program = preferred
+        else:
+            conversation.daybreak_program = None
+    except Exception:
+        log.debug("Codex model access metadata is unavailable", exc_info=True)
+        conversation.daybreak_program = None
     await client.request(
         "turn/start",
         params,
@@ -1243,6 +1269,16 @@ async def _completion_with_tools_once(
             _merge_completed_text(conversation, _event_text(params))
             continue
         if event_type in {"turn/completed", "turn/completion"}:
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            status = turn.get("status") or params.get("status")
+            if conversation.daybreak_program and status in {None, "completed"}:
+                usage_callback(
+                    config.model,
+                    0,
+                    0,
+                    daybreak_program=conversation.daybreak_program,
+                )
+            conversation.daybreak_program = None
             _merge_completed_text(conversation, _event_text(params))
             output = _take_conversation_text(conversation)
             if output:
@@ -1624,6 +1660,7 @@ async def status() -> dict[str, Any]:
             "compatible": True,
             "account": account,
             "rate_limits": limits,
+            "daybreak": await _daybreak_access_summary(),
         }
     except Exception as exc:
         return info | {
@@ -1636,6 +1673,23 @@ async def status() -> dict[str, Any]:
 
 async def discover_models() -> list[str]:
     return [item["id"] for item in await discover_model_options()]
+
+
+async def _daybreak_access_summary() -> dict[str, bool] | None:
+    try:
+        options = await discover_model_options()
+    except Exception:
+        log.debug("Codex Daybreak access check failed", exc_info=True)
+        return None
+    if not any(option.get("daybreak_access_known") for option in options):
+        return None
+    programs = {
+        program for option in options for program in option.get("daybreak_programs", [])
+    }
+    return {
+        "blue": "daybreak_blue" in programs,
+        "red": "daybreak_red" in programs,
+    }
 
 
 async def discover_model_options() -> list[dict[str, Any]]:
@@ -1660,6 +1714,21 @@ async def discover_model_options() -> list[dict[str, Any]]:
                 "id": str(row["id"]),
                 "supportedReasoningEfforts": row.get("supportedReasoningEfforts"),
                 "defaultReasoningEffort": row.get("defaultReasoningEffort"),
+                "daybreak_access_known": isinstance(
+                    row.get("availableAccessPrograms"), dict
+                ),
+                "daybreak_programs": sorted(
+                    {
+                        {
+                            "daybreakBlue": "daybreak_blue",
+                            "daybreakRed": "daybreak_red",
+                        }[program]
+                        for program in (row.get("availableAccessPrograms") or {}).get(
+                            "cyber", []
+                        )
+                        if program in {"daybreakBlue", "daybreakRed"}
+                    }
+                ),
             }
             for key in (
                 "context_window_tokens",

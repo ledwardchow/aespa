@@ -24,6 +24,19 @@ def modules():
     return importlib.import_module("aespa_external_aespa_benchmarking.publishing")
 
 
+def test_published_model_includes_daybreak_when_recorded():
+    summary = modules().model_summary(
+        {
+            "model": "gpt-6-sol",
+            "provider": "openai_codex",
+            "daybreak_programs": ["daybreak_red", "daybreak_blue"],
+        },
+        include_daybreak=True,
+    )
+    assert summary["daybreak_programs"] == ["daybreak_blue", "daybreak_red"]
+    assert "daybreak_programs" not in modules().model_summary({"model": "unknown"})
+
+
 def test_graph_export_keeps_only_summary_and_stable_identity(portable):
     models, _, stores = portable
     seed(models, stores[0])

@@ -68,13 +68,19 @@ def timestamp(value) -> str | None:
     )
 
 
-def model_summary(value) -> dict | None:
+def model_summary(value, *, include_daybreak: bool = False) -> dict | None:
     if not isinstance(value, dict):
         return None
-    return {
+    summary = {
         key: str(value[key]) if value.get(key) is not None else None
         for key in ("model", "name", "provider")
     }
+    programs = value.get("daybreak_programs")
+    if include_daybreak and isinstance(programs, list):
+        summary["daybreak_programs"] = sorted(
+            set(programs) & {"daybreak_blue", "daybreak_red"}
+        )
+    return summary
 
 
 def token_counts(core, row, models: dict) -> dict | None:
@@ -200,7 +206,9 @@ def graph_bundle(store, dataset_ids: set[int] | None = None) -> dict:
                     else "DAST with SAST Leads"
                     if sources
                     else "DAST",
-                    "primary": model_summary(models.get("primary")),
+                    "primary": model_summary(
+                        models.get("primary"), include_daybreak=True
+                    ),
                     "sast": [
                         {"model": model_summary(source.get("model"))}
                         for source in sources

@@ -602,3 +602,13 @@
 .content.benchmark-summary-page {
   overflow: hidden;
 }
+.benchmark-daybreak-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.78em;
+  font-weight: 600;
+  white-space: nowrap;
+}

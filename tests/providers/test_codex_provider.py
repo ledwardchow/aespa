@@ -6,7 +6,86 @@ from types import SimpleNamespace
 
 import pytest
 
-from aespa.services import codex_provider, statistics
+from aespa.services import codex_provider, llm, statistics
+
+
+def test_codex_requests_advertised_daybreak_program(monkeypatch):
+    async def options():
+        return [
+            {"id": "gpt-6-sol", "daybreak_programs": ["daybreak_blue"]},
+            {"id": "gpt-daybreak-red-latest", "daybreak_programs": ["daybreak_red"]},
+        ]
+
+    class Client:
+        async def request(self, method, params):
+            assert method == "turn/start"
+            requests.append(params)
+
+    monkeypatch.setattr(codex_provider, "discover_model_options", options)
+    requests = []
+    conversation = codex_provider._Conversation("thread", 0)
+    config = SimpleNamespace(model="gpt-6-sol", reasoning_effort=None)
+    asyncio.run(codex_provider._send_turn(Client(), conversation, config, "test"))
+    assert requests[-1]["cyberAccessProgram"] == "daybreakBlue"
+    assert conversation.daybreak_program == "daybreak_blue"
+
+    config.model = "gpt-daybreak-red-latest"
+    asyncio.run(codex_provider._send_turn(Client(), conversation, config, "test"))
+    assert requests[-1]["cyberAccessProgram"] == "daybreakRed"
+
+    config.model = "unknown-model"
+    asyncio.run(codex_provider._send_turn(Client(), conversation, config, "test"))
+    assert "cyberAccessProgram" not in requests[-1]
+    assert conversation.daybreak_program is None
+
+
+def test_codex_model_list_exposes_daybreak_access(monkeypatch):
+    class Client:
+        async def request(self, method, params):
+            assert method == "model/list"
+            return {
+                "data": [
+                    {
+                        "id": "gpt-6-sol",
+                        "availableAccessPrograms": {
+                            "cyber": ["daybreakRed", "daybreakBlue"]
+                        },
+                    }
+                ]
+            }
+
+    async def client():
+        return Client()
+
+    monkeypatch.setattr(codex_provider, "_get_client", client)
+    options = asyncio.run(codex_provider.discover_model_options())
+    assert options[0]["daybreak_programs"] == ["daybreak_blue", "daybreak_red"]
+
+
+def test_codex_program_callback_does_not_count_another_request(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        llm,
+        "_record_daybreak_program",
+        lambda model, program, context: recorded.append((model, program)),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_record_usage",
+        lambda *args, **kwargs: pytest.fail("metadata callback counted token usage"),
+    )
+    llm._codex_usage_callback()("gpt-6-sol", 0, 0, daybreak_program="daybreak_blue")
+    assert recorded == [("gpt-6-sol", "daybreak_blue")]
+
+
+def test_codex_missing_catalog_metadata_is_unknown(monkeypatch):
+    async def options():
+        return [
+            {"id": "gpt-6-sol", "daybreak_programs": [], "daybreak_access_known": False}
+        ]
+
+    monkeypatch.setattr(codex_provider, "discover_model_options", options)
+    assert asyncio.run(codex_provider._daybreak_access_summary()) is None
 
 
 class _AsyncLines:
@@ -268,6 +347,8 @@ def _run_codex_completion_events(monkeypatch, events, *, tools=None):
 
     class FakeClient:
         async def request(self, method, params):  # noqa: ARG002
+            if method == "model/list":
+                return {"data": []}
             if method == "account/rateLimits/read":
                 return {"rateLimits": {"primary": {"usedPercent": 0}}}
             if method == "turn/start":
