@@ -2,7 +2,7 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## Unreleased
+## [PR #285] October 17 - Fix dropped findings
 
 ### Fixes
 
