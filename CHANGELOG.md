@@ -2,7 +2,7 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
-## [PR #285] October 17 - Fix dropped findings
+## [PR #285] October 17 - Hotfix for dropped findings
 
 ### Fixes
 
