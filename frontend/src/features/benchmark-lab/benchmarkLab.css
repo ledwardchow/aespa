@@ -612,6 +612,11 @@
   font-weight: 600;
   white-space: nowrap;
 }
+.benchmark-model-badge-glasswing {
+  color: #f4f1eb;
+  background: #1b1b1a;
+  border-color: #bcb9b1;
+}
 .benchmark-tooltip-badges {
   display: flex;
   gap: 4px;

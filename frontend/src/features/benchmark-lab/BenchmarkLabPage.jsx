@@ -293,7 +293,7 @@ export function BenchmarkLabPage({ initialResultId }) {
             <p className="subtle">
               Scan model: {modelLabel(selectedResult.scan_models.primary)}{" "}
               {modelBadges(selectedResult.scan_models.primary).map((label) => (
-                <span className="benchmark-model-badge" key={label}>{label}</span>
+                <span className={`benchmark-model-badge${label === "Glasswing" ? " benchmark-model-badge-glasswing" : ""}`} key={label}>{label}</span>
               ))}
             </p>
           )}
