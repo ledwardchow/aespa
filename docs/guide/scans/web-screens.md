@@ -46,7 +46,7 @@ and scan mode. The dynamic coverage choices are:
 The **Status** tab contains crawl and pentest controls, token usage, ALICE, agent
 status, specialist activity, and the event log.
 
-![Run status](../../images/runlanding.png)
+![Run status](../../images/agentstatus.png)
 
 A normal workflow is to run **Start Crawl**, review the discovered scope, and
 then run **Start Pentest**. A pentest can start without a completed crawl, but the

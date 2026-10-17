@@ -281,7 +281,7 @@ Traffic log:
 ![Screenshot](docs/images/trafficlog.png)
 
 Findings  
-![Screenshot](docs/images/findings.png)
+![Screenshot](docs/images/webfindings.png)
 
 API Setup  
 ![Screenshot](docs/images/apisetup.png)

@@ -41,3 +41,6 @@ node_modules/
 # Local agent plans and verification output
 .audit/
 .claude/settings.local.json
+
+# Local implementation plans (kept on disk, not committed)
+/docs/implementation-plans/
