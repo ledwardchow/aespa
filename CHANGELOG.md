@@ -14,6 +14,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Testing business-logic flaws in forms**: During a web scan, AESPA can now change a form value that the page does not let a shopper edit — a hidden field, a disabled option, or a value the page never shows at all — and then submit the real form. This lets it test for flaws where the server trusts a value from the browser, such as a checkout that charges a total sent by the page, a saved payment method that belongs to another account, or a coupon reused by changing the order email. It drives the page's own form so the request stays valid, instead of replaying a captured request that the site would reject.
+
 - **Workflows on grouped pages**: Workflows found on one example page can use different items from the same group. AESPA checks the chosen item before trying the action, saves it for retries, and keeps it reserved while other workflows run. Named DAST workflow tests use the same item selection. Delete workflows remain blocked during crawling.
 
 - **Finding review after web scans**: AESPA reviews batches of findings concurrently, up to the saved DAST LLM request limit. Failed requests and missing verdicts leave the affected findings unvalidated.

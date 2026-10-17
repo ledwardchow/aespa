@@ -1076,9 +1076,15 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Ordered ops: {op: goto|fill|type|click|check|uncheck|select_option|press|wait|snapshot|inspect_element|recover_click|dom_check, ...}. "
+                        "Ordered ops: {op: goto|fill|type|click|check|uncheck|select_option|press|set_field|wait|snapshot|inspect_element|recover_click|dom_check, ...}. "
                         "Controls accept selector, testid, or role+name locators. "
                         "fill: locator+value. select_option: locator+value. press: selector+key. "
+                        "set_field: name (plus optional form CSS) or selector, and value; "
+                        "sets a form control's value directly, including hidden, disabled, or "
+                        "not-rendered fields, then dispatches input/change. Add create=true to "
+                        "append a missing field to the form. Use it to tamper server-side-trusted "
+                        "values (total, price, object/owner id) and then click the real submit so "
+                        "the framework builds a valid request from the form. "
                         "inspect_element: read-only visibility, enabled-state, bounds, style, and click-obstruction diagnostics. "
                         "recover_click: scroll a supported locator into view, optionally press Escape with press_escape=true, then perform a normal non-forced click. "
                         "wait: state or ms. dom_check: selector plus optional attribute "
@@ -1931,6 +1937,7 @@ To use the browser:
   "steps": [
     {{"op": "goto", "url": "https://..."}},
     {{"op": "fill", "selector": "input[name='q']", "value": "test"}},
+    {{"op": "set_field", "name": "expectedTotal", "form": "form", "value": "1"}},
     {{"op": "click", "selector": "button[type='submit']"}},
     {{"op": "wait", "state": "networkidle"}},
     {{"op": "dom_check", "selector": "#transactions", "attribute": "data-aespa-xss", "equals": "canary-123"}},
@@ -1943,10 +1950,22 @@ To use the browser:
 }}
 
 Browser step rules:
-- Supported ops: goto, fill, type, click, check, uncheck, select_option, press, wait, snapshot, dom_check.
+- Supported ops: goto, fill, type, click, check, uncheck, select_option, press, set_field, wait, snapshot, dom_check.
 - Controls accept a CSS selector, testid, or role plus exact accessible name.
 - For select_option, include the option value.
 - For press, include selector and key (for example "Enter").
+- For set_field, include value plus either name (optionally scoped with a form CSS
+  selector) or selector. Unlike fill, it sets hidden, disabled, and not-rendered
+  fields, and with create=true appends a field the page never shows. The server
+  receives the value you set, so this is the way to test server-trusted form
+  values (order total or price, a promo or coupon, an owner or object id, a role
+  or status) and business-logic bugs behind a POST. Drive the real rendered form:
+  goto the page, set_field the value(s) you want to tamper, then click the real
+  submit control, so the framework builds a valid request (do not hand-build or
+  replay a captured server-action/multipart body — those go stale and abort).
+  Confirm the exploit by its effect, not the submit response: re-fetch the created
+  record or affected page (for example the new order) and check the tampered value
+  took, since the action response alone does not prove it.
 - For wait, include state ("domcontentloaded", "load", or "networkidle") or ms.
 - For dom_check, include a CSS selector and equals. Optionally include attribute;
   without attribute, the element text is compared. The result explicitly reports PASS/FAIL.

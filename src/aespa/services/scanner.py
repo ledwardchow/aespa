@@ -15088,6 +15088,93 @@ async def _run_thinking_browser_action(
                         + " actual="
                         + _compact_log_value(str(actual or ""), 160)
                     )
+                elif op == "set_field":
+                    # Set a form control's value directly in the DOM, bypassing the
+                    # visibility/editability gates that fill/type enforce, so the
+                    # agent can tamper hidden, disabled, or not-rendered fields
+                    # (price/total/object-id tampering) and then submit the real
+                    # form. Browser-driven submission lets the framework build a
+                    # valid request from the live FormData — React server actions,
+                    # classic HTML forms, and most SPAs serialize the DOM form, so
+                    # the tampered value is what the server receives. With
+                    # create=true a missing field is appended to the target form,
+                    # for values the UI never offers (e.g. another user's id).
+                    field_name = str(raw_step.get("name") or "").strip()
+                    selector = raw_step.get("selector")
+                    if not selector and not field_name:
+                        action_log.append(
+                            "set_field skipped: requires selector or name"
+                        )
+                        continue
+                    value = str(raw_step.get("value") or "")
+                    form_selector = raw_step.get("form")
+                    create = bool(raw_step.get("create"))
+                    try:
+                        result = await pw_page.evaluate(
+                            """(arg) => {
+                                const { selector, name, formSelector, value, create } = arg;
+                                let el = null;
+                                if (selector) {
+                                    el = document.querySelector(selector);
+                                } else if (name) {
+                                    const scope = formSelector
+                                        ? document.querySelector(formSelector)
+                                        : document;
+                                    if (formSelector && !scope) return "form-not-found";
+                                    el = scope.querySelector(
+                                        `[name="${name.replace(/"/g, '\\\\"')}"]`
+                                    );
+                                }
+                                let outcome;
+                                if (!el) {
+                                    if (!create || !name) return "not-found";
+                                    const form = formSelector
+                                        ? document.querySelector(formSelector)
+                                        : (document.querySelector("form"));
+                                    if (!form) return "form-not-found";
+                                    el = document.createElement("input");
+                                    el.type = "hidden";
+                                    el.name = name;
+                                    form.appendChild(el);
+                                    outcome = "created";
+                                } else {
+                                    outcome = "set";
+                                }
+                                const proto = el.tagName === "TEXTAREA"
+                                    ? HTMLTextAreaElement.prototype
+                                    : el.tagName === "SELECT"
+                                    ? HTMLSelectElement.prototype
+                                    : HTMLInputElement.prototype;
+                                const setter = Object.getOwnPropertyDescriptor(
+                                    proto, "value"
+                                )?.set;
+                                if (setter) setter.call(el, value);
+                                else el.value = value;
+                                el.dispatchEvent(new Event("input", { bubbles: true }));
+                                el.dispatchEvent(new Event("change", { bubbles: true }));
+                                return outcome;
+                            }""",
+                            {
+                                "selector": selector,
+                                "name": field_name or None,
+                                "formSelector": form_selector,
+                                "value": value,
+                                "create": create,
+                            },
+                        )
+                    except Exception as exc:
+                        action_log.append(
+                            f"set_field failed: {_compact_log_value(str(exc), 120)}"
+                        )
+                        continue
+                    target = selector or (
+                        f"[name={field_name}]"
+                        + (f" in {form_selector}" if form_selector else "")
+                    )
+                    action_log.append(
+                        f"set_field {target}={_compact_log_value(value, 120)} "
+                        f"-> {result}"
+                    )
                 else:
                     action_log.append(f"unsupported op: {op or '(missing)'}")
             except Exception as exc:
