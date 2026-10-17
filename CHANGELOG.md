@@ -2,6 +2,12 @@
 
 All pull requests merged to `main`, in reverse chronological order.
 
+## Unreleased
+
+### Fixes
+
+- **Findings dropped during web scans**: A finding with no selected object check can now be saved when the Test Lead sends `0` for that optional field. Invalid check links and missing evidence are reported as rejections instead of duplicates. A.L.I.C.E. also reports whether its finding was saved, already existed, or was rejected.
+
 ## [PR #283] October 16 - Workflow detection, grouped page routes
 
 ### New features
