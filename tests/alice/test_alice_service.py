@@ -1034,6 +1034,7 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
     """Verify that calling write_finding via the agentic loop persists a finding."""
 
     from aespa.services.alice import _execute_alice_tool
+    from aespa.services.scanner import FindingWriteResult
 
     run = test_data["run"]
     llm_cfg = test_data["llm_cfg"]
@@ -1059,7 +1060,7 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
             "aespa.services.validator.validate_finding_inline", new_callable=AsyncMock
         ) as mock_validate,
     ):
-        mock_persist.return_value = mock_finding
+        mock_persist.return_value = FindingWriteResult("saved", finding=mock_finding)
         result = await _execute_alice_tool(
             run_id=run.id,
             llm_cfg=llm_cfg,
@@ -1076,6 +1077,53 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
     assert call_kwargs["raw"]["finding_source"] == "alice"
     assert call_kwargs["raw"]["title"] == "Default Admin Access Enabled"
     mock_validate.assert_called_once()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("write_result", "expected"),
+    [
+        ("duplicate", "Duplicate skipped"),
+        ("rejected", "Finding rejected: invalid object check"),
+    ],
+)
+async def test_alice_write_finding_reports_unsaved_result(
+    db_session, test_data, write_result, expected
+):
+    from aespa.services.alice import _execute_alice_tool
+    from aespa.services.scanner import FindingWriteResult
+
+    run = test_data["run"]
+    with (
+        patch(
+            "aespa.services.scanner._persist_dynamic_finding", new_callable=AsyncMock
+        ) as mock_persist,
+        patch(
+            "aespa.services.validator.validate_finding_inline", new_callable=AsyncMock
+        ) as mock_validate,
+    ):
+        mock_persist.return_value = FindingWriteResult(
+            write_result,
+            reason="invalid object check" if write_result == "rejected" else None,
+        )
+        result = await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="write_finding",
+            tool_input={
+                "title": "Access control finding",
+                "severity": "high",
+                "affected_url": "http://target.local/accounts/1",
+                "description": "Account data was accessible.",
+                "evidence": "HTTP 200 returned account data.",
+            },
+            step=1,
+        )
+
+    assert expected in result
+    mock_validate.assert_not_called()
 
 
 def _capturing_scanner_client(captured: dict):
