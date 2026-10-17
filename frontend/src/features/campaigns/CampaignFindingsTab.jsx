@@ -1,5 +1,5 @@
 import * as systemsApi from "../../shared/api/systems.js";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
@@ -7,6 +7,10 @@ import { useColResize } from "../../shared/hooks/useColResize.js";
 import { severityClass } from "../../shared/runs/campaignPresentation.js";
 import { normalizeSeverity, severityRank } from "../../shared/findings/severity.js";
 import { ValidationCaseResults, validationCasesFromResponse } from "./ValidationCases.jsx";
+
+function findingGroupKey(row) {
+  return `${row.title}::${row.target_type}::${row.target_name || row.target_run_id}`;
+}
 
 function TextBlock({ label, value, code = false }) {
   if (!value) return null;
@@ -108,7 +112,7 @@ export function CampaignFindingsTab({ systemId, campaignId, initialFindingRef })
         setRows(data);
         if (initialFindingRef) {
           const match = data.find((row) => row.reference === initialFindingRef);
-          if (match) setExpanded((previous) => new Set(previous).add(match.reference));
+          if (match) setExpanded((previous) => new Set(previous).add(findingGroupKey(match)));
         }
       })
       .catch((e) => setError(e.message));
@@ -139,7 +143,7 @@ export function CampaignFindingsTab({ systemId, campaignId, initialFindingRef })
     if (!rows) return [];
     const grouped = new Map();
     for (const row of rows) {
-      const key = `${row.title}::${row.target_type}::${row.target_name || row.target_run_id}`;
+      const key = findingGroupKey(row);
       const current = grouped.get(key) || {
         key,
         title: row.title,
@@ -217,12 +221,8 @@ export function CampaignFindingsTab({ systemId, campaignId, initialFindingRef })
             </thead>
             <tbody>
               {groups.map((group) => (
-                <>
-                  <tr
-                    key={group.key}
-                    className="finding-group-row"
-                    onClick={() => toggle(group.key)}
-                  >
+                <Fragment key={group.key}>
+                  <tr className="finding-group-row" onClick={() => toggle(group.key)}>
                     <td className="campaign-finding-reference-cell">
                       <span className="group-chevron">{expanded.has(group.key) ? "▾" : "▸"}</span>{" "}
                       <FindingReferenceLink
@@ -284,7 +284,7 @@ export function CampaignFindingsTab({ systemId, campaignId, initialFindingRef })
                         </td>
                       </tr>
                     ))}
-                </>
+                </Fragment>
               ))}
             </tbody>
           </table>

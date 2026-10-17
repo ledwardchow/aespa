@@ -502,13 +502,19 @@ def _maybe_record_waf(
 # ── Query ─────────────────────────────────────────────────────────────────────
 
 
-def clear_traffic(run_id: int) -> None:
+def clear_traffic(run_id: int, *, api_run_id: Optional[int] = None) -> None:
+    """Delete a run's traffic. Pass ``api_run_id`` to clear an API run instead."""
     from aespa.models import TrafficEntry
+    from aespa.services.run_cleanup import detach_traffic_dependents
 
+    owner = (
+        TrafficEntry.api_test_run_id == api_run_id
+        if api_run_id is not None
+        else TrafficEntry.test_run_id == run_id
+    )
     with Session(get_engine()) as s:
-        entries = s.exec(
-            select(TrafficEntry).where(TrafficEntry.test_run_id == run_id)
-        ).all()
+        entries = s.exec(select(TrafficEntry).where(owner)).all()
+        detach_traffic_dependents(s, [e.id for e in entries])
         for e in entries:
             s.delete(e)
         s.commit()

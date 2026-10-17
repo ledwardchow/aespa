@@ -195,6 +195,54 @@ def detach_finding_dependents(session: Session, finding_ids: list[int]) -> None:
     session.flush()
 
 
+def detach_credential_dependents(session: Session, credential_ids: list[int]) -> None:
+    """Clear references to site credentials that are about to be deleted.
+
+    Past runs, replayed pages and scanner sessions keep their records but lose
+    the link to the removed login.
+    """
+    if not credential_ids:
+        return
+    for run in session.exec(
+        select(TestRun).where(TestRun.crawl_credential_id.in_(credential_ids))
+    ).all():
+        run.crawl_credential_id = None
+        session.add(run)
+    for page in session.exec(
+        select(CrawledPage).where(CrawledPage.replay_credential_id.in_(credential_ids))
+    ).all():
+        page.replay_credential_id = None
+        session.add(page)
+    for scanner_session in session.exec(
+        select(ScannerSession).where(ScannerSession.credential_id.in_(credential_ids))
+    ).all():
+        scanner_session.credential_id = None
+        session.add(scanner_session)
+    session.flush()
+
+
+def detach_traffic_dependents(session: Session, traffic_ids: list[int]) -> None:
+    """Clear references to traffic entries that are about to be deleted.
+
+    Probe results keep their outcome but lose the link to the request.
+    """
+    if not traffic_ids:
+        return
+    for outcome in session.exec(
+        select(DeepScanProbeOutcome).where(
+            DeepScanProbeOutcome.traffic_id.in_(traffic_ids)
+        )
+    ).all():
+        outcome.traffic_id = None
+        session.add(outcome)
+    for execution in session.exec(
+        select(ProbeExecution).where(ProbeExecution.traffic_id.in_(traffic_ids))
+    ).all():
+        execution.traffic_id = None
+        session.add(execution)
+    session.flush()
+
+
 def detach_page_dependents(session: Session, page_ids: list[int]) -> None:
     """Clear restrictive references to crawled pages that are about to be deleted."""
     if not page_ids:

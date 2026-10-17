@@ -119,7 +119,7 @@ def status(
         "tab_id": t.tab_id,
         "think_msg_id": t.think_msg_id,
         "reply_msg_id": t.reply_msg_id,
-        "event_count": len(t.events),
+        "event_count": t.dropped + len(t.events),
         "running_tabs": running_tabs,
         "goal": alice_goals.goal_out(
             alice_goals.get_goal(run_kind, run_id, tab_id or t.tab_id)
@@ -313,6 +313,17 @@ async def stream_events(
     if cursor < task.dropped:
         yield f"data: {json.dumps({'type': 'state_snapshot', 'thought': task.accumulated_thought, 'message': task.accumulated_message, 'tab_id': task.tab_id, 'think_msg_id': task.think_msg_id, 'reply_msg_id': task.reply_msg_id})}\n\n"
         start = len(task.events)
+        # The snapshot carries the text but not completion; replay the
+        # terminal event so a reconnecting client still sees the task finish.
+        if task.done:
+            start = next(
+                (
+                    index
+                    for index in range(len(task.events) - 1, -1, -1)
+                    if task.events[index].get("type") == "done"
+                ),
+                start,
+            )
     else:
         start = cursor - task.dropped
     for event in task.events[start:]:

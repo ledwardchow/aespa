@@ -38,6 +38,7 @@ export function ApiTestRunDetail({
   initialFindingRef,
   findingIds,
   coverageReturn,
+  initialLeadRef,
   initialTrafficCoverage,
 }) {
   const [run, setRun] = useState(null);
@@ -289,7 +290,9 @@ export function ApiTestRunDetail({
             coverageReturn={coverageReturn}
           />
         )}
-        {tab === "leads" && <ApiRunLeadsTab runId={runId} scanRunning={scanRunning} />}
+        {tab === "leads" && (
+          <ApiRunLeadsTab runId={runId} scanRunning={scanRunning} initialLeadRef={initialLeadRef} />
+        )}
         {tab === "sessions" && <ApiRunSessionsTab runId={runId} scanRunning={scanRunning} />}
         {tab === "traffic" && (
           <ApiRunTrafficTab

@@ -181,6 +181,11 @@ function TestRunContent({
         .getCheckpointStatus(runId)
         .then(setCheckpointStatus)
         .catch(() => {});
+      // Load findings once so the tab count is right before the tab is opened.
+      webRunsApi
+        .getFindings(runId)
+        .then(setFindings)
+        .catch(() => {});
       sitesApi
         .getSite(r.site_id)
         .then((s) => {
@@ -191,7 +196,7 @@ function TestRunContent({
     } catch (e) {
       setError(e.message);
     }
-  }, [runId]);
+  }, [runId, setFindings]);
   useEffect(() => {
     loadAll();
   }, [loadAll]);

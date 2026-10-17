@@ -99,10 +99,8 @@ export function CampaignReviewTab({
   continueBusy,
   onSubmitted,
 }) {
-  const { mappings, targets, validationCases, error, setError, submitReview } = useReviewLeads(
-    systemId,
-    campaignId,
-  );
+  const { mappings, targets, validationCases, error, setError, submitReview, updateMapping } =
+    useReviewLeads(systemId, campaignId);
   const [decisions, setDecisions] = useState({}); // mapping_id -> "approve" | "reject"
   const [selected, setSelected] = useState(new Set());
   const [severityFilter, setSeverityFilter] = useState("");
@@ -451,6 +449,7 @@ export function CampaignReviewTab({
           selected={selected}
           onSetDecision={setDecision}
           onToggleSelected={toggleSelected}
+          onMappingSaved={updateMapping}
           systemId={systemId}
           campaignId={campaignId}
           casesByMapping={casesByMapping}
@@ -467,6 +466,7 @@ function LeadGroup({
   selected,
   onSetDecision,
   onToggleSelected,
+  onMappingSaved,
   systemId,
   campaignId,
   casesByMapping,
@@ -602,6 +602,7 @@ function LeadGroup({
               selected={selected}
               onSetDecision={onSetDecision}
               onToggleSelected={onToggleSelected}
+              onMappingSaved={onMappingSaved}
               systemId={systemId}
               campaignId={campaignId}
               validationCases={casesByMapping.get(String(mapping.id)) || []}
@@ -620,12 +621,15 @@ function MappingRow({
   selected,
   onSetDecision,
   onToggleSelected,
+  onMappingSaved,
   systemId,
   campaignId,
   validationCases,
 }) {
   const [pathEditorOpen, setPathEditorOpen] = useState(false);
-  const decision = decisions[mapping.id] || (mapping.status !== "proposed" ? mapping.status : null);
+  // Local choices use "approve"/"reject"; saved mappings use "approved"/"rejected".
+  const decision =
+    decisions[mapping.id] || { approved: "approve", rejected: "reject" }[mapping.status] || null;
   const evidence = safeParseJson(mapping.evidence_json, {});
   const why = mapping.rationale || Object.keys(evidence).join(", ") || "—";
   const editorId = `mapping-path-editor-${mapping.id}`;
@@ -649,12 +653,14 @@ function MappingRow({
           <div className="row" style={{ gap: 4 }}>
             <button
               className={"btn sm" + (decision === "approve" ? "" : " ghost")}
+              aria-pressed={decision === "approve"}
               onClick={() => onSetDecision(mapping.id, "approve")}
             >
               Approve for validation
             </button>
             <button
-              className={"btn danger-outline sm" + (decision === "reject" ? "" : "")}
+              className={"btn sm " + (decision === "reject" ? "danger" : "danger-outline")}
+              aria-pressed={decision === "reject"}
               onClick={() => onSetDecision(mapping.id, "reject")}
             >
               Reject
@@ -679,6 +685,7 @@ function MappingRow({
               campaignId={campaignId}
               mapping={mapping}
               editorId={editorId}
+              onSaved={onMappingSaved}
             />
           </td>
         </tr>
@@ -697,7 +704,7 @@ function MappingRow({
   );
 }
 
-function MappingPathEditor({ systemId, campaignId, mapping, editorId }) {
+function MappingPathEditor({ systemId, campaignId, mapping, editorId, onSaved }) {
   const initial = safeParseJson(mapping.path_json, {});
   const [entry, setEntry] = useState(initial.entry || "");
   const [dynamicTest, setDynamicTest] = useState(initial.dynamic_test || "");
@@ -717,10 +724,11 @@ function MappingPathEditor({ systemId, campaignId, mapping, editorId }) {
           .map((value) => value.trim())
           .filter(Boolean),
       };
-      await systemsApi.editCampaignMapping(systemId, campaignId, mapping.id, {
+      const saved = await systemsApi.editCampaignMapping(systemId, campaignId, mapping.id, {
         expected_updated_at: mapping.updated_at,
         path,
       });
+      if (saved) onSaved?.(saved);
       setMessage("Saved reviewer guidance.");
     } catch (error) {
       setMessage(error.message);

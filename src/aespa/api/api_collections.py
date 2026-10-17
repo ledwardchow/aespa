@@ -13,6 +13,7 @@ from aespa.models import (
     ApiCredential,
     ApiDocument,
     ApiEndpoint,
+    ApiEndpointTest,
     ApiTestRun,
 )
 from aespa.schemas import (
@@ -399,6 +400,13 @@ def create_credential(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
         )
+    if payload.endpoint_id is not None:
+        endpoint = session.get(ApiEndpoint, payload.endpoint_id)
+        if endpoint is None or endpoint.collection_id != collection_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="API endpoint not found in this collection",
+            )
     cred = ApiCredential(
         collection_id=collection_id,
         scheme=payload.scheme,
@@ -483,6 +491,9 @@ def purge_collection_data(
 ) -> dict:
     """Delete all endpoints and credentials parsed for this collection.
 
+    Endpoint test results recorded by earlier API runs are removed with the
+    endpoints they belong to.
+
     Documents and the collection itself are kept.  Use this to clear
     duplicates caused by uploading the same file multiple times, then
     re-parse the documents you want to keep.
@@ -493,19 +504,29 @@ def purge_collection_data(
             status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
         )
 
-    endpoints = session.exec(
-        select(ApiEndpoint).where(ApiEndpoint.collection_id == collection_id)
-    ).all()
-    ep_count = len(endpoints)
-    for ep in endpoints:
-        session.delete(ep)
-
+    # Credentials and per-run endpoint test results point at endpoints, so
+    # remove them first; SQLite enforces these foreign keys.
     credentials = session.exec(
         select(ApiCredential).where(ApiCredential.collection_id == collection_id)
     ).all()
     cred_count = len(credentials)
     for cred in credentials:
         session.delete(cred)
+    session.flush()
+
+    endpoints = session.exec(
+        select(ApiEndpoint).where(ApiEndpoint.collection_id == collection_id)
+    ).all()
+    endpoint_ids = [ep.id for ep in endpoints]
+    if endpoint_ids:
+        for endpoint_test in session.exec(
+            select(ApiEndpointTest).where(ApiEndpointTest.endpoint_id.in_(endpoint_ids))
+        ).all():
+            session.delete(endpoint_test)
+        session.flush()
+    ep_count = len(endpoints)
+    for ep in endpoints:
+        session.delete(ep)
 
     # Reset document statuses back to "uploaded" so the user can re-parse
     docs = session.exec(

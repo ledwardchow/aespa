@@ -83,10 +83,11 @@ export function parseRoute(hash = "#/"): Route {
       findingRef,
       findingIds: findingIds.length ? findingIds : undefined,
       coverageReturn,
+      leadRef,
       trafficCoverage,
     };
   if ((m = routeHash.match(/^#\/api-runs\/(\d+)$/)))
-    return { name: "api-run-detail", id: +m[1], findingRef };
+    return { name: "api-run-detail", id: +m[1], findingRef, leadRef };
   if (routeHash === "#/sast-runs/new") return { name: "sast-run-new" };
   if (routeHash === "#/sast-runs") return { name: "sast-list" };
   if ((m = routeHash.match(/^#\/sast-runs\/(\d+)\/([a-z-]+)$/)))

@@ -76,6 +76,9 @@ export const getApiTraffic = (id, since) =>
 
 export const getApiTrafficCount = (id) => req(`/api/api-test-runs/${id}/traffic/count`);
 
+export const clearApiTraffic = (id) =>
+  req(`/api/api-test-runs/${id}/traffic`, { method: "DELETE" });
+
 export const getApiCoverageMatrix = (id) => req(`/api/api-test-runs/${id}/coverage`);
 
 export const getApiRunLeads = (id) => req(`/api/api-test-runs/${id}/leads`);

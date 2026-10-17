@@ -900,6 +900,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
             if item is None or owner is None or owner.token_id != caller.token_id:
                 raise HTTPException(status_code=404, detail="Delivery not found")
             item.status = "pending"
+            item.attempts = 0
             item.next_attempt_at = now()
             item.last_error = None
             session.add(item)

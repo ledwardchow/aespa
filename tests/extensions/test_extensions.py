@@ -13,6 +13,7 @@ from aespa.db import get_engine
 from aespa.extensions.runtime import (
     ExtensionManager,
     ExtensionRegistry,
+    MaterializedSource,
     ProcessResult,
     ProviderAvailability,
 )
@@ -605,6 +606,60 @@ def test_source_preparation_events_are_retained_in_activity_log():
         assert event.phase == "source"
         assert event.status == "failed"
         assert event.message == "Sign in to GitHub, then resume."
+
+
+@pytest.mark.anyio
+async def test_scan_start_failure_keeps_prepared_source_archive(data_dir, monkeypatch):
+    class Provider:
+        async def check_availability(self, context):
+            return ProviderAvailability(True, "ready", "Ready")
+
+        async def materialize(self, parameters, staging, context):
+            archive = staging / "source.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("app.py", "print('hi')\n")
+            return MaterializedSource(
+                archive_path=archive,
+                display_name="acme/payments",
+                locator="https://github.com/acme/payments",
+                requested_ref="main",
+                revision="a" * 40,
+            )
+
+    manager = SimpleNamespace(
+        ensure_loaded=lambda: None,
+        source_providers={
+            "fake.source": SimpleNamespace(extension_id="fake", provider=Provider())
+        },
+        context_for=lambda extension_id: None,
+    )
+
+    async def failing_start(run_id, *args, **kwargs):
+        raise RuntimeError("LLM profile is missing")
+
+    monkeypatch.setattr(sast_sources, "get_extension_manager", lambda: manager)
+    monkeypatch.setattr("aespa.services.sast_scanner.start_sast_scan", failing_start)
+    with Session(get_engine()) as session:
+        run = SastRun(
+            name="prepared source",
+            status="preparing",
+            source_provider="fake.source",
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+    await sast_sources._prepare_source(
+        run_id, "fake.source", {"repository": "acme/payments"}, auto_start=True
+    )
+
+    with Session(get_engine()) as session:
+        run = session.get(SastRun, run_id)
+        assert run.status == "failed"
+        assert run.error_message == "LLM profile is missing"
+        assert run.source_archive_path
+        assert Path(run.source_archive_path).is_file()
 
 
 def test_extensions_api_lists_and_updates_dynamic_settings(client, monkeypatch):

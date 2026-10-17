@@ -1618,3 +1618,27 @@ def test_stream_events_sends_snapshot_when_cursor_was_trimmed():
         assert got[0]["message"] == task.accumulated_message
     finally:
         at._registry.pop(("site", 43, task.tab_id), None)
+
+
+def test_stream_events_replays_done_after_snapshot_when_cursor_was_trimmed():
+    task = _alice_task(run_id=44)
+    for i in range(at.BUFFER_LIMIT + 1):
+        at._append(task, {"type": "message_chunk", "delta": str(i % 10)})
+    at._append(task, {"type": "done", "thought": "", "message": "final"})
+    task.done = True
+    at._registry[("site", 44, task.tab_id)] = task
+    try:
+
+        async def _drain():
+            return [
+                line async for line in at.stream_events(44, cursor=0, run_type="site")
+            ]
+
+        got = [json.loads(line[6:]) for line in asyncio.run(_drain())]
+        assert [event["type"] for event in got] == ["state_snapshot", "done"]
+        assert got[1]["message"] == "final"
+        assert at.status(44, "site", task.tab_id)["event_count"] == (
+            task.dropped + len(task.events)
+        )
+    finally:
+        at._registry.pop(("site", 44, task.tab_id), None)

@@ -52,5 +52,12 @@ export function useReviewLeads(systemId, campaignId) {
     [systemId, campaignId, load],
   );
 
-  return { mappings, targets, validationCases, error, setError, submitReview };
+  // Keep a saved edit's new updated_at so the next edit is not rejected as stale.
+  const updateMapping = useCallback((saved) => {
+    setMappings((previous) =>
+      previous ? previous.map((m) => (m.id === saved.id ? { ...m, ...saved } : m)) : previous,
+    );
+  }, []);
+
+  return { mappings, targets, validationCases, error, setError, submitReview, updateMapping };
 }

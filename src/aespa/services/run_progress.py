@@ -81,8 +81,10 @@ def _web_needs_action(session: Session, run: TestRun) -> dict | None:
 
     site = session.get(Site, run.site_id)
     credentials = {cred.id: cred for cred in (site.credentials if site else [])}
-    for credential_id, done in list(getattr(crawler, "_guided_registry", {}).items()):
-        if credential_id in credentials and not done.is_set():
+    for (key_run_id, credential_id), done in list(
+        getattr(crawler, "_guided_registry", {}).items()
+    ):
+        if key_run_id == run.id and credential_id in credentials and not done.is_set():
             cred = credentials[credential_id]
             return {
                 "type": "guided_login",

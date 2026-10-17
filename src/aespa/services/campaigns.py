@@ -621,9 +621,12 @@ def notify_source_run_finished(sast_run_id: int, status: str) -> None:
         return
     if is_campaign_running(campaign_id):
         return
-    _campaign_tasks[campaign_id] = loop.create_task(
-        _run_campaign(campaign_id), name=f"campaign-{campaign_id}"
-    )
+    # Called from inside a SAST task; without its own scope the orchestrator
+    # would inherit run_kind="sast" and tag campaign events under SAST.
+    with events_svc.run_kind_scope("campaign"):
+        _campaign_tasks[campaign_id] = loop.create_task(
+            _run_campaign(campaign_id), name=f"campaign-{campaign_id}"
+        )
 
 
 def _finish_campaign(
@@ -1979,7 +1982,7 @@ async def stop_member_tasks_for_run(run_kind: str, run_id: int) -> None:
     member_tasks = [
         task
         for (campaign_id, task_kind, member_id), task in _campaign_member_tasks.items()
-        if task_kind in ({"sast"} if run_kind == "sast" else {"target"})
+        if task_kind == ("source" if run_kind == "sast" else "target")
         and member_id in member_ids
         and not task.done()
     ]

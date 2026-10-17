@@ -16,20 +16,29 @@ from aespa.db import get_session
 from aespa.main import create_app
 from aespa.models import (
     ApiCollection,
+    ApiCredential,
     ApiDocument,
     ApiEndpoint,
+    ApiEndpointTest,
     ApiTestRun,
     AssessmentCampaign,
     CampaignFindingReference,
     CampaignTargetMember,
     CrawledPage,
+    Credential,
+    DeepScanProbeOutcome,
+    DeepScanTask,
     DiscoveredTarget,
+    ProbeExecution,
     ScanFinding,
+    ScannerSession,
+    ScanObligation,
     Site,
     System,
     SystemTarget,
     TargetDiscovery,
     TestRun,
+    TrafficEntry,
     WorkflowCoverageItem,
     WorkflowTargetReservation,
 )
@@ -330,3 +339,198 @@ def test_delete_document_keeps_endpoints_and_removes_file(
         assert s.get(ApiDocument, doc_id) is None
         assert s.get(ApiEndpoint, endpoint_id).source_doc_id is None
     assert not stored.exists()
+
+
+def _run_with_credential(
+    s: Session,
+) -> tuple[TestRun, Credential, CrawledPage, ScannerSession]:
+    run = _web_run(s)
+    cred = Credential(site_id=run.site_id, username="alice", password="pw")
+    s.add(cred)
+    s.flush()
+    run.crawl_credential_id = cred.id
+    page = _page(s, run.id)
+    page.replay_credential_id = cred.id
+    scanner_session = ScannerSession(
+        test_run_id=run.id, label="alice", credential_id=cred.id
+    )
+    s.add_all([run, page, scanner_session])
+    s.commit()
+    return run, cred, page, scanner_session
+
+
+def test_delete_used_site_credential_clears_references(fk_engine, fk_client):
+    with Session(fk_engine) as s:
+        run, cred, page, scanner_session = _run_with_credential(s)
+        ids = (run.site_id, run.id, cred.id, page.id, scanner_session.id)
+    site_id, run_id, cred_id, page_id, scanner_session_id = ids
+
+    res = fk_client.delete(f"/api/sites/{site_id}/credentials/{cred_id}")
+    assert res.status_code == 204
+
+    with Session(fk_engine) as s:
+        assert s.get(Credential, cred_id) is None
+        assert s.get(TestRun, run_id).crawl_credential_id is None
+        assert s.get(CrawledPage, page_id).replay_credential_id is None
+        assert s.get(ScannerSession, scanner_session_id).credential_id is None
+
+
+def test_update_site_removing_used_credential_clears_references(fk_engine):
+    from aespa.services import sites as sites_svc
+
+    with Session(fk_engine) as s:
+        run, cred, _, _ = _run_with_credential(s)
+        site_id, run_id, cred_id = run.site_id, run.id, cred.id
+
+    with Session(fk_engine) as s:
+        sites_svc.update_site(
+            s,
+            site_id,
+            schemas.SiteUpdate(
+                name="Site", base_url="http://target.local", credentials=[]
+            ),
+        )
+
+    with Session(fk_engine) as s:
+        assert s.get(Credential, cred_id) is None
+        assert s.get(TestRun, run_id).crawl_credential_id is None
+
+
+def _scanned_collection(s: Session) -> tuple[int, int]:
+    collection = ApiCollection(name="API", base_url="http://api.local")
+    s.add(collection)
+    s.flush()
+    endpoint = ApiEndpoint(collection_id=collection.id, method="GET", path="/users")
+    s.add(endpoint)
+    s.flush()
+    run = ApiTestRun(collection_id=collection.id, name="Run")
+    s.add(run)
+    s.flush()
+    s.add(
+        ApiCredential(
+            collection_id=collection.id,
+            value="token",
+            scope="endpoint",
+            endpoint_id=endpoint.id,
+        )
+    )
+    s.add(
+        ApiEndpointTest(
+            api_test_run_id=run.id, endpoint_id=endpoint.id, owasp_api_category="API1"
+        )
+    )
+    s.commit()
+    return collection.id, endpoint.id
+
+
+def test_purge_collection_data_with_scanned_endpoints(fk_engine, fk_client):
+    with Session(fk_engine) as s:
+        collection_id, _ = _scanned_collection(s)
+
+    res = fk_client.delete(f"/api/api-collections/{collection_id}/data")
+    assert res.status_code == 200
+    assert res.json() == {"endpoints_deleted": 1, "credentials_deleted": 1}
+
+    with Session(fk_engine) as s:
+        assert s.exec(select(ApiEndpoint)).all() == []
+        assert s.exec(select(ApiCredential)).all() == []
+        assert s.exec(select(ApiEndpointTest)).all() == []
+
+
+def test_create_api_credential_rejects_endpoint_from_other_collection(
+    fk_engine, fk_client
+):
+    with Session(fk_engine) as s:
+        _, other_endpoint_id = _scanned_collection(s)
+        collection = ApiCollection(name="Other", base_url="http://other.local")
+        s.add(collection)
+        s.commit()
+        collection_id = collection.id
+
+    for endpoint_id in (other_endpoint_id, 999999):
+        res = fk_client.post(
+            f"/api/api-collections/{collection_id}/credentials",
+            json={"value": "token", "scope": "endpoint", "endpoint_id": endpoint_id},
+        )
+        assert res.status_code == 404
+
+
+def _traffic_with_probe_links(
+    s: Session, *, run_id: int, api: bool
+) -> tuple[int, int, int]:
+    traffic = TrafficEntry(
+        test_run_id=None if api else run_id,
+        api_test_run_id=run_id if api else None,
+        source="probe",
+        method="GET",
+        url="http://target.local/a",
+    )
+    task = DeepScanTask(
+        run_id=run_id,
+        fingerprint="f",
+        attack_class="xss",
+        target_url="http://target.local/a",
+    )
+    obligation = ScanObligation(
+        run_id=run_id,
+        owasp_category="A03",
+        vulnerability_technique="xss",
+        route_template="/a",
+    )
+    s.add_all([traffic, task, obligation])
+    s.flush()
+    outcome = DeepScanProbeOutcome(
+        run_id=run_id, task_id=task.id, fingerprint="f", traffic_id=traffic.id
+    )
+    execution = ProbeExecution(
+        run_id=run_id, obligation_id=obligation.id, traffic_id=traffic.id
+    )
+    s.add_all([outcome, execution])
+    s.commit()
+    return traffic.id, outcome.id, execution.id
+
+
+def test_clear_web_traffic_clears_probe_links(fk_engine, fk_client):
+    with Session(fk_engine) as s:
+        run = _web_run(s)
+        run_id = run.id
+        traffic_id, outcome_id, execution_id = _traffic_with_probe_links(
+            s, run_id=run_id, api=False
+        )
+
+    res = fk_client.delete(f"/api/test-runs/{run_id}/traffic")
+    assert res.status_code == 204
+
+    with Session(fk_engine) as s:
+        assert s.get(TrafficEntry, traffic_id) is None
+        assert s.get(DeepScanProbeOutcome, outcome_id).traffic_id is None
+        assert s.get(ProbeExecution, execution_id).traffic_id is None
+
+
+def test_clear_api_traffic_removes_only_that_runs_traffic(fk_engine, fk_client):
+    with Session(fk_engine) as s:
+        collection = ApiCollection(name="API", base_url="http://api.local")
+        s.add(collection)
+        s.flush()
+        api_run = ApiTestRun(collection_id=collection.id, name="Run")
+        s.add(api_run)
+        s.flush()
+        api_run_id = api_run.id
+        traffic_id, _, execution_id = _traffic_with_probe_links(
+            s, run_id=api_run_id, api=True
+        )
+        web_run = _web_run(s)
+        web_traffic = TrafficEntry(
+            test_run_id=web_run.id, source="crawl", method="GET", url="http://t/"
+        )
+        s.add(web_traffic)
+        s.commit()
+        web_traffic_id = web_traffic.id
+
+    res = fk_client.delete(f"/api/api-test-runs/{api_run_id}/traffic")
+    assert res.status_code == 204
+
+    with Session(fk_engine) as s:
+        assert s.get(TrafficEntry, traffic_id) is None
+        assert s.get(ProbeExecution, execution_id).traffic_id is None
+        assert s.get(TrafficEntry, web_traffic_id) is not None

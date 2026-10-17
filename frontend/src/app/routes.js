@@ -82,6 +82,7 @@ export const routes = {
       initialFindingRef: route.findingRef,
       findingIds: route.findingIds,
       coverageReturn: route.coverageReturn,
+      initialLeadRef: route.leadRef,
       initialTrafficCoverage: route.trafficCoverage,
     }),
   },

@@ -53,10 +53,10 @@ _active_tasks: dict[int, asyncio.Task] = {}
 # Active _CrawlShared objects keyed by run_id, used to notify gate on limit change.
 _active_shared: dict[int, "_CrawlShared"] = {}
 
-# Guided login registry: credential_id -> asyncio.Event (set by the confirm endpoint)
-_guided_registry: dict[int, asyncio.Event] = {}
-# Ready registry: credential_id -> asyncio.Event (set by the /ready endpoint after user clicks "I'm Ready")
-_guided_ready_registry: dict[int, asyncio.Event] = {}
+# Guided login registry: (run_id, credential_id) -> asyncio.Event (set by the confirm endpoint)
+_guided_registry: dict[tuple[int, int], asyncio.Event] = {}
+# Ready registry: (run_id, credential_id) -> asyncio.Event (set by the /ready endpoint after user clicks "I'm Ready")
+_guided_ready_registry: dict[tuple[int, int], asyncio.Event] = {}
 # Entra Authenticator retry registry: (run_id, credential_id) -> Event set by UI Retry.
 _entra_retry_registry: dict[tuple[int, int], asyncio.Event] = {}
 # Per-run lock: ensures guided logins happen one at a time (no simultaneous browser windows)
@@ -7592,8 +7592,8 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
     async with _guided_locks[run_id]:
         ready_event = asyncio.Event()
         done_event = asyncio.Event()
-        _guided_ready_registry[credential.id] = ready_event
-        _guided_registry[credential.id] = done_event
+        _guided_ready_registry[(run_id, credential.id)] = ready_event
+        _guided_registry[(run_id, credential.id)] = done_event
 
         # Phase 1: notify the UI — browser is NOT yet open; user must click "I'm Ready" first
         events_svc.emit(
@@ -7623,10 +7623,10 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                 "  _authenticate_guided: timed out waiting for ready signal (cred_id=%s)",
                 credential.id,
             )
-            _guided_ready_registry.pop(credential.id, None)
-            _guided_registry.pop(credential.id, None)
+            _guided_ready_registry.pop((run_id, credential.id), None)
+            _guided_registry.pop((run_id, credential.id), None)
             return
-        _guided_ready_registry.pop(credential.id, None)
+        _guided_ready_registry.pop((run_id, credential.id), None)
 
         # Phase 2: open the browser and let the user log in
         events_svc.emit(
@@ -7756,8 +7756,8 @@ async def _authenticate_guided(page, login_url: str, credential, run_id: int) ->
                             break
             finally:
                 await browser.close()
-                _guided_registry.pop(credential.id, None)
-                _guided_ready_registry.pop(credential.id, None)
+                _guided_registry.pop((run_id, credential.id), None)
+                _guided_ready_registry.pop((run_id, credential.id), None)
 
         # Build the injectable list regardless of whether cookies were captured.
         # We always write to the cache so subsequent _authenticate calls for this

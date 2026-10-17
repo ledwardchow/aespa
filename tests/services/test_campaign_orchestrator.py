@@ -43,6 +43,7 @@ from aespa.schemas import (
     CampaignTargetMemberCreate,
 )
 from aespa.services import campaigns as campaigns_svc
+from aespa.services import events as events_svc
 
 
 def _seed_application(session: Session) -> dict:
@@ -328,8 +329,11 @@ async def test_child_sast_page_resume_reactivates_failed_campaign(
         run.status = "completed"
         s.add(run)
         s.commit()
-    campaigns_svc.notify_source_run_finished(sast_run_id, "completed")
+    # The SAST scanner calls this from inside its own "sast" scope.
+    with events_svc.run_kind_scope("sast"):
+        campaigns_svc.notify_source_run_finished(sast_run_id, "completed")
     task = campaigns_svc._campaign_tasks[campaign_id]
+    assert task.get_context()[events_svc._run_kind_ctx] == "campaign"
     await task
 
     with Session(isolated_db_engine) as s:
@@ -341,6 +345,35 @@ async def test_child_sast_page_resume_reactivates_failed_campaign(
         ).one()
         assert campaign.status == "awaiting_review"
         assert member.status == "completed"
+
+
+@pytest.mark.anyio
+async def test_stopping_sast_run_cancels_its_source_member_retry(isolated_db_engine):
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        campaign = _create_draft_campaign(s, ctx)
+        sast_run = SastRun(name="child", status="scanning")
+        s.add(sast_run)
+        s.flush()
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign.id
+            )
+        ).one()
+        member.sast_run_id = sast_run.id
+        s.add(member)
+        s.commit()
+        key = (campaign.id, "source", member.id)
+        sast_run_id = sast_run.id
+
+    task = asyncio.create_task(asyncio.sleep(3600))
+    campaigns_svc._campaign_member_tasks[key] = task
+    try:
+        await campaigns_svc.stop_member_tasks_for_run("sast", sast_run_id)
+        assert task.cancelled()
+    finally:
+        campaigns_svc._campaign_member_tasks.pop(key, None)
+        task.cancel()
 
 
 @pytest.mark.anyio

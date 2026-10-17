@@ -179,6 +179,10 @@ async def _prepare_source(
             run.updated_at = datetime.now(_UTC)
             session.add(run)
             session.commit()
+        # The run now owns the archive. A later scan start failure must not
+        # delete it, or the run would point at a missing file and could be
+        # neither prepared again nor started.
+        stored_path = None
         _emit(
             run_id,
             "complete",

@@ -133,6 +133,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
     if (
       !confirm(
         "Delete ALL endpoints and credentials for this collection?\n\n" +
+          "Endpoint test results from earlier API runs are also removed. " +
           "Documents are kept — you can re-parse them afterwards.\n\n" +
           "Use this to clear duplicates from uploading the same file multiple times.",
       )

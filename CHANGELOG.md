@@ -32,6 +32,20 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Finding validation requests**: Requests sent while validating findings now follow the run's target scope and the scan mode's allowed HTTP methods. Redirects that leave the target scope are not followed. These requests also use the configured testing proxy and global HTTP headers. The fallback validation probes, which previously failed without sending anything, now send their requests.
 
+- **Deleting saved logins and clearing API data**: Removing a site login that an earlier crawl or session had used no longer fails with a database error; past runs keep their records without the link. Clearing an API collection's endpoints and credentials now works after the collection has been scanned, and also removes those endpoints' test results from earlier API runs. Adding an API credential for an endpoint now checks that the endpoint belongs to the same collection.
+
+- **Clearing traffic**: Clearing a web run's traffic no longer fails when deep scan probes are linked to those requests. The Clear button on an API run's Traffic tab now deletes the run's traffic instead of hiding it until the next refresh.
+
+- **Guided logins**: The "I'm Ready" and confirm buttons for a guided login now act only on the run they were clicked in, and each run lists only its own pending logins.
+
+- **SAST source preparation**: If a SAST scan could not start after its repository was downloaded, the prepared source was deleted and the run could not be started or prepared again. The prepared source is now kept, so the scan can be started once the problem is fixed.
+
+- **Campaigns**: Stopping a SAST run now also stops a retry of that campaign component. Campaign activity that resumes after a SAST scan finishes now appears in the campaign's log instead of the SAST run's.
+
+- **A.L.I.C.E. replies after a long answer**: Reopening a chat whose reply was too long to keep in full now shows the reply as finished.
+
+- **Run pages**: The Findings tab count on a web run is shown as soon as the run opens. Lead links on API runs open the lead in that API run instead of a web run, and links to a specific lead expand it. Links to a campaign finding now open its group. In campaign review, saving the frontend path guidance twice in a row no longer fails with a conflict, and the Approve and Reject buttons show saved decisions.
+
 ### Housekeeping
 
 - **Shared run services**: Creating, starting, and stopping web and SAST runs now uses shared services for both AESPA's own API and extensions, so both follow the same checks. Existing API behaviour is unchanged.

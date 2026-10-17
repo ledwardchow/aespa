@@ -1801,3 +1801,26 @@ def test_get_graph_inferred_parent_links(engine):
         assert len(inferred_links) == 1
         assert inferred_links[0].source == parent_page.id
         assert inferred_links[0].target == child_page.id
+
+
+def test_guided_login_is_scoped_to_its_run(client, monkeypatch):
+    import asyncio
+
+    from aespa.services import crawler
+
+    first_done, second_done, second_ready = (asyncio.Event() for _ in range(3))
+    monkeypatch.setattr(
+        crawler, "_guided_registry", {(1, 5): first_done, (2, 5): second_done}
+    )
+    monkeypatch.setattr(crawler, "_guided_ready_registry", {(2, 5): second_ready})
+
+    status = client.get("/api/test-runs/1/guided-login/status").json()
+    assert status == {
+        "pending_credential_ids": [5],
+        "awaiting_ready_credential_ids": [],
+    }
+
+    assert client.post("/api/test-runs/2/guided-login/5/confirm").status_code == 200
+    assert second_done.is_set() and not first_done.is_set()
+    assert client.post("/api/test-runs/1/guided-login/5/ready").status_code == 404
+    assert not second_ready.is_set()

@@ -243,7 +243,7 @@ export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initia
                     key={l.id}
                     style={{
                       cursor: "pointer",
-                      background: investigated ? "var(--panel))" : undefined,
+                      background: investigated ? "var(--panel)" : undefined,
                     }}
                     onClick={() => toggle(l.id)}
                   >
@@ -262,7 +262,7 @@ export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initia
                         title={l.title}
                         description={l.description}
                         severity={l.severity}
-                        href={`#/runs/${runId}/leads?lead=${encodeURIComponent(l.reference || "")}`}
+                        href={`#/${isApi ? "api-runs" : "runs"}/${runId}/leads?lead=${encodeURIComponent(l.reference || "")}`}
                       />{" "}
                       <span>{l.title}</span>
                     </td>

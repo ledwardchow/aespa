@@ -17,6 +17,7 @@ test.each([
     "#/api-runs/7/findings?finding=F-12.",
     { name: "api-run-detail", id: 7, tab: "findings", findingRef: "F-12" },
   ],
+  ["#/api-runs/7/leads?lead=L-4", { name: "api-run-detail", id: 7, tab: "leads", leadRef: "L-4" }],
   ["#/runs/7/alice-popout", { name: "alice-popout", id: 7 }],
   [
     "#/runs/7/findings?finding=F-12&lead=L-3",

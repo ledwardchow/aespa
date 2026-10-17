@@ -652,6 +652,17 @@ def get_api_traffic_count(
     return {"count": traffic_svc.count_traffic(0, api_run_id=run_id)}
 
 
+@router.delete("/{run_id}/traffic", status_code=204)
+def clear_api_traffic(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    _get_run_or_404(session, run_id)
+    from aespa.services import traffic as traffic_svc
+
+    traffic_svc.clear_traffic(0, api_run_id=run_id)
+
+
 @router.get("/{run_id}/code-executions")
 def list_api_code_executions(
     run_id: int,

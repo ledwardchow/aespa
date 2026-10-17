@@ -78,9 +78,15 @@ export function ApiRunTrafficTab({ runId, scanRunning, coverageFilter }) {
         </label>
         <button
           className="btn ghost sm"
-          onClick={() => {
+          onClick={async () => {
+            try {
+              await apiRunsApi.clearApiTraffic(runId);
+            } catch {
+              return;
+            }
             reset();
             setSelected(null);
+            setTotal(0);
           }}
         >
           Clear

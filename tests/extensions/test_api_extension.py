@@ -1020,6 +1020,16 @@ def test_callbacks_retry_then_fail_and_can_be_redelivered(api):
         ).status_code
         == 404
     )
+    # A redelivery gets a fresh set of retries instead of failing on its
+    # first error.
+    with httpx.Client(transport=httpx.MockTransport(redirect)) as client:
+        assert api_callbacks.deliver_due(api.store, client) == 0
+    with api.store.session() as session:
+        delivery = session.exec(select(ApiDelivery)).one()
+        assert (delivery.status, delivery.attempts) == ("pending", 1)
+        delivery.next_attempt_at = now()
+        session.add(delivery)
+        session.commit()
     with httpx.Client(
         transport=httpx.MockTransport(lambda r: httpx.Response(200))
     ) as client:

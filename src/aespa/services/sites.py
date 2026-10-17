@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 
 from aespa.models import Credential, Site
 from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate, SiteWorkflowInput
+from aespa.services.run_cleanup import detach_credential_dependents
 
 
 def _parse_datetimes(data: dict, *fields: str) -> dict:
@@ -219,6 +220,11 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
                     continue
                 setattr(current, key, value)
         updated_credentials.append(current)
+    # Removed credentials are deleted as orphans on commit; clear references
+    # first, before the reassignment makes them pending deletes.
+    detach_credential_dependents(
+        session, [cred_id for cred_id in existing_by_id if cred_id not in retained_ids]
+    )
     site.credentials = updated_credentials
 
     session.add(site)
@@ -274,6 +280,7 @@ def delete_credential(session: Session, site_id: int, credential_id: int) -> Non
         raise CredentialNotFound(
             f"Credential id={credential_id} not found for site {site_id}"
         )
+    detach_credential_dependents(session, [credential_id])
     session.delete(cred)
     session.commit()
 

@@ -705,8 +705,16 @@ def guided_login_status(run_id: int) -> dict:
     from aespa.services.crawler import _guided_ready_registry, _guided_registry
 
     return {
-        "pending_credential_ids": list(_guided_registry.keys()),
-        "awaiting_ready_credential_ids": list(_guided_ready_registry.keys()),
+        "pending_credential_ids": [
+            credential_id
+            for key_run_id, credential_id in _guided_registry
+            if key_run_id == run_id
+        ],
+        "awaiting_ready_credential_ids": [
+            credential_id
+            for key_run_id, credential_id in _guided_ready_registry
+            if key_run_id == run_id
+        ],
     }
 
 
@@ -718,7 +726,7 @@ async def ready_guided_login(run_id: int, credential_id: int) -> dict:
     """
     from aespa.services.crawler import _guided_ready_registry
 
-    event = _guided_ready_registry.get(credential_id)
+    event = _guided_ready_registry.get((run_id, credential_id))
     if event is None:
         raise HTTPException(
             status_code=404,
@@ -746,7 +754,7 @@ async def confirm_guided_login(run_id: int, credential_id: int) -> dict:
     """
     from aespa.services.crawler import _guided_registry
 
-    event = _guided_registry.get(credential_id)
+    event = _guided_registry.get((run_id, credential_id))
     if event is None:
         raise HTTPException(
             status_code=404,
