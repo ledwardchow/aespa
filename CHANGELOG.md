@@ -66,6 +66,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
+- **README screenshots**: Updated the screenshots to show the current web, API, SAST, and system screens with fictional example data.
+
 - **Shared run services**: Creating, starting, and stopping web and SAST runs now uses shared services for both AESPA's own API and extensions, so both follow the same checks. Existing API behaviour is unchanged.
 
 - **Documentation cleanup**: Removed unused and duplicate documentation screenshots, along with finished planning notes. The screenshot capture script no longer creates the duplicates. Implementation plans are no longer included in the repository.

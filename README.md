@@ -14,13 +14,16 @@ Testing :) It's got a cool UI and stuff.
 
 ## Features
 
-Multi-agent web and API testing with a Test Lead, focused specialists,
-adversarial validation, and reporting. AESPA also includes standalone Light and
-Deep SAST, focused live validation of imported source leads, multi-repository
-System campaigns, and account-wide LLM usage statistics.
+Point-and-click SAST and DAST for web applications, optimised for cost.
 
-Dynamic scans support four workflows: Quick, Standard coverage, Full coverage,
-and SAST Validate.
+Give it the source code of a web app via ZIP or GitHub checkout, and it'll spit out the findings.
+
+You can feed those SAST findings into a DAST scan for better performance/less tokens spent finding things, or just do straight grey-box DAST without the source.
+
+The DAST module will give you a lot of information about what is going on:
+
+- What each agent is doing
+- An OWASP coverage sheet, listing each URL route and discovered business process/workflow + what testing was undertaken against each
 
 You will need to provide:
 
@@ -47,11 +50,7 @@ The best performing models (cost/benefit) are:
 
 ## Documentation
 
-The [Architecture](docs/architecture.md).
-
-The [changelog](CHANGELOG.md).
-
-The [User Guide](docs/guide/index.md)!
+[Changelog](CHANGELOG.md)
 
 ## Requirements
 
@@ -69,6 +68,7 @@ The [User Guide](docs/guide/index.md)!
   - [Factory.AI](http://Factory.AI) subscription (via Droid CLI)
   - GitHub Copilot subscription (via Copilot CLI)
   - ChatGPT subscription (via Sign in with ChatGPT or Codex CLI). 
+    - Note since 16 Oct 2026 I've experienced a large number of cyber refusals on "sign in with ChatGPT" on a Daybreak account, which didn't occur when using the Codex CLI provider. I can't explain it either, just something to be aware of if this happens to you.
   - Google Antigravity subscription (via agy CLI)
 
 If your API key has TPM/RPM quota caps this is configurable in the LLM Settings UI. If left unconfigured i've seen this consume up to ~10m TPM bursts.
@@ -79,7 +79,7 @@ If you aren't part of any, I recommend the following:
 
 - Claude Sonnet 5 (doesn't seem to hit cyber refusals unless you type something sus on ALICE), usable results
 - Qwen 3.8 27b, runs locally on a 64GB Macbook or 24GB CUDA card, this performs better than Sonnet 5
-- Any Qwen 3.8 model or GLM 5.3
+- GLM 5.3
 
 ## Running (macOS/Windows)
 
@@ -87,7 +87,11 @@ Standalone binaries for Windows and macOS are available at [GitHub releases](htt
 
 These versions run in the background in the menubar or systray - click on the icon to open the interface/quit the background process. 
 
+Note the builds are automatic and I don't test these that often, the Mac one maybe I use a few times a month to check if it works, the Windows one... only when someone asks.
+
 ## Running with Docker
+
+I don't recommend you use this, running it directly is much easier to troubleshoot.
 
 The image bundles Chromium, so no separate Playwright install is needed.
 
@@ -116,6 +120,8 @@ docker compose up -d --build
 ```
 
 ## Running from source
+
+This is the most recommended way, since when something breaks you can point your favourite vibecoding app at it, paste the error message and off you go again.
 
 ### Setup
 Note, previously the built UI was committed, this is no longer the case. The frontend will build on first launch/any changes automatically, you will require node/npm/vite.
@@ -189,7 +195,7 @@ and press Enter. Backups default to a timestamped SQLite file in your home
 folder. Clear scans keeps targets, LLM connections, and settings. Reset removes
 all database records. Clear and Reset require the confirmation shown on screen.
 
-### Frontend build (only for UI development)
+### Frontend build
 
 The compiled frontend bundle is committed under `src/aespa/web/` to make runs/deployment easier. 
 
@@ -203,17 +209,9 @@ npm run build     # regenerates src/aespa/web/
 
 See [frontend/README.md](frontend/README.md) for the development server, tests, and source layout.
 
-### Run notes
-
-Crawls work well enough on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models; for best results, use Sonnet, or the budget option is Minimax M3.
-
-If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
-
-This app is intended for local use. The console shows an authentication key and opens a signed-in browser when you press tilde (`~`). Desktop apps sign in automatically. Browsers remember sign-in for 30 days. Keep the data folder and console logs private. For remote access, use an HTTPS reverse proxy and configure the allowed hostname. Integrations use the API extension's bearer tokens. An optional separate integration port is available outside Docker. See [authentication settings](docs/guide/config/settings.md) and [API access](docs/api.md).
-
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust as needed:
+(Optional) Copy `.env.example` to `.env` and adjust as needed:
 
 ```bash
 cp .env.example .env
@@ -256,47 +254,46 @@ Open the app, go to **Settings → LLM**, and configure:
 
 ## Screenshots
 
-Landing page:  
-![Screenshot](docs/images/sites.png)
+These screens use fictional targets and example findings.
 
-Site test runs:  
-![Screenshot](docs/images/testruns.png)
+Systems group code components, Sites, and API collections:
+![A system with a Site and API collection attached as live targets](docs/images/systemtargets.png)
 
-Site setup:  
-![Screenshot](docs/images/sitesetup.png)
+Sites list:
+![Sites list with three example targets](docs/images/sites.png)
 
-Site Map:  
-![Screenshot](docs/images/sitemap.png)
+Web run setup, including crawl options and an optional LLM budget:
+![New web test run form](docs/images/editrun.png)
 
-A.L.I.C.E chat:  
-![Screenshot](docs/images/alice.png)
+Site Map:
+![Site Map for an example web run](docs/images/sitemap.png)
 
-Agents view: 
-![Screenshot](docs/images/agentstatus.png)
+Attack Surface shows routes and their test coverage:
+![Attack Surface route inventory](docs/images/attacksurface.png)
 
-Attack Surface  
-![Screenshot](docs/images/attacksurface.png)
+OWASP coverage for a web run:
+![Web OWASP coverage summary and page matrix](docs/images/webcoverage.png)
 
-Traffic log:  
-![Screenshot](docs/images/trafficlog.png)
+OWASP coverage for workflows:
+![Workflow OWASP coverage table with completed checks, a finding, and a workflow awaiting input](docs/images/workflowcoverage.png)
 
-Findings  
-![Screenshot](docs/images/webfindings.png)
+Workflows found during a crawl:
+![Workflow results, including one that needs input](docs/images/workflows.png)
 
-API Setup  
-![Screenshot](docs/images/apisetup.png)
+Web findings:
+![Confirmed web findings](docs/images/webfindings.png)
 
-Parsed API documentation  
-![Screenshot](docs/images/apispecparsed.png)
+A.L.I.C.E. chat on a web run:
+![A.L.I.C.E. chat reviewing an example finding](docs/images/alice.png)
 
-SAST Scan-based Lead Detection  
-![Screenshot](docs/images/sastleads.png)
+Endpoints parsed from an API document:
+![API collection endpoints](docs/images/apispecparsed.png)
 
-OWASP Coverage for API Scanning  
-![Screenshot](docs/images/apiworkprogram.png)
+OWASP coverage for an API run:
+![API OWASP coverage matrix](docs/images/apiworkprogram.png)
 
-API Scan Findings  
-![Screenshot](docs/images/apifindings.png)
+SAST scan setup:
+![New SAST scan form](docs/images/sastsetup.png)
 
 ## Recommended models
 
