@@ -14,13 +14,125 @@
   margin-bottom: 8px;
 }
 
+.api-tokens {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.api-tokens-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.api-tokens-head > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.api-token-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.api-token-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.api-token-card.off .api-token-facts {
+  opacity: 0.6;
+}
+
+.api-token-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.api-token-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.api-token-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.api-token-title code {
+  font-size: 12px;
+}
+
+.api-token-actions {
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.api-token-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 20px;
+  margin: 0;
+}
+
+.api-token-facts dt {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.api-token-facts dd {
+  margin: 2px 0 0;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.api-token-url {
+  overflow-wrap: anywhere;
+}
+
+.api-token-hint {
+  font-size: 12px;
+}
+
+.api-token-shown {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--ok);
+  border-radius: 8px;
+  background: var(--ok-bg);
+}
+
 .api-token-form {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin-top: 20px;
-  padding-top: 16px;
+  padding-top: 12px;
   border-top: 1px solid var(--border);
+}
+
+.api-token-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 24px;
 }
 
 .api-token-scopes {
@@ -30,9 +142,9 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
 
-/* Match ordinary field labels instead of the uppercase fieldset legend. */
 .api-token-scopes legend {
   padding: 0;
   margin-bottom: 4px;
@@ -40,12 +152,26 @@
   font-weight: 600;
   color: var(--text-2);
   text-transform: none;
-  letter-spacing: 0.2px;
 }
 
-.api-token-webhook {
-  max-width: 260px;
-  overflow-wrap: anywhere;
+.api-token-more {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-2);
+  border-radius: 8px;
+}
+
+.api-token-more-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.api-token-form-actions {
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .api-def-secret {

@@ -1082,6 +1082,54 @@ class ExtensionManager:
             extension_id, self.get_settings(extension_id), secrets
         )
 
+    async def describe_source_providers(
+        self, extension_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Each registered SAST source provider, with a fresh availability check."""
+        providers = [
+            registered
+            for registered in self.source_providers.values()
+            if extension_id is None or registered.extension_id == extension_id
+        ]
+        states = await asyncio.gather(
+            *[
+                item.provider.check_availability(self.context_for(item.extension_id))
+                for item in providers
+            ],
+            return_exceptions=True,
+        )
+        described = []
+        for registered, state in zip(providers, states, strict=True):
+            descriptor = registered.provider.descriptor
+            described.append(
+                {
+                    "id": descriptor.id,
+                    "label": descriptor.label,
+                    "description": descriptor.description,
+                    "request_fields": [
+                        field.__dict__ for field in descriptor.request_fields
+                    ],
+                    "availability": (
+                        {
+                            "available": False,
+                            "status": "error",
+                            "message": str(state),
+                            "details": {},
+                        }
+                        if isinstance(state, Exception)
+                        else {
+                            "available": state.available,
+                            "status": state.status,
+                            "message": state.message,
+                            "details": state.details,
+                        }
+                    ),
+                    "extension_id": registered.extension_id,
+                    "extension_name": self.extensions[registered.extension_id].name,
+                }
+            )
+        return described
+
     def extension_dict(self, record: ExtensionRecord) -> dict[str, Any]:
         return {
             "id": record.id,

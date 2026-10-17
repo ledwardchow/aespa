@@ -127,6 +127,12 @@ class SastRunAccess:
         with _session() as session:
             return await sast_runs.stop(session, run_id)
 
+    async def sources(self) -> list[dict[str, Any]]:
+        """SAST source providers from enabled extensions, for create_from_source."""
+        from aespa.extensions import get_extension_manager
+
+        return await get_extension_manager().describe_source_providers()
+
     async def resume(self, run_id: int) -> None:
         with _session() as session:
             await sast_runs.resume(session, run_id)

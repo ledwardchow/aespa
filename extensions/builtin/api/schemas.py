@@ -245,6 +245,38 @@ class SourceScanCreate(BaseModel):
     callbacks: CallbackConfig | None = None
 
 
+class SourceField(BaseModel):
+    """A value to send in parameters when creating a scan from this source."""
+
+    key: str = Field(description="The parameters key.")
+    label: str
+    type: str = Field(description="text, select, boolean, or another input type.")
+    required: bool
+    placeholder: str | None = None
+    help: str | None = None
+    default: Any = None
+    options: list[dict[str, str]] = Field(
+        default_factory=list, description="Choices for select fields."
+    )
+
+
+class SastSource(BaseModel):
+    """An enabled extension that can prepare source code for a SAST scan."""
+
+    id: str = Field(
+        description="Send as provider_id to POST /sast/scans/from-source.",
+        examples=["aespa.githubrepository"],
+    )
+    name: str
+    description: str
+    extension: str = Field(description="The extension that provides it.")
+    available: bool = Field(
+        description="False when it is not set up yet, for example a missing tool."
+    )
+    message: str = Field(description="Why it is or isn't available.")
+    fields: list[SourceField]
+
+
 class FindingCounts(BaseModel):
     critical: int = 0
     high: int = 0

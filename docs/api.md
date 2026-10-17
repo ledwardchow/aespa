@@ -14,7 +14,7 @@ The API extension lets CI pipelines and other tools create Sites, run web and SA
    - **All scans in AESPA**: every web or SAST scan its permissions allow, including scans started in AESPA itself and by other tokens. Scans started in AESPA have no callbacks.
 4. Copy the token. You can show it again later from the token list, on this computer only.
 
-Turn a token off to stop apps from using it, and turn it back on when needed. Its settings and scans are kept while it is off.
+Use **Edit** on a token to change its name, permissions, which scans it can see, or its callback URL. Edit also lets you turn a token off, so apps can't use it until you turn it back on, and give it a new value, which stops the old value from working. Tokens created before AESPA kept token values can't be shown; give them a new value to get one you can show.
 
 `GET /token` returns the token's name, permissions (`scopes`), and which scans it can see (`scan_access`: `own` or `all`).
 
@@ -44,7 +44,13 @@ curl -sf -X POST "$BASE/sast/scans" \
 
 The response is the scan's status. Its `id` looks like `sast-17`.
 
-To use a source extension instead of a file, such as GitHub repository:
+To use a source extension instead of a file, such as GitHub repository, first list the enabled sources and the parameters each one needs:
+
+```bash
+curl -s "$BASE/sast/sources" -H "Authorization: Bearer $AESPA_TOKEN"
+```
+
+Each source has an `id`, whether it is `available` with a `message` saying why, and its `fields`. Send the `id` as `provider_id` and the field values in `parameters`:
 
 ```bash
 curl -sf -X POST "$BASE/sast/scans/from-source" \

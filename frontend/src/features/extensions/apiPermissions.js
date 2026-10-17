@@ -8,8 +8,8 @@ export const API_PERMISSIONS = [
 
 // Which scans a token can see through the API.
 export const SCAN_ACCESS = [
-  { value: "own", label: "Only scans it creates", short: "Own scans" },
-  { value: "all", label: "All scans in AESPA", short: "All scans" },
+  { value: "own", label: "Only scans it creates" },
+  { value: "all", label: "All scans in AESPA" },
 ];
 
 export function permissionLabels(values = []) {

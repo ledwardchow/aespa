@@ -154,7 +154,7 @@ test("settings page shows the definition only for extensions that publish one", 
   expect(screen.queryByText("API tokens")).toBeNull();
 });
 
-test("a new token is shown and the list reloads", async () => {
+test("a new token is created from the New token form and shown in its card", async () => {
   const user = userEvent.setup();
   integrationApi.createApiToken.mockResolvedValue({
     id: 1,
@@ -163,8 +163,10 @@ test("a new token is shown and the list reloads", async () => {
     webhook_secret: null,
   });
   render(<ApiTokens />);
-  expect(await screen.findByText("No tokens yet.")).toBeTruthy();
+  expect(await screen.findByText(/No tokens yet/)).toBeTruthy();
 
+  integrationApi.listApiTokens.mockResolvedValue([{ ...savedToken, id: 1, can_show_token: true }]);
+  await user.click(screen.getByRole("button", { name: "New token" }));
   await user.type(screen.getByLabelText("Name"), "CI");
   await user.click(screen.getByLabelText("Web scans"));
   await user.click(screen.getByLabelText("All scans in AESPA"));
@@ -177,7 +179,8 @@ test("a new token is shown and the list reloads", async () => {
     webhook_url: null,
   });
   expect(await screen.findByDisplayValue("aespa_example")).toBeTruthy();
-  expect(screen.getByText(/You can show it again later/)).toBeTruthy();
+  expect(screen.getByText(/You can show the token again later/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Create token" })).toBeNull();
   expect(integrationApi.listApiTokens).toHaveBeenCalledTimes(2);
 });
 
@@ -194,37 +197,66 @@ const savedToken = {
   last_used_at: null,
 };
 
-test("a saved token can be shown, turned off and on, and set to see all scans", async () => {
+test("a saved token can be shown and edited", async () => {
   const user = userEvent.setup();
   integrationApi.listApiTokens.mockResolvedValue([savedToken]);
   integrationApi.showApiToken.mockResolvedValue({ token: "aespa_saved" });
-  integrationApi.deactivateApiToken.mockResolvedValue({ ...savedToken, active: false });
-  integrationApi.updateApiToken.mockResolvedValue({ ...savedToken, scan_access: "all" });
-  vi.spyOn(window, "confirm").mockReturnValue(true);
+  integrationApi.updateApiToken.mockResolvedValue({ ...savedToken, webhook_secret: null });
   render(<ApiTokens />);
-  expect(await screen.findByText("On")).toBeTruthy();
+  const card = await screen.findByRole("article", { name: "CI" });
+  expect(within(card).getByText("Only scans it creates")).toBeTruthy();
 
-  await user.click(screen.getByRole("button", { name: "Show token" }));
-  expect(await screen.findByDisplayValue("aespa_saved")).toBeTruthy();
+  await user.click(within(card).getByRole("button", { name: "Show token" }));
+  expect(await within(card).findByDisplayValue("aespa_saved")).toBeTruthy();
   expect(integrationApi.showApiToken).toHaveBeenCalledWith(7);
 
-  await user.selectOptions(screen.getByLabelText("Scans CI can see"), "all");
-  expect(integrationApi.updateApiToken).toHaveBeenCalledWith(7, { scan_access: "all" });
+  await user.click(within(card).getByRole("button", { name: "Edit" }));
+  const name = within(card).getByLabelText("Name");
+  await user.clear(name);
+  await user.type(name, "CI pipeline");
+  await user.click(within(card).getByLabelText("Web scans"));
+  await user.click(within(card).getByLabelText("All scans in AESPA"));
+  await user.click(within(card).getByRole("button", { name: "Save" }));
+  expect(integrationApi.updateApiToken).toHaveBeenCalledWith(7, {
+    name: "CI pipeline",
+    scopes: ["sast", "web"],
+    scan_access: "all",
+    webhook_url: "",
+  });
+});
+
+test("a token can be turned off and on", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  integrationApi.listApiTokens.mockResolvedValue([savedToken]);
+  integrationApi.deactivateApiToken.mockResolvedValue({ ...savedToken, active: false });
+  render(<ApiTokens />);
+  const card = await screen.findByRole("article", { name: "CI" });
 
   integrationApi.listApiTokens.mockResolvedValue([{ ...savedToken, active: false }]);
-  await user.click(screen.getByRole("button", { name: "Turn off" }));
+  await user.click(within(card).getByRole("button", { name: "Edit" }));
+  await user.click(within(card).getByRole("button", { name: "Turn off" }));
   expect(integrationApi.deactivateApiToken).toHaveBeenCalledWith(7);
-  expect(await screen.findByText("Off")).toBeTruthy();
+  expect(await within(card).findByText("Off")).toBeTruthy();
 
-  await user.click(screen.getByRole("button", { name: "Turn on" }));
+  await user.click(within(card).getByRole("button", { name: "Turn on" }));
   expect(integrationApi.reactivateApiToken).toHaveBeenCalledWith(7);
 });
 
-test("a token saved before tokens were kept has no Show button", async () => {
+test("a token saved before tokens were kept can be given a new value", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(window, "confirm").mockReturnValue(true);
   integrationApi.listApiTokens.mockResolvedValue([{ ...savedToken, can_show_token: false }]);
+  integrationApi.newApiTokenValue.mockResolvedValue({ ...savedToken, token: "aespa_fresh" });
   render(<ApiTokens />);
-  expect(await screen.findByText("On")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Show token" })).toBeNull();
+  const card = await screen.findByRole("article", { name: "CI" });
+  expect(within(card).queryByRole("button", { name: "Show token" })).toBeNull();
+  expect(within(card).getByText(/created before AESPA kept tokens/)).toBeTruthy();
+
+  await user.click(within(card).getByRole("button", { name: "Edit" }));
+  await user.click(within(card).getByRole("button", { name: "New token value" }));
+  expect(integrationApi.newApiTokenValue).toHaveBeenCalledWith(7);
+  expect(await within(card).findByDisplayValue("aespa_fresh")).toBeTruthy();
 });
 
 test("nested objects open in place and link to their Data objects entry", async () => {

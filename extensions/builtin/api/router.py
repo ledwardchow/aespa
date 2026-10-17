@@ -50,6 +50,7 @@ from .schemas import (
     Delivery,
     FindingPage,
     LlmProfile,
+    SastSource,
     ScanList,
     ScanStatus,
     Severity,
@@ -526,6 +527,33 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
             cleanup=lambda: archive.path.unlink(missing_ok=True),
         )
 
+    @router.get(
+        "/v1/sast/sources",
+        response_model=list[SastSource],
+        operation_id="listSastSources",
+        summary="List sources a SAST scan can be created from",
+        description=(
+            "Enabled source extensions, such as GitHub repository, with the "
+            "parameters each one needs. Use with POST /sast/scans/from-source."
+        ),
+        tags=["SAST scans"],
+        responses=ERRORS,
+        openapi_extra=_scopes("sast"),
+    )
+    async def list_sast_sources(caller: Caller = Depends(require("sast"))):
+        return [
+            {
+                "id": source["id"],
+                "name": source["label"],
+                "description": source["description"],
+                "extension": source["extension_name"],
+                "available": source["availability"]["available"],
+                "message": source["availability"]["message"],
+                "fields": source["request_fields"],
+            }
+            for source in await core.sast.sources()
+        ]
+
     @router.post(
         "/v1/sast/scans/from-source",
         response_model=ScanStatus,
@@ -534,7 +562,8 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
         summary="Create a SAST scan from a source provider",
         description=(
             "Prepares source through an enabled SAST source extension, such as "
-            "GitHub repository. The scan starts when the source is ready."
+            "GitHub repository. The scan starts when the source is ready. "
+            "GET /sast/sources lists the sources and their parameters."
         ),
         tags=["SAST scans"],
         responses={**ERRORS, **examples.created(examples.SAST_SCAN_STATUS)},
@@ -1090,6 +1119,20 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
     def admin_reactivate_token(token_id: int) -> dict:
         return _set_active(token_id, True)
 
+    @router.post("/admin/tokens/{token_id}/new-value", **admin_only)
+    def admin_new_token_value(token_id: int) -> dict:
+        """Give the token a new value; apps using the old value stop working."""
+        token = new_token()
+        with store.session() as session:
+            row = _admin_token(session, token_id)
+            row.token_hash = hash_token(token)
+            row.token_prefix = token[:12]
+            row.token_value = token
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return {**_token_out(row), "token": token}
+
     @router.get("/admin/tokens/{token_id}/token", **admin_only)
     def admin_show_token(token_id: int) -> dict:
         with store.session() as session:
@@ -1099,7 +1142,7 @@ def build_router(store: ExtensionDataStore, core) -> APIRouter:
                 status_code=409,
                 detail=(
                     "This token was created before AESPA kept tokens, so it can't "
-                    "be shown. Create a new token to replace it."
+                    "be shown. Give it a new value to show it from now on."
                 ),
             )
         return {"token": row.token_value}

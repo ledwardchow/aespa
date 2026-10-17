@@ -30,52 +30,20 @@ async def _extension_payload(
     if record is None:
         raise HTTPException(status_code=404, detail="Extension not found")
     payload = manager.extension_dict(record)
-    providers = [
-        registered
-        for registered in manager.source_providers.values()
-        if registered.extension_id == extension_id
-    ]
     scanners = [
         registered
         for registered in manager.web_scanners.values()
         if registered.extension_id == extension_id
     ]
-    availability = await asyncio.gather(
-        *[
-            item.provider.check_availability(manager.context_for(extension_id))
-            for item in providers
-        ],
-        return_exceptions=True,
-    )
-    payload["source_providers"] = []
+    payload["source_providers"] = [
+        {
+            key: value
+            for key, value in provider.items()
+            if key not in {"extension_id", "extension_name"}
+        }
+        for provider in await manager.describe_source_providers(extension_id)
+    ]
     payload["web_scanners"] = []
-    for registered, state in zip(providers, availability, strict=True):
-        descriptor = registered.provider.descriptor
-        if isinstance(state, Exception):
-            state_payload = {
-                "available": False,
-                "status": "error",
-                "message": str(state),
-                "details": {},
-            }
-        else:
-            state_payload = {
-                "available": state.available,
-                "status": state.status,
-                "message": state.message,
-                "details": state.details,
-            }
-        payload["source_providers"].append(
-            {
-                "id": descriptor.id,
-                "label": descriptor.label,
-                "description": descriptor.description,
-                "request_fields": [
-                    field.__dict__ for field in descriptor.request_fields
-                ],
-                "availability": state_payload,
-            }
-        )
     scanner_availability = await asyncio.gather(
         *[
             (
@@ -143,7 +111,9 @@ def get_extension_openapi(extension_id: str) -> dict[str, Any]:
     manager.ensure_loaded()
     document = manager.openapi_for(extension_id)
     if document is None:
-        raise HTTPException(status_code=404, detail="This extension has no API definition")
+        raise HTTPException(
+            status_code=404, detail="This extension has no API definition"
+        )
     return document
 
 

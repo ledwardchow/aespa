@@ -321,6 +321,18 @@ def test_tokens_can_be_shown_again(api):
     assert legacy.status_code == 409
     assert api.client.get(f"{BASE}/v1/scans", headers=_auth(token)).status_code == 200
 
+    renewed = api.client.post(f"{BASE}/admin/tokens/{listed['id']}/new-value").json()
+    assert renewed["token"] != token and renewed["can_show_token"] is True
+    assert renewed["token"].startswith(renewed["prefix"])
+    assert api.client.get(f"{BASE}/v1/scans", headers=_auth(token)).status_code == 401
+    assert (
+        api.client.get(f"{BASE}/v1/scans", headers=_auth(renewed["token"])).status_code
+        == 200
+    )
+    assert api.client.get(f"{BASE}/admin/tokens/{listed['id']}/token").json() == {
+        "token": renewed["token"]
+    }
+
 
 def _sast_run_from_aespa(name="Started in AESPA") -> int:
     with Session(get_engine()) as session:
@@ -627,6 +639,46 @@ def test_sast_from_source_uses_the_core_source_service(api, monkeypatch):
     assert response.json()["state"] == "preparing"
     assert calls[0]["metadata"] == {"created_via": EXTENSION}
     assert calls[0]["start_scan"] is True
+
+
+def test_sast_sources_list_enabled_providers_without_local_details(api, monkeypatch):
+    from aespa.extensions import ProviderAvailability
+
+    async def ready(context):
+        return ProviderAvailability(
+            available=True,
+            status="ready",
+            message="Signed in to GitHub.",
+            details={"git": "/opt/homebrew/bin/git", "authenticated": True},
+        )
+
+    url = f"{BASE}/v1/sast/sources"
+    token = _token(api, scopes=["sast"])
+
+    api.manager.set_enabled("aespa.githubrepository", False)
+    assert api.client.get(url, headers=_auth(token)).json() == []
+
+    api.manager.set_enabled("aespa.githubrepository", True)
+    provider = api.manager.source_providers["aespa.githubrepository"].provider
+    monkeypatch.setattr(provider, "check_availability", ready)
+    sources = api.client.get(url, headers=_auth(token)).json()
+    assert [s["id"] for s in sources] == ["aespa.githubrepository"]
+    github = sources[0]
+    assert (github["name"], github["available"], github["message"]) == (
+        "GitHub repository",
+        True,
+        "Signed in to GitHub.",
+    )
+    assert [(f["key"], f["required"]) for f in github["fields"]] == [
+        ("repository", True),
+        ("ref", False),
+    ]
+    assert "/opt/homebrew" not in json.dumps(sources)
+    assert (
+        api.client.get(url, headers=_auth(_token(api, scopes=["web"]))).status_code
+        == 403
+    )
+    api.manager.set_enabled("aespa.githubrepository", False)
 
 
 # ── Sites and web scans ──────────────────────────────────────────────────────

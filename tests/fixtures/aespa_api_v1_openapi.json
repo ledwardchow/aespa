@@ -1225,6 +1225,60 @@
         "title": "NeedsAction",
         "type": "object"
       },
+      "SastSource": {
+        "description": "An enabled extension that can prepare source code for a SAST scan.",
+        "properties": {
+          "available": {
+            "description": "False when it is not set up yet, for example a missing tool.",
+            "title": "Available",
+            "type": "boolean"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "extension": {
+            "description": "The extension that provides it.",
+            "title": "Extension",
+            "type": "string"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/SourceField"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "id": {
+            "description": "Send as provider_id to POST /sast/scans/from-source.",
+            "examples": [
+              "aespa.githubrepository"
+            ],
+            "title": "Id",
+            "type": "string"
+          },
+          "message": {
+            "description": "Why it is or isn't available.",
+            "title": "Message",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "extension",
+          "available",
+          "message",
+          "fields"
+        ],
+        "title": "SastSource",
+        "type": "object"
+      },
       "ScanLinks": {
         "properties": {
           "activity": {
@@ -1813,6 +1867,73 @@
           "instructions"
         ],
         "title": "SiteWorkflowInput",
+        "type": "object"
+      },
+      "SourceField": {
+        "description": "A value to send in parameters when creating a scan from this source.",
+        "properties": {
+          "default": {
+            "title": "Default"
+          },
+          "help": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Help"
+          },
+          "key": {
+            "description": "The parameters key.",
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "options": {
+            "description": "Choices for select fields.",
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "type": {
+            "description": "text, select, boolean, or another input type.",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "type",
+          "required"
+        ],
+        "title": "SourceField",
         "type": "object"
       },
       "SourceScanCreate": {
@@ -2597,7 +2718,7 @@
     },
     "/v1/sast/scans/from-source": {
       "post": {
-        "description": "Prepares source through an enabled SAST source extension, such as GitHub repository. The scan starts when the source is ready.",
+        "description": "Prepares source through an enabled SAST source extension, such as GitHub repository. The scan starts when the source is ready. GET /sast/sources lists the sources and their parameters.",
         "operationId": "createSastScanFromSource",
         "parameters": [
           {
@@ -2842,6 +2963,90 @@
           }
         ],
         "summary": "Resume a paused SAST scan",
+        "tags": [
+          "SAST scans"
+        ],
+        "x-aespa-scopes": [
+          "sast"
+        ]
+      }
+    },
+    "/v1/sast/sources": {
+      "get": {
+        "description": "Enabled source extensions, such as GitHub repository, with the parameters each one needs. Use with POST /sast/scans/from-source.",
+        "operationId": "listSastSources",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SastSource"
+                  },
+                  "title": "Response Listsastsources",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Missing or invalid token"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The token lacks a required scope"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found, or owned by another token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request conflicts with the current state"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is not valid"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List sources a SAST scan can be created from",
         "tags": [
           "SAST scans"
         ],
