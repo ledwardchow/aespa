@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel
 
 from aespa.main import create_app
+from tests.auth import authenticate_client
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -382,6 +383,7 @@ def test_agent_log_pagination_returns_newest_page_and_loads_older_rows(engine):
 
         app.dependency_overrides[get_session] = _override_session
         with TestClient(app, raise_server_exceptions=True) as client:
+            authenticate_client(client, app)
             all_rows = client.get(f"/api/api-test-runs/{run_id}/agent-log")
             newest = client.get(f"/api/api-test-runs/{run_id}/agent-log?limit=200")
             older = client.get(
@@ -476,6 +478,7 @@ def test_api_and_web_findings_do_not_cross(engine):
     app.dependency_overrides[get_session] = _override_session
 
     with TestClient(app, raise_server_exceptions=True) as c:
+        authenticate_client(c, app)
         web = c.get(f"/api/test-runs/{web_run_id}/findings")
         api = c.get(f"/api/api-test-runs/{api_run_id}/findings")
         assert web.status_code == 200
@@ -608,6 +611,7 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision(engine):
         app = create_app()
         app.dependency_overrides[get_session] = _override_session
         with TestClient(app, raise_server_exceptions=True) as c:
+            authenticate_client(c, app)
             r = c.get(f"/api/api-test-runs/{api_run_id}/agent-log")
             assert r.status_code == 200
             assert [row["current_task"] for row in r.json()] == ["Step 1: GET /api/x"]
@@ -658,6 +662,7 @@ def test_alice_sessions_do_not_cross_colliding_ids(engine):
     app.dependency_overrides[get_session] = _override_session
 
     with TestClient(app, raise_server_exceptions=True) as c:
+        authenticate_client(c, app)
         # PUT web scan Alice session
         web_payload = {
             "chats": [

@@ -1483,3 +1483,24 @@ def test_examples_are_in_the_definition(api):
     assert (
         document["components"]["schemas"]["ScanStatus"]["examples"][0]["id"] == "web-42"
     )
+
+
+def test_integration_tokens_work_without_management_session_on_both_listeners(api):
+    from fastapi.testclient import TestClient
+
+    from aespa.integration_server import integration_app
+
+    token = _token(api)
+    auth = api.client.app.state.auth
+    api.client.cookies.clear()
+    assert api.client.get(f"{BASE}/v1/token", headers=_auth(token)).status_code == 200
+    assert api.client.get(f"{BASE}/v1/token").status_code == 401
+    assert api.client.get(f"{BASE}/v1/openapi.json").status_code == 200
+    for path in ["/api/auth/key", "/api/sites", f"{BASE}/admin/tokens"]:
+        assert api.client.get(path, headers=_auth(token)).status_code == 401
+    remote = TestClient(integration_app(auth))
+    assert remote.get(f"{BASE}/v1/token", headers=_auth(token)).status_code == 200
+    assert remote.get(f"{BASE}/v1/token").status_code == 401
+    assert remote.get(f"{BASE}/admin/tokens", headers=_auth(token)).status_code == 404
+    api.manager.set_enabled(EXTENSION, False)
+    assert remote.get(f"{BASE}/v1/token", headers=_auth(token)).status_code == 404

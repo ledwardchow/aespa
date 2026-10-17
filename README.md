@@ -209,7 +209,7 @@ Crawls work well enough on any model, including local models, so you can save a 
 
 If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
 
-This app is intended for use on a computer you're sitting in front of. Note to those who want to host this on anything other than localhost, this app has **NO SECURITY**, the API is **unauthenticated** and passwords/API keys you save in this app can be stolen straight off the page; you should use an authenticating reverse proxy such as Cloudflare/Tailscale for a headless instance.
+This app is intended for local use. The console shows an authentication key and opens a signed-in browser when you press tilde (`~`). Desktop apps sign in automatically. Browsers remember sign-in for 30 days. Keep the data folder and console logs private. For remote access, use an HTTPS reverse proxy and configure the allowed hostname. Integrations use the API extension's bearer tokens. An optional separate integration port is available outside Docker. See [authentication settings](docs/guide/config/settings.md) and [API access](docs/api.md).
 
 ## Configuration
 

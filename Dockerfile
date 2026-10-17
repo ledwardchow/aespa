@@ -39,6 +39,7 @@ RUN uv run --no-dev python scripts/generate_third_party_licenses.py THIRD_PARTY_
 # DB + uploads live under /data so they're writable and can be mounted to persist.
 RUN mkdir -p /data && chmod 777 /data
 ENV AESPA_HOST=0.0.0.0 AESPA_PORT=8000 \
+    AESPA_RUNNING_IN_DOCKER=true \
     AESPA_DATABASE_URL=sqlite:////data/aespa.db \
     AESPA_DATA_DIR=/data/aespa_data
 VOLUME /data

@@ -16,6 +16,11 @@ variable is optional and uses the `AESPA_` prefix.
 | `AESPA_DATABASE_URL` | `sqlite:///./aespa_data/aespa.db` | Database connection string |
 | `AESPA_HOST` | `127.0.0.1` | Server bind address |
 | `AESPA_PORT` | `8000` | Server bind port |
+| `AESPA_AUTH_KEY_FILE` | Not set | Protected file containing the management authentication key, at least 32 characters |
+| `AESPA_ALLOWED_HOSTS` | `[]` | Additional accepted hostnames as a JSON list. Localhost and loopback IPs are always accepted. |
+| `AESPA_AUTH_COOKIE_SECURE` | `false` | Require HTTPS for browser cookies. HTTPS requests also set secure cookies automatically. |
+| `AESPA_INTEGRATION_PORT` | Not set | Optional second listener for the API extension. Disabled inside Docker. |
+| `AESPA_INTEGRATION_HOST` | `127.0.0.1` | Bind address for the optional integration listener |
 | `AESPA_WEB_DIR` | `./src/aespa/web` | Compiled frontend directory |
 | `AESPA_DATA_DIR` | `./aespa_data` | Databases and uploaded files |
 
@@ -25,9 +30,31 @@ saving. The folder itself should contain `aespa.db`; AESPA creates a database
 for an empty folder and uses existing data without replacing it. Desktop builds
 save the choice in a writable application support settings file.
 
-AESPA has no built-in user authentication and is designed to run on localhost.
-When it is placed behind Cloudflare Access, it verifies the
-`Cf-Access-Jwt-Assertion` header and displays the verified username.
+## Sign in to AESPA
+
+The console shows an **Authentication key** beside the listening address.
+Press tilde (`~`) or backtick to open an authenticated browser. The console's
+**Settings > Authentication key** option also displays the key. Desktop apps sign in
+automatically. If you open the address manually, enter the key on the sign-in
+screen. In Docker, retrieve the key with `docker compose logs aespa` and open
+the published host address and port.
+
+Browsers remember authentication for 30 days at the same hostname and port.
+The key and session verification state are saved in `auth.json` under the
+data folder and survive restarts. Keep that file and console logs private.
+Clearing browser cookies, using a different browser, or changing the key
+requires another sign-in. To replace the generated key, stop AESPA, set
+`AESPA_AUTH_KEY_FILE` to a protected file with a new key, and restart.
+
+Open **Settings > Authentication key** to show or copy the key. It grants
+access to AESPA settings and scan data. Other apps use the API extension's
+tokens instead. See [AESPA API](../../api.md) for integration access and the
+optional separate listener.
+
+AESPA is designed to run on localhost. Behind an HTTPS reverse proxy,
+configure `AESPA_ALLOWED_HOSTS` and set `AESPA_AUTH_COOKIE_SECURE=true`.
+Cloudflare Access can still supply a verified display name through
+`Cf-Access-Jwt-Assertion`; AESPA's browser authentication remains required.
 
 ## Agent Settings
 

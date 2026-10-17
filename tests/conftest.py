@@ -49,9 +49,11 @@ def _copy_template_into(template, engine) -> None:
 
 
 @pytest.fixture(scope="function", autouse=True)
-def isolated_db_engine(_template_db_engine):
+def isolated_db_engine(_template_db_engine, tmp_path, monkeypatch):
     """Keep every test, including mocked provider calls, off the local database."""
     prev_engine = aespa.db._engine
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("AESPA_ALLOWED_HOSTS", '["testserver"]')
     engine = _memory_engine()
     _copy_template_into(_template_db_engine, engine)
     set_engine(engine)
@@ -98,6 +100,8 @@ def isolated_client(isolated_db_engine):
     app.dependency_overrides[get_session] = _override_session
 
     with TestClient(app, raise_server_exceptions=True) as c:
+        response = c.post("/api/auth/login", json={"key": app.state.auth.key})
+        c.headers["X-AESPA-CSRF"] = response.json()["csrf_token"]
         yield c
 
 

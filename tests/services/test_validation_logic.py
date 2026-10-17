@@ -1150,9 +1150,9 @@ def test_dynamic_finding_write_persists_immediately(engine):
 
         findings = session.exec(select(ScanFinding)).all()
 
-    assert saved is not None
-    assert saved.title == "Password hash exposed in login API response"
-    assert duplicate is None
+    assert saved.status == "saved"
+    assert saved.finding.title == "Password hash exposed in login API response"
+    assert duplicate.status == "duplicate"
     assert len(findings) == 1
     assert findings[0].validation_status == "unvalidated"
     assert findings[0].validation_note is None

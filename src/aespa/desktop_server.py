@@ -34,7 +34,13 @@ class LocalServerStartup:
         try:
             import uvicorn
 
-            from aespa.main import app
+            from aespa.config import get_settings
+            from aespa.main import create_app
+
+            settings = get_settings().model_copy(
+                update={"host": "127.0.0.1", "port": self.port}
+            )
+            app = create_app(settings)
 
             server = uvicorn.Server(
                 uvicorn.Config(

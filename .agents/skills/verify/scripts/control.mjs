@@ -22,13 +22,26 @@ async function freePort() {
   return port;
 }
 
+async function authenticatedFetch(state, url) {
+  const { key } = JSON.parse(readFileSync(path.join(state.dataDir, "auth.json"), "utf8"));
+  const login = await fetch(`${state.url}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key }),
+  });
+  if (!login.ok) throw Error("Verification sign-in failed");
+  const cookie = login.headers.get("set-cookie")?.split(";")[0];
+  if (!cookie) throw Error("Verification sign-in did not set a session cookie");
+  return fetch(url, { headers: { Cookie: cookie } });
+}
+
 async function doctor(state) {
   process.kill(state.pid, 0);
   const expectedDir = path.join(tmpdir(), `aespa-verify-${state.id}`);
   if (state.dataDir !== expectedDir || !existsSync(state.dataDir)) throw Error("Unexpected data directory");
   const [v, sites, page] = await Promise.all([
-    fetch(`${state.url}/api/version`),
-    fetch(`${state.url}/api/sites`),
+    authenticatedFetch(state, `${state.url}/api/version`),
+    authenticatedFetch(state, `${state.url}/api/sites`),
     fetch(state.url),
   ]);
   if (!v.ok || !sites.ok || !page.ok) throw Error("AESPA is not ready");
@@ -72,6 +85,9 @@ async function driveSite() {
   const observations = [];
   try {
     await page.goto(`${state.url}/#/`);
+    const { key } = JSON.parse(readFileSync(path.join(state.dataDir, "auth.json"), "utf8"));
+    await page.getByLabel("Authentication key", { exact: true }).fill(key);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("button", { name: "New site" }).first().click();
     await page.locator('input[placeholder="e.g. Juice Shop"]').fill(name);
     await page.locator('input[placeholder="https://target.example.com"]').fill("https://example.test");
@@ -84,7 +100,7 @@ async function driveSite() {
     observations.push({ action: "Create site", url: page.url(), title: await page.locator(".topbar-title").innerText() });
     await page.reload();
     await page.locator(".topbar-title").filter({ hasText: name }).waitFor();
-    const sites = await (await fetch(`${state.url}/api/sites`)).json();
+    const sites = await (await authenticatedFetch(state, `${state.url}/api/sites`)).json();
     const stored = sites.find((site) => site.name === name && site.base_url === "https://example.test/");
     if (!stored) throw Error("Created site was not stored");
     observations.push({ action: "Reload and read saved site", site: stored });

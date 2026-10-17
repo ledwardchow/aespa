@@ -4,7 +4,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aespa.browser import _bundled, app_data_dir
@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     database_url: str = ""
     host: str = "127.0.0.1"
     port: int = 8000
+    allowed_hosts: list[str] = []
+    auth_key_file: Path | None = None
+    auth_cookie_secure: bool = False
+    integration_port: int | None = Field(default=None, ge=1, le=65535)
+    integration_host: str = "127.0.0.1"
+    running_in_docker: bool = False
     web_dir: Path = DEFAULT_WEB_DIR
     data_dir: Path = DEFAULT_DATA_DIR
     extensions_dir: Path = DEFAULT_EXTENSIONS_DIR

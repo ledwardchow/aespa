@@ -15,6 +15,7 @@ import threading
 
 from aespa.config import get_settings, settings_env_path
 from aespa.console import InteractiveConsole
+from aespa.local_auth import get_auth
 
 
 class DesktopConsoleServer:
@@ -23,6 +24,9 @@ class DesktopConsoleServer:
     def __init__(self, *, host: str, port: int) -> None:
         self.host = host
         self.port = port
+        self.auth = get_auth(
+            get_settings().model_copy(update={"host": host, "port": port})
+        )
         self.token = secrets.token_urlsafe(32)
         self._active = threading.Lock()
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -38,6 +42,8 @@ class DesktopConsoleServer:
             allow_port_change=False,
             replace_logging_handlers=False,
             log_db_path=get_settings().data_dir / "logs.db",
+            authentication_key=self.auth.key,
+            login_url_factory=self.auth.login_url,
         )
         self._console.start_capture()
         threading.Thread(
@@ -55,6 +61,9 @@ class DesktopConsoleServer:
             subprocess.Popen(command, creationflags=subprocess.CREATE_NEW_CONSOLE)
         else:
             subprocess.Popen(command)
+
+    def login_url(self) -> str:
+        return self.auth.login_url(f"http://{self.host}:{self.port}")
 
     def _accept_connections(self) -> None:
         while True:

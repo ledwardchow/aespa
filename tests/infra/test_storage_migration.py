@@ -75,6 +75,7 @@ def test_selected_data_folder_starts_empty_or_uses_existing_database(
 
 
 def test_bundled_settings_file_selects_data_folder(tmp_path, monkeypatch):
+    monkeypatch.delenv("AESPA_DATA_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(config, "_bundled", lambda: True)
     monkeypatch.setattr(config, "app_data_dir", lambda: tmp_path / "App Support")

@@ -5,6 +5,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 import jwt
@@ -31,6 +32,8 @@ from aespa.api.traffic import router as traffic_router
 from aespa.config import Settings, get_settings, settings_env_path
 from aespa.db import get_session, init_db
 from aespa.extensions.api import ExtensionApiDispatcher
+from aespa.integration_server import integration_listener
+from aespa.local_auth import LocalAuthMiddleware, auth_router, get_auth
 from aespa.services import alice_goals as alice_goals_svc
 from aespa.services import antigravity_provider as antigravity_provider_svc
 from aespa.services import campaigns as campaigns_svc
@@ -55,7 +58,8 @@ async def _lifespan(app: FastAPI):  # noqa: ARG001
     await validator_svc.resume_interrupted_validations()
     campaigns_svc.reconcile_campaigns()
     try:
-        yield
+        async with integration_listener(app.state.settings, app.state.auth):
+            yield
     finally:
         await copilot_provider_svc.close_clients()
         await droid_provider_svc.close_clients()
@@ -134,6 +138,11 @@ def _verify_cloudflare_jwt(token: str, audience: str | None = None) -> str | Non
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     app = FastAPI(title="AESPA", version=settings.app_version, lifespan=_lifespan)
+    auth = get_auth(settings)
+    app.state.auth = auth
+    app.state.settings = settings
+    app.add_middleware(LocalAuthMiddleware, auth=auth)
+    app.include_router(auth_router(auth))
 
     @app.exception_handler(LegacyBenchmarkReferenceError)
     async def _legacy_benchmark_reference(
@@ -336,6 +345,7 @@ def main() -> None:
         print(f"[aespa] Port {settings.port} is in use; using port {port}.")
     _build_frontend_if_stale()
     ensure_chromium()
+    auth = get_auth(settings.model_copy(update={"port": port}))
     restart: dict[str, object | None] = {"port": None, "server": None, "quit": False}
 
     def change_port(port: int) -> None:
@@ -363,6 +373,10 @@ def main() -> None:
             on_port_change=change_port,
             on_quit=request_quit,
             log_db_path=Path(settings.data_dir) / "logs.db",
+            authentication_key=auth.key,
+            login_url_factory=lambda base: get_auth(
+                settings.model_copy(update={"port": int(urlsplit(base).port or port)})
+            ).login_url(base),
         )
         if interactive_console_available()
         else None
@@ -388,7 +402,7 @@ def main() -> None:
                 port = available_port
             server = uvicorn.Server(
                 uvicorn.Config(
-                    "aespa.main:app",
+                    create_app(settings.model_copy(update={"port": port})),
                     host=settings.host,
                     port=port,
                     reload=False,
@@ -401,6 +415,9 @@ def main() -> None:
                 break
             if console:
                 console.handler.set_runtime_port(port)
+            else:
+                print(f"[aespa] Listening on http://{settings.host}:{port}")
+                print(f"[aespa] Authentication key: {auth.key}")
             if not _run_server(server):
                 break
             if restart["quit"]:

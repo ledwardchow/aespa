@@ -42,10 +42,11 @@ read and change every Site.
 `If-None-Match` to avoid tight loops), or set `callbacks` when you create the
 scan and AESPA will POST signed events to your URL.
 
-**Access.** AESPA has no login of its own and its main `/api` routes are open to
-anyone who can reach it. Tokens protect this API when you publish only
-`/extension/aespa.api/v1/` through a reverse proxy or tunnel. Token management
-is only available from AESPA on the same computer.
+**Access.** AESPA's interface and management API require a browser session.
+This API uses its own bearer tokens without a browser login. Outside Docker,
+an optional separate listener serves only `/extension/aespa.api/v1/`. In Docker,
+use the normal port and publish only that path through an HTTPS reverse proxy
+or tunnel. Token management requires a signed-in session on the same computer.
 """
 
 

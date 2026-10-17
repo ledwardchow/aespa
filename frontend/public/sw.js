@@ -1,4 +1,4 @@
-const CACHE = "aespa-v11";
+const CACHE = "aespa-v12";
 
 // Versioned assets (cache-busted by ?v=... query param) — cache aggressively
 const STATIC_EXTS = [".js", ".css", ".png", ".ico", ".json"];
@@ -14,7 +14,8 @@ function isMutableAsset(url) {
 }
 
 function isApiCall(url) {
-  return new URL(url).pathname.startsWith("/api/");
+  const pathname = new URL(url).pathname;
+  return pathname.startsWith("/api/") || pathname.startsWith("/extension/");
 }
 
 // Install: pre-cache the shell assets

@@ -126,6 +126,8 @@ export function parseRoute(hash = "#/"): Route {
   if (routeHash === "#/stats/chatgpt-plan") return { name: "chatgpt-plan-usage" };
   if (routeHash === "#/settings" || routeHash === "#/settings/profiles")
     return { name: "settings", tab: "profiles", screen: "list" };
+  if (routeHash === "#/settings/authentication")
+    return { name: "settings", tab: "authentication", screen: "list" };
   if (routeHash === "#/settings/profiles/new")
     return { name: "settings", tab: "profiles", screen: "new" };
   if ((m = routeHash.match(/^#\/settings\/profiles\/(\d+)\/edit$/)))

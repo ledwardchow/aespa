@@ -26,7 +26,11 @@ curl -H "Authorization: Bearer $AESPA_TOKEN" http://127.0.0.1:8000/extension/aes
 
 ### Reaching AESPA from another machine
 
-AESPA has no login, and its own `/api` routes are open to anyone who can reach it. Tokens protect only this API. To let a CI runner reach AESPA, publish just `/extension/aespa.api/v1/` through a reverse proxy or tunnel, and keep everything else private. Token management refuses requests that come from another machine or carry proxy forwarding headers, so manage tokens in AESPA on its own computer.
+AESPA's interface and management API require a browser session. This integration API uses its existing bearer tokens and does not require a browser login or the management authentication key. Token management also requires a signed-in management session and refuses requests from another machine or with proxy forwarding headers. Manage tokens in AESPA on its own computer.
+
+Outside Docker, set `AESPA_INTEGRATION_PORT=8001` to start a second listener that serves only `/extension/aespa.api/v1/`. Its default listening address is `127.0.0.1`. Set `AESPA_INTEGRATION_HOST` and `AESPA_ALLOWED_HOSTS` explicitly if a reverse proxy needs another address or hostname. The extension must be enabled. The second listener cannot serve the interface, core API, ordinary extensions, or token administration.
+
+Inside Docker, AESPA disables the second listener even when a port is configured. Integrations use the normal port. To let a CI runner reach AESPA, publish only `/extension/aespa.api/v1/` through an HTTPS reverse proxy or tunnel, and keep everything else private. The supplied Compose configuration binds the host port to `127.0.0.1`.
 
 A token sees the scans it created, or all scans if it is set to. Any token with the `sites` permission can read and change every Site.
 

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import webbrowser
 from collections import deque
 from datetime import datetime
 from functools import lru_cache
@@ -204,9 +205,13 @@ class InteractiveConsoleHandler(logging.Handler):
         allow_port_change: bool = True,
         terminal_size: tuple[int, int] | None = None,
         log_db_path: Path | None = None,
+        authentication_key: str | None = None,
+        login_url_factory: Callable[[str], str] | None = None,
     ) -> None:
         super().__init__(level=logging.DEBUG)
         self.stream = stream
+        self.authentication_key = authentication_key
+        self.login_url_factory = login_url_factory
         self.mode = AGENT
         self.buffers = {mode: deque(maxlen=max_records) for mode in _MODES}
         self._output_lock = threading.RLock()
@@ -309,6 +314,28 @@ class InteractiveConsoleHandler(logging.Handler):
             if self._screen_active and self.mode == SETTINGS:
                 self._redraw_locked()
 
+    def open_browser(self) -> None:
+        host = {"0.0.0.0": "127.0.0.1", "::": "::1", "[::]": "::1"}.get(
+            self.host, self.host
+        )
+        base_url = _listening_url(host, self.runtime_port)
+        url = (
+            self.login_url_factory(base_url)
+            if self.login_url_factory is not None
+            else base_url
+        )
+        try:
+            opened = webbrowser.open(url)
+        except webbrowser.Error:
+            opened = False
+        if not opened:
+            with self._output_lock:
+                self.settings_status = (
+                    f"Open {base_url} in a browser and enter the authentication key."
+                )
+                self.buffers[AGENT].append(self.settings_status)
+                self._redraw_locked()
+
     def handle_settings_key(self, key: str) -> bool:
         """Handle one key when the Settings view is active."""
         if self.mode != SETTINGS:
@@ -320,12 +347,22 @@ class InteractiveConsoleHandler(logging.Handler):
                 return self._handle_log_database_key(key)
             if self.settings_section == "storage":
                 return self._handle_data_folder_key(key)
+            if self.settings_section == "authentication":
+                if key == "\x1b":
+                    self.settings_section = "root"
+                    self.settings_status = ""
+                    self._redraw_locked()
+                return True
             if self.settings_section == "root":
                 if key not in ("\r", "\n"):
                     return False
-                self.settings_section = ("server", "database", "logging", "storage")[
-                    self.settings_selected
-                ]
+                self.settings_section = (
+                    "server",
+                    "database",
+                    "logging",
+                    "storage",
+                    "authentication",
+                )[self.settings_selected]
                 self.settings_status = ""
                 self._redraw_locked()
                 return True
@@ -573,7 +610,7 @@ class InteractiveConsoleHandler(logging.Handler):
             if self.settings_section == "database":
                 self.database_selected = min(max(self.database_selected + delta, 0), 2)
             elif self.settings_section == "root":
-                self.settings_selected = min(max(self.settings_selected + delta, 0), 3)
+                self.settings_selected = min(max(self.settings_selected + delta, 0), 4)
             self._redraw_locked()
 
     def toggle_selected_llm(self) -> None:
@@ -629,6 +666,11 @@ class InteractiveConsoleHandler(logging.Handler):
                 self.buffers[AGENT].append(
                     f"Ready - listening on {_listening_url(self.host, self.runtime_port)}"
                 )
+                if self.authentication_key is not None:
+                    self.buffers[AGENT].append(
+                        f"Authentication key: {self.authentication_key}"
+                    )
+                    self.buffers[AGENT].append("Press ~ to open AESPA in your browser")
                 python_executor_status = _python_executor_runtime_status()
                 if python_executor_status == "docker_not_installed":
                     self.buffers[AGENT].append(
@@ -899,11 +941,27 @@ class InteractiveConsoleHandler(logging.Handler):
             return self._log_database_settings_body_lines(width)
         if self.settings_section == "storage":
             return self._data_folder_body_lines(width)
+        if self.settings_section == "authentication":
+            lines = [
+                "Authentication key",
+                "",
+                self.authentication_key or "Authentication is not enabled.",
+                "",
+                "Enter this key on the AESPA sign-in page.",
+                "Press ~ or ` to open AESPA in your browser.",
+                "Press Esc to return to Settings.",
+            ]
+            if self.settings_status:
+                lines.extend(["", self.settings_status])
+            return [
+                wrapped for line in lines for wrapped in _wrap_console_line(line, width)
+            ]
         return [
             f"{'▶' if self.settings_selected == 0 else ' '} Server Settings",
             f"{'▶' if self.settings_selected == 1 else ' '} Database Operations",
             f"{'▶' if self.settings_selected == 2 else ' '} Console Log Database",
             f"{'▶' if self.settings_selected == 3 else ' '} Data Folder",
+            f"{'▶' if self.settings_selected == 4 else ' '} Authentication key",
         ]
 
     def _data_folder_body_lines(self, width: int) -> list[str]:
@@ -949,6 +1007,11 @@ class InteractiveConsoleHandler(logging.Handler):
             "",
             guidance,
         ]
+        if self.authentication_key is not None:
+            lines[4:4] = [
+                f"  Authentication key  {self.authentication_key}",
+                "  Press ~ to open AESPA in your browser",
+            ]
         if self.allow_port_change:
             lines.append(
                 f"The setting is saved in {self.env_path} for future launches."
@@ -1312,22 +1375,24 @@ def _legend(
 ) -> str:
     if mode == SETTINGS:
         if settings_section == "logging":
-            return "[Enter] Enable/Disable  [Esc] Back  [Ctrl+C] Quit"
+            return "[~ or `] Open browser  [Enter] Enable/Disable  [Esc] Back  [Ctrl+C] Quit"
         if settings_section == "database":
             if editing:
                 return "[Enter] Confirm  [Backspace] Delete  [Esc] Cancel"
-            return "[↑/↓] Select  [Enter] Open  [Esc] Back"
+            return "[~ or `] Open browser  [↑/↓] Select  [Enter] Open  [Esc] Back"
         if settings_section == "storage":
             if editing:
                 return "[Enter] Save  [Backspace] Delete  [Esc] Cancel"
-            return "[Enter] Choose folder  [Esc] Back  [Ctrl+C] Quit"
+            return "[~ or `] Open browser  [Enter] Choose folder  [Esc] Back  [Ctrl+C] Quit"
         if settings_section == "root":
-            return "[1-6] Views  [↑/↓] Select  [Enter] Open  [Ctrl+C] Quit"
+            return "[~ or `] Open browser  [1-6] Views  [↑/↓] Select  [Enter] Open  [Ctrl+C] Quit"
+        if settings_section == "authentication":
+            return "[~ or `] Open browser  [Esc] Back  [Ctrl+C] Quit"
         if editing:
             return "[0-9] Port  [Backspace] Delete  [Enter] Save  [Esc] Cancel"
-        return "[Enter] Change port  [Esc] Back  [Ctrl+C] Quit"
+        return "[~ or `] Open browser  [Enter] Change port  [Esc] Back  [Ctrl+C] Quit"
     return (
-        "[1-6] Views  [↑/↓] Select  [Enter] Expand  "
+        "[1-6] Views  [~ or `] Open browser  [↑/↓] Select  [Enter] Expand  "
         "[Wheel/PgUp/PgDn] Scroll  [Ctrl+C] Quit"
     )
 
@@ -1826,6 +1891,8 @@ class InteractiveConsole:
         replace_logging_handlers: bool = True,
         terminal_size: tuple[int, int] | None = None,
         log_db_path: Path | None = None,
+        authentication_key: str | None = None,
+        login_url_factory: Callable[[str], str] | None = None,
     ) -> None:
         self.input_stream = input_stream
         self.handler = InteractiveConsoleHandler(
@@ -1837,6 +1904,8 @@ class InteractiveConsole:
             allow_port_change=allow_port_change,
             terminal_size=terminal_size,
             log_db_path=log_db_path,
+            authentication_key=authentication_key,
+            login_url_factory=login_url_factory,
         )
         self.replace_logging_handlers = replace_logging_handlers
         self.on_quit = on_quit
@@ -2022,6 +2091,8 @@ class InteractiveConsole:
                 readable, _, _ = select.select([fd], [], [], 0.2)
                 if readable:
                     self._process_posix_keys(os.read(fd, 32))
+                else:
+                    self._flush_pending_escape()
                 self.handler.refresh_for_resize()
         except (AttributeError, OSError):
             return
@@ -2037,12 +2108,18 @@ class InteractiveConsole:
             while not self._stop.is_set():
                 data = self.input_stream.read(32)
                 if not data:
+                    self._flush_pending_escape()
                     return
                 if isinstance(data, str):
                     data = data.encode()
                 self._process_posix_keys(data)
         except (AttributeError, OSError, ValueError):
             return
+
+    def _flush_pending_escape(self) -> None:
+        if self._key_buffer == b"\x1b":
+            self._key_buffer = b""
+            self.handler.handle_settings_key("\x1b")
 
     def _process_posix_keys(self, data: bytes) -> None:
         self._key_buffer += data
@@ -2081,6 +2158,9 @@ class InteractiveConsole:
             key = self._pop_key_character()
             if key is None:
                 return
+            if key in ("~", "`"):
+                self.handler.open_browser()
+                continue
             if self.handler.handle_settings_key(key):
                 continue
             if key in _MODE_KEYS:
@@ -2207,6 +2287,9 @@ class InteractiveConsole:
         elif virtual_key == 0x28:
             self.handler.select_next_llm()
         elif character not in ("", "\x00"):
+            if character in ("~", "`") and not self.handler.settings_editing:
+                self.handler.open_browser()
+                return
             if self.handler.handle_settings_key(character):
                 return
             if character in _MODE_KEYS:

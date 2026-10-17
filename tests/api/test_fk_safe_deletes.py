@@ -44,6 +44,7 @@ from aespa.models import (
 )
 from aespa.services import findings as findings_svc
 from aespa.services import run_cleanup
+from tests.auth import authenticate_client
 
 
 @pytest.fixture
@@ -55,6 +56,7 @@ def fk_client(fk_engine):
     app = create_app()
     app.dependency_overrides[get_session] = _override_session
     with TestClient(app, raise_server_exceptions=True) as client:
+        authenticate_client(client, app)
         yield client
 
 

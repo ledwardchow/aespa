@@ -165,6 +165,29 @@ on desktop builds and to `.env` for source runs; it takes effect after restart.
 
 ## 3. System Overview
 
+### Local authentication
+
+`local_auth.py` checks management requests before they reach the routers,
+including extension routes, event streams, and WebSockets. The sign-in page
+and minimal startup endpoints remain available without a session. Ordinary
+management requests require a signed browser cookie. Changes also require a
+session-specific CSRF header. The frontend adds that header to management
+requests and returns to sign-in when a session expires.
+
+The management key and signing secret live in `auth.json` under the data
+folder. Browser sessions last 30 days and survive restarts at the same port.
+Console and desktop launchers create single-use links through the same
+in-process authentication manager. The link secret stays in a URL fragment
+until the frontend exchanges it and removes it from the address.
+
+`/extension/aespa.api/v1/` keeps the API extension's bearer-token checks.
+Its administrative routes require a management session and retain local
+request restrictions. `integration_server.py` optionally serves only the
+public integration routes on another port. It shares the extension manager
+and does not run the main startup jobs again. Docker disables this listener.
+
+### Request flow
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Browser / API client                                       │

@@ -16,6 +16,7 @@ from aespa.models import (
     TargetIntelItem,
     TestRun,
 )
+from tests.auth import authenticate_client
 
 
 def _make_site(client: TestClient, **kw):
@@ -1706,6 +1707,7 @@ def test_clear_crawl_resets_run_without_restarting(monkeypatch, engine):
         finding_id = finding.id
 
     with TestClient(app, raise_server_exceptions=True) as api_client:
+        authenticate_client(api_client, app)
         response = api_client.post(f"/api/test-runs/{run_id}/crawl/clear")
 
     assert response.status_code == 200

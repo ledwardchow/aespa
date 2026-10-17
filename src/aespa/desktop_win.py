@@ -39,6 +39,11 @@ def _on_closing() -> bool:
 
 def _on_open(_icon, _item) -> None:
     _window.show()
+    authenticated = _window.evaluate_js(
+        "document.documentElement.dataset.aespaAuthenticated"
+    )
+    if authenticated == "false":
+        _window.load_url(_console_server.login_url())
 
 
 def _on_quit(icon, _item) -> None:
@@ -72,7 +77,7 @@ def main() -> None:
     _console_server = DesktopConsoleServer(host="127.0.0.1", port=port)
     _window = webview.create_window(
         "AESPA",
-        f"http://127.0.0.1:{port}/",
+        _console_server.login_url(),
         width=1280,
         height=820,
         background_color="#0b0d12",

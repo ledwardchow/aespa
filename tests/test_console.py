@@ -380,6 +380,122 @@ def test_console_ready_line_uses_configured_ipv6_host_and_port(monkeypatch) -> N
     assert list(handler.buffers[AGENT]) == ["Ready - listening on http://[::1]:8123"]
 
 
+def test_console_shows_key_without_writing_it_to_log_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "ready"
+    )
+    handler = InteractiveConsoleHandler(
+        io.StringIO(),
+        authentication_key="management-secret",
+        log_db_path=tmp_path / "logs.db",
+    )
+    handler.log_store.set_enabled(True)
+    handler.start_screen()
+    assert "Authentication key: management-secret" in handler.buffers[AGENT]
+    assert "Press ~ to open AESPA in your browser" in handler.buffers[AGENT]
+    assert "management-secret" in "\n".join(handler._server_settings_body_lines(120))
+    with sqlite3.connect(tmp_path / "logs.db") as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM console_logs").fetchone()[0] == 0
+        )
+
+
+@pytest.mark.parametrize("shortcut", ["~", "`"])
+def test_tilde_opens_fresh_login_link_at_current_port(monkeypatch, shortcut):
+    issued = []
+    opened = []
+
+    def login_url(base):
+        issued.append(base)
+        return f"{base}/#aespa-login={len(issued)}"
+
+    monkeypatch.setattr(
+        "aespa.console.webbrowser.open", lambda url: opened.append(url) or True
+    )
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=io.StringIO(),
+        login_url_factory=login_url,
+    )
+    console._process_posix_keys(shortcut.encode())
+    console.handler.set_runtime_port(8123)
+    console._process_posix_keys(shortcut.encode())
+    console._handle_windows_key(shortcut, 0, 0)
+    assert opened == [
+        "http://127.0.0.1:8000/#aespa-login=1",
+        "http://127.0.0.1:8123/#aespa-login=2",
+        "http://127.0.0.1:8123/#aespa-login=3",
+    ]
+    console.handler.switch(SETTINGS)
+    console.handler.settings_section = "storage"
+    console.handler.settings_editing = True
+    console.handler.data_folder_input = ""
+    console._process_posix_keys(shortcut.encode())
+    console._handle_windows_key(shortcut, 0, 0)
+    assert len(opened) == 3
+    assert console.handler.data_folder_input == shortcut * 2
+
+
+def test_console_settings_has_authentication_key_view(tmp_path):
+    output = io.StringIO()
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=output,
+        authentication_key="management-secret",
+        log_db_path=tmp_path / "logs.db",
+    )
+    console.handler.log_store.set_enabled(True)
+    console.handler.start_screen()
+    console._process_posix_keys(b"6")
+    frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "Authentication key" in frame
+    assert "management-secret" not in frame
+
+    console._process_posix_keys(b"\x1b[B" * 4 + b"\r")
+    frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "management-secret" in frame
+    assert "open AESPA in your browser" in frame
+    console._process_posix_keys(b"\r")
+    assert not console.handler.settings_editing
+    console.input_stream = io.StringIO("\x1b")
+    console._read_stream_keys()
+    assert console.handler.settings_section == "root"
+    with sqlite3.connect(tmp_path / "logs.db") as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM console_logs").fetchone()[0] == 0
+        )
+
+
+def test_posix_escape_returns_to_settings_after_input_timeout(monkeypatch):
+    console = InteractiveConsole(
+        input_stream=SimpleNamespace(isatty=lambda: True, fileno=lambda: 0),
+        output_stream=io.StringIO(),
+    )
+    console.handler.switch(SETTINGS)
+    console.handler.settings_section = "authentication"
+    reads = iter([([0], [], []), ([], [], [])])
+
+    def ready(*args):
+        result = next(reads)
+        if not result[0]:
+            console._stop.set()
+        return result
+
+    monkeypatch.setattr("aespa.console.select.select", ready)
+    monkeypatch.setattr("aespa.console.os.read", lambda *args: b"\x1b")
+    console._read_keys()
+    assert console.handler.settings_section == "root"
+
+
+def test_tilde_without_graphical_browser_keeps_manual_login_available(monkeypatch):
+    monkeypatch.setattr("aespa.console.webbrowser.open", lambda url: False)
+    console = InteractiveConsole(
+        input_stream=io.StringIO(), output_stream=io.StringIO()
+    )
+    console._process_posix_keys(b"~")
+    assert "Open http://127.0.0.1:8000" in console.handler.settings_status
+
+
 def test_console_warns_below_ready_line_when_python_executor_is_missing(
     monkeypatch,
 ) -> None:
@@ -800,8 +916,9 @@ def test_settings_menu_hides_server_details_until_opened() -> None:
 
 @pytest.mark.parametrize("allow_port_change", [True, False])
 def test_console_data_folder_setting_accepts_empty_or_existing_folder(
-    tmp_path, allow_port_change
+    tmp_path, allow_port_change, monkeypatch
 ) -> None:
+    monkeypatch.delenv("AESPA_DATA_DIR", raising=False)
     env_path = tmp_path / "settings.env"
     folder = tmp_path / "Mes données AESPA"
     folder.mkdir()
@@ -1014,7 +1131,8 @@ def test_write_port_setting_replaces_existing_value(tmp_path) -> None:
     )
 
 
-def test_write_data_dir_setting_preserves_other_settings(tmp_path) -> None:
+def test_write_data_dir_setting_preserves_other_settings(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("AESPA_DATA_DIR", raising=False)
     env_path = tmp_path / "settings.env"
     env_path.write_text("AESPA_PORT=8000\nAESPA_DATA_DIR=/old\n")
     folder = tmp_path / "Data With Spaces"

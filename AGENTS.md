@@ -145,7 +145,7 @@ Tables shared across both run kinds, such as `agent_log`, `scan_log`, `scanner_s
 - `tests/conftest.py` spins up a fresh in-memory DB per test with a dependency-overridden session.
 - All files use `from __future__ import annotations`.
 - No external network or live LLM calls in tests. Stub or mock LLM clients.
-- The app intentionally has no auth and is localhost-only by design. Optional Cloudflare Access JWT verification in `main.py` is only for users who front it with a reverse proxy. Do not add features assuming a trusted multi-user deployment.
+- The app is intended for local use. Management routes require browser-session authentication through `local_auth.py`. The API extension's `/v1/` routes use separate bearer tokens. The optional integration listener exposes only those routes and is disabled inside Docker. Cloudflare Access JWT verification supplies a display name, not management authentication. Do not add features assuming a trusted multi-user deployment.
 - When interacting with GitHub, use the `gh` command, because the repo may be on a different account than the authenticated GitHub Copilot session.
 
 ### Terminology
