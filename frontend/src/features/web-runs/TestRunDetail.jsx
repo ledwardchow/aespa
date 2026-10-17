@@ -34,7 +34,12 @@ import { WebRunCrawlProgress } from "./WebRunCrawlProgress.jsx";
 import { WebRunHeader } from "./WebRunHeader.jsx";
 import { WorkflowInputDrawer } from "./WorkflowInputDrawer.jsx";
 import { useUncrawledWorkflowWarning } from "./useUncrawledWorkflowWarning.jsx";
-import { isRetryBusy, retriesByNote } from "./workflowRetries.js";
+import {
+  acknowledgeWorkflowIds,
+  readAcknowledgedWorkflowIds,
+  visibleWorkflowInputNotes,
+} from "./workflowAcknowledgement.js";
+import { retriesByNote } from "./workflowRetries.js";
 import { WebRunSastLeadsTab } from "../../shared/leads/RunLeadsTab.jsx";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
@@ -88,6 +93,9 @@ function TestRunContent({
   const [focusedNotificationId, setFocusedNotificationId] = useState(null);
   const [workflowFocus, setWorkflowFocus] = useState(null);
   const [workflowInputOpen, setWorkflowInputOpen] = useState(false);
+  const [acknowledgedWorkflowIds, setAcknowledgedWorkflowIds] = useState(() =>
+    readAcknowledgedWorkflowIds(runId),
+  );
 
   const loadWorkflowNotes = useCallback(async () => {
     const [result, retry] = await Promise.all([
@@ -98,12 +106,10 @@ function TestRunContent({
     setWorkflowRetries(retriesByNote(retry));
   }, [runId]);
   usePolling(loadWorkflowNotes, { intervalMs: 5000 });
-  const waitingWorkflows = workflowNotes.filter(
-    (note) =>
-      note.needs_input &&
-      note.status !== "crawled" &&
-      !note.superseded &&
-      !isRetryBusy(workflowRetries[note.id]),
+  const waitingWorkflows = visibleWorkflowInputNotes(
+    workflowNotes,
+    workflowRetries,
+    acknowledgedWorkflowIds,
   );
   const viewWorkflow = (noteId) => {
     setWorkflowInputOpen(false);
@@ -335,9 +341,11 @@ function TestRunContent({
       const s = await webRunsApi.startThinkingScan(runId, selectedCoverageMode);
       setThinkingStatus(s);
       setWpReloadKey((k) => k + 1);
+      return true;
     } catch (e) {
       setThinkingStopReq(false);
       setError(e.message);
+      return false;
     }
   };
   const onResumeThinkingScan = async () => {
@@ -385,8 +393,10 @@ function TestRunContent({
         status: "running",
         per_user_progress: {},
       });
+      return true;
     } catch (e) {
       setError(e.message);
+      return false;
     }
   };
   const { requestStart, warning } = useUncrawledWorkflowWarning({
@@ -396,6 +406,8 @@ function TestRunContent({
         ? startCrawl(true, selectedCoverageMode)
         : startThinkingScan(selectedCoverageMode),
     onViewWorkflows: viewWorkflow,
+    onAcknowledged: (ids) =>
+      setAcknowledgedWorkflowIds((current) => acknowledgeWorkflowIds(runId, current, ids)),
   });
   const onStartThinkingScan = () => requestStart("scan", coverageMode);
   const onStart = () => startCrawl();

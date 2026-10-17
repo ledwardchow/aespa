@@ -10,42 +10,19 @@ import { LLMProviderForm } from "./LLMProviderForm.jsx";
 import { LLMModelForm } from "./LLMModelForm.jsx";
 import { ScanProfileForm } from "./ScanProfileForm.jsx";
 import { Notice, PageError } from "../../shared/ui/Notice.jsx";
-import { AuthenticationSettings } from "./AuthenticationSettings.tsx";
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 const SETTINGS_TABS = [
   { key: "profiles", label: "Profiles" },
   { key: "providers", label: "Providers" },
-  { key: "authentication", label: "Authentication key" },
 ];
 
 const settingsListHref = (section) => `#/settings/${section}`;
 const settingsNewHref = (section) => `#/settings/${section}/new`;
 const settingsEditHref = (section, id) => `#/settings/${section}/${id}/edit`;
 
-export function SettingsPage(props) {
-  if (props.section !== "authentication") return <LLMSettingsPage {...props} />;
-  return (
-    <>
-      <div className="topbar">
-        <div className="topbar-title">Settings</div>
-      </div>
-      <div className="content scroll-content settings-content">
-        <Tabs
-          label="Settings"
-          className="tab-bar settings-tab-bar"
-          tabs={SETTINGS_TABS}
-          value="authentication"
-          onChange={(section) => nav(settingsListHref(section))}
-        />
-        <AuthenticationSettings />
-      </div>
-    </>
-  );
-}
-
-function LLMSettingsPage({
+export function SettingsPage({
   section = "profiles",
   screen = "list",
   itemId,

@@ -436,7 +436,16 @@ def test_tilde_opens_fresh_login_link_at_current_port(monkeypatch, shortcut):
     assert console.handler.data_folder_input == shortcut * 2
 
 
-def test_console_settings_has_authentication_key_view(tmp_path):
+def test_console_settings_has_authentication_key_view(tmp_path, monkeypatch):
+    copied = []
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "ready"
+    )
+    monkeypatch.setattr("aespa.console.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "aespa.console.subprocess.run",
+        lambda command, **kwargs: copied.append((command, kwargs)),
+    )
     output = io.StringIO()
     console = InteractiveConsole(
         input_stream=io.StringIO(),
@@ -454,7 +463,12 @@ def test_console_settings_has_authentication_key_view(tmp_path):
     console._process_posix_keys(b"\x1b[B" * 4 + b"\r")
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
     assert "management-secret" in frame
+    assert "Press C to copy the key" in frame
     assert "open AESPA in your browser" in frame
+    console._process_posix_keys(b"c")
+    assert copied[0][0] == ["pbcopy"]
+    assert copied[0][1]["input"] == "management-secret"
+    assert "Authentication key copied." in output.getvalue()
     console._process_posix_keys(b"\r")
     assert not console.handler.settings_editing
     console.input_stream = io.StringIO("\x1b")
@@ -464,6 +478,31 @@ def test_console_settings_has_authentication_key_view(tmp_path):
         assert (
             connection.execute("SELECT COUNT(*) FROM console_logs").fetchone()[0] == 0
         )
+
+
+def test_console_reports_clipboard_failure_without_exposing_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "ready"
+    )
+
+    def fail_copy(command, **kwargs):
+        raise subprocess.CalledProcessError(1, command, stderr="management-secret")
+
+    monkeypatch.setattr("aespa.console.sys.platform", "darwin")
+    monkeypatch.setattr("aespa.console.subprocess.run", fail_copy)
+    output = io.StringIO()
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=output,
+        authentication_key="management-secret",
+        log_db_path=tmp_path / "logs.db",
+    )
+    console.handler.start_screen()
+    console.handler.switch(SETTINGS)
+    console.handler.settings_section = "server"
+    console._process_posix_keys(b"C")
+    assert "Could not copy the key." in output.getvalue()
+    assert "management-secret" not in console.handler.settings_status
 
 
 def test_posix_escape_returns_to_settings_after_input_timeout(monkeypatch):

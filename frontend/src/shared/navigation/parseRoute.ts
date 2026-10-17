@@ -127,7 +127,7 @@ export function parseRoute(hash = "#/"): Route {
   if (routeHash === "#/settings" || routeHash === "#/settings/profiles")
     return { name: "settings", tab: "profiles", screen: "list" };
   if (routeHash === "#/settings/authentication")
-    return { name: "settings", tab: "authentication", screen: "list" };
+    return { name: "scan-policy", tab: "global", subTab: "authentication" };
   if (routeHash === "#/settings/profiles/new")
     return { name: "settings", tab: "profiles", screen: "new" };
   if ((m = routeHash.match(/^#\/settings\/profiles\/(\d+)\/edit$/)))
@@ -156,7 +156,7 @@ export function parseRoute(hash = "#/"): Route {
     return { name: "scan-policy", tab: "global", subTab: "proxy" };
   if (routeHash === "#/scan-policy/systems" || routeHash === "#/scan-policy/sast")
     return { name: "scan-policy", tab: routeHash.slice("#/scan-policy/".length) };
-  if ((m = routeHash.match(/^#\/scan-policy\/global\/(features|debug|proxy|libraries)$/)))
+  if ((m = routeHash.match(/^#\/scan-policy\/global\/(features|debug|proxy|libraries|authentication)$/)))
     return { name: "scan-policy", tab: "global", subTab: m[1] };
   if (
     (m = routeHash.match(

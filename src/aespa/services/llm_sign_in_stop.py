@@ -76,7 +76,7 @@ async def _stop(run_kind: str, run_id: int, message: str) -> None:
 
 async def _stop_workers(run_kind: str, run_id: int) -> None:
     if run_kind == "web":
-        from aespa.services import crawl_then_pentest
+        from aespa.services import crawl_then_pentest, crawl_workflows
         from aespa.services import crawler as crawler_svc
         from aespa.services import scanner as scanner_svc
         from aespa.services import validator as validator_svc
@@ -84,6 +84,7 @@ async def _stop_workers(run_kind: str, run_id: int) -> None:
         crawl_then_pentest.cancel(run_id)
         if crawler_svc.is_running(run_id):
             await crawler_svc.stop_and_wait(run_id)
+        await crawl_workflows.stop_retries_and_wait(run_id)
         if scanner_svc.is_thinking_running(run_id):
             await scanner_svc.stop_thinking_and_wait(run_id)
         if validator_svc.is_validating(run_id):

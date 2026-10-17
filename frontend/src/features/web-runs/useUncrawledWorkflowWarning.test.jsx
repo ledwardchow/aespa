@@ -70,13 +70,85 @@ test("fetches current notes on click, then cancels or confirms with the selected
   expect(getNotes).toHaveBeenCalledTimes(2);
 });
 
+test("acknowledges only the workflow attempts passed over by a successful start", async () => {
+  vi.spyOn(webRunsApi, "getWorkflowNotes").mockResolvedValue({
+    notes: [{ id: 11, name: "Checkout", status: "needs_input" }],
+  });
+  const onStart = vi.fn().mockResolvedValue(true);
+  const onAcknowledged = vi.fn();
+  function Actions() {
+    const { requestStart, warning } = useUncrawledWorkflowWarning({
+      runId: 7,
+      onStart,
+      onViewWorkflows: vi.fn(),
+      onAcknowledged,
+    });
+    return (
+      <>
+        <button onClick={() => requestStart("scan", "track")}>Start scan</button>
+        {warning}
+      </>
+    );
+  }
+  render(<Actions />);
+  fireEvent.click(screen.getByRole("button", { name: "Start scan" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Start scan anyway" }));
+  await waitFor(() => expect(onAcknowledged).toHaveBeenCalledWith([11]));
+});
+
+test("does not acknowledge workflows when the start request fails", async () => {
+  vi.spyOn(webRunsApi, "getWorkflowNotes").mockResolvedValue({
+    notes: [{ id: 12, name: "Checkout", status: "needs_input" }],
+  });
+  const onAcknowledged = vi.fn();
+  function Actions() {
+    const { requestStart, warning } = useUncrawledWorkflowWarning({
+      runId: 7,
+      onStart: vi.fn().mockResolvedValue(false),
+      onViewWorkflows: vi.fn(),
+      onAcknowledged,
+    });
+    return (
+      <>
+        <button onClick={() => requestStart("scan", "track")}>Start scan</button>
+        {warning}
+      </>
+    );
+  }
+  render(<Actions />);
+  fireEvent.click(screen.getByRole("button", { name: "Start scan" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Start scan anyway" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(onAcknowledged).not.toHaveBeenCalled();
+});
+
 test("checks combined crawl and scan, then opens Workflows without starting", async () => {
   vi.spyOn(webRunsApi, "getWorkflowNotes").mockResolvedValue({
     notes: [{ id: 21, name: "Payment", status: "not_attempted", steps: [] }],
   });
   const onStart = vi.fn();
   const onView = vi.fn();
-  render(<ScanActions onStart={onStart} onView={onView} />);
+  const onAcknowledged = vi.fn();
+  function Actions() {
+    const { requestStart, warning } = useUncrawledWorkflowWarning({
+      runId: 7,
+      onStart: async (...args) => {
+        onStart(...args);
+        return true;
+      },
+      onViewWorkflows: onView,
+      onAcknowledged,
+    });
+    return (
+      <>
+        <button onClick={() => requestStart("crawl-then-scan", "track")}>
+          Start crawl then scan
+        </button>
+        {warning}
+      </>
+    );
+  }
+  render(<Actions />);
 
   fireEvent.click(screen.getByRole("button", { name: "Start crawl then scan" }));
   expect(await screen.findByRole("button", { name: "Continue anyway" })).toBeTruthy();
@@ -89,6 +161,7 @@ test("checks combined crawl and scan, then opens Workflows without starting", as
   await screen.findByRole("dialog");
   fireEvent.click(screen.getByRole("button", { name: "Continue anyway" }));
   await waitFor(() => expect(onStart).toHaveBeenCalledWith("crawl-then-scan", "track"));
+  expect(onAcknowledged).toHaveBeenCalledWith([21]);
 });
 
 test("starts immediately when all workflows are crawled and prevents duplicate checks", async () => {

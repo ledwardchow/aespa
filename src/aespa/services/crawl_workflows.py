@@ -9,6 +9,7 @@ from collections.abc import Callable
 from urllib.parse import urlparse
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from sqlalchemy import func, update
 from sqlmodel import Session, select
 
 from aespa.browser import (
@@ -83,8 +84,24 @@ _SENSITIVE_SAMPLE_FIELD = re.compile(
     r"payment|card|cvc|cvv|security.?code|bank.?transfer|"
     r"bank.?details|"
     r"iban|routing|sort.?code|swift|bic\b|account.?number|"
+    r"(?:transfer|payment|withdrawal|payout).*amount|"
     r"password|passcode|one.?time|otp|pin\b|api.?key|secret",
     re.IGNORECASE,
+)
+_SITE_VALUE_LABEL = re.compile(
+    r"account|iban|address|street|city|postal|postcode|zip|email|phone|name", re.I
+)
+_ACCOUNT_FIELD = re.compile(r"account|iban", re.I)
+_PAYMENT_AMOUNT_FIELD = re.compile(r"amount|total|price", re.I)
+_SECRET_LABEL = re.compile(
+    r"password|passcode|one.?time|otp|pin\b|api.?key|secret|"
+    r"card|cvc|cvv|security.?code|routing|sort.?code|swift|bic\b|amount",
+    re.I,
+)
+_OWN_ACCOUNT_LABEL = re.compile(
+    r"\b(?:my|own|your)\b.{0,30}\baccount\b|"
+    r"\baccount\b.{0,30}\b(?:my|own|your)\b",
+    re.I,
 )
 _PASSWORD_FIELD = re.compile(r"password", re.I)
 _EXISTING_PASSWORD = re.compile(r"\b(?:current|old|existing)\W*password\b", re.I)
@@ -100,6 +117,8 @@ _MAX_PARALLEL_WORKFLOWS = 3
 # Workflow retries are keyed by (run_id, note_id) so several can run at once.
 _retry_tasks: dict[tuple[int, int], asyncio.Task] = {}
 _retry_results: dict[tuple[int, int], dict] = {}
+_retry_stop_requested: set[tuple[int, int]] = set()
+_retry_shared: dict[int, object] = {}
 
 
 def _is_payment_workflow(workflow: dict) -> bool:
@@ -119,7 +138,165 @@ def _item_action_pattern(workflow: dict) -> re.Pattern | None:
 
 
 def _can_generate_sample_data(workflow: dict) -> bool:
-    return not workflow.get("destructive") and not _is_payment_workflow(workflow)
+    return not workflow.get("destructive")
+
+
+def _value_in_instructions(value: str, instructions: str) -> bool:
+    value = " ".join(value.split())
+    instructions = " ".join(instructions.split())
+    return bool(
+        value and re.search(rf"(?<!\w){re.escape(value)}(?!\w)", instructions, re.I)
+    )
+
+
+def _value_source(
+    decision: dict,
+    field: dict,
+    instructions: str,
+    *,
+    site_values: list[dict] | None = None,
+    site_actor_id: int | None = None,
+) -> str:
+    """Classify a proposed value using user input and live site evidence."""
+    value = str(
+        field.get("choice_value")
+        if decision.get("action") == "check"
+        else decision.get("value") or ""
+    )
+    if _value_in_instructions(value, instructions):
+        return "user"
+    if decision.get("action") == "fill" and _site_evidence_matches(
+        field, value, site_values or [], site_actor_id
+    ):
+        return "site_value"
+    if decision.get("action") == "check" and value == str(
+        field.get("choice_value") or ""
+    ):
+        return "site_option"
+    if decision.get("action") == "select" and value in {
+        str(option.get("value")) for option in field.get("options") or []
+    }:
+        return "site_option"
+    return "generated"
+
+
+def _site_evidence_matches(
+    field: dict, value: str, site_values: list[dict], actor_id: int | None
+) -> bool:
+    field_label = " ".join(
+        str(field.get(key) or "") for key in ("fieldName", "fieldId", "label")
+    )
+    if (
+        actor_id is None
+        or not _SITE_VALUE_LABEL.search(field_label)
+        or _SECRET_LABEL.search(field_label)
+    ):
+        return False
+    recipient = bool(re.search(r"recipient|destination|to.?account", field_label, re.I))
+    field_address_role = re.search(r"billing|shipping", field_label, re.I)
+    field_kinds = set(_SITE_VALUE_LABEL.findall(field_label.casefold()))
+    for evidence in site_values:
+        label = str(evidence.get("label") or "")
+        source_kinds = set(_SITE_VALUE_LABEL.findall(label.casefold()))
+        source_address_role = re.search(r"billing|shipping", label, re.I)
+        account_evidence = "account" in field_kinds or "iban" in field_kinds
+        if account_evidence and not _OWN_ACCOUNT_LABEL.search(label):
+            continue
+        if (
+            value == evidence.get("value")
+            and evidence.get("actor_id") == actor_id
+            and field_kinds & source_kinds
+            and not _SECRET_LABEL.search(label)
+            and (field_address_role.group(0).casefold() if field_address_role else None)
+            == (
+                source_address_role.group(0).casefold() if source_address_role else None
+            )
+            and recipient
+            == bool(re.search(r"recipient|destination|to.?account", label, re.I))
+        ):
+            return True
+    return False
+
+
+async def _collect_labeled_site_values(page) -> list[dict]:
+    pairs = await page.evaluate(
+        """() => {
+          const visible = el => {
+            const r = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden';
+          };
+          const clean = el => (el?.textContent || '').replace(/\\s+/g, ' ').trim();
+          const pairs = [];
+          for (const label of document.querySelectorAll('dt,th')) {
+            const value = label.nextElementSibling;
+            const expected = label.tagName === 'DT' ? 'DD' : 'TD';
+            if (value?.tagName === expected && visible(label) && visible(value)) {
+              pairs.push({label: clean(label), value: clean(value)});
+            }
+          }
+          return pairs.slice(0, 30);
+        }"""
+    )
+    values = []
+    for pair in pairs or []:
+        label = str(pair.get("label") or "")[:100]
+        value = str(pair.get("value") or "").strip()
+        if (
+            _SITE_VALUE_LABEL.search(label)
+            and not _SECRET_LABEL.search(label)
+            and 3 <= len(value) <= 100
+            and "\n" not in value
+        ):
+            values.append({"source_url": page.url, "label": label, "value": value})
+    return values
+
+
+def _remember_site_values(workflow: dict, values: list[dict], actor_id: int) -> None:
+    stored = workflow.setdefault("_site_values", [])
+    seen = {(item["source_url"], item["label"], item["value"]) for item in stored}
+    for item in values:
+        key = (item["source_url"], item["label"], item["value"])
+        if key not in seen and len(stored) < 12:
+            stored.append({**item, "actor_id": actor_id})
+            seen.add(key)
+
+
+def _site_value_pages(
+    known_pages: dict[str, CrawledPage],
+    workflow: dict,
+    credential_id: int,
+    base_netloc: str,
+) -> list[CrawledPage]:
+    from aespa.services.crawler import _same_domain
+
+    terms = {
+        word
+        for word in _plain_words(
+            f"{workflow.get('name') or ''} {workflow.get('goal') or ''}"
+        ).split()
+        if len(word) >= 4
+    }
+    candidates = []
+    for page in known_pages.values():
+        if not _same_domain(page.url, base_netloc):
+            continue
+        try:
+            accessible = json.loads(page.accessible_by or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            accessible = []
+        if (
+            page.replay_credential_id != credential_id
+            and credential_id not in accessible
+        ):
+            continue
+        text = _plain_words(
+            f"{page.url} {page.title or ''} {(page.page_text or '')[:500]}"
+        )
+        score = len(terms & set(text.split()))
+        candidates.append((score, page.depth, page))
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2].url))
+    return [page for _, _, page in candidates[:5]]
 
 
 def _is_new_password_field(field: dict, observation: dict) -> bool:
@@ -542,9 +719,7 @@ async def _observe(page) -> dict:
               .slice(0, 60).map(({el, domIndex}, index) => ({
                 index, domIndex, name: label(el),
                 kind: el.tagName.toLowerCase() === 'a' ? 'link' : 'button',
-                submits: el.tagName.toLowerCase() !== 'a' &&
-                  (el.type === 'submit' ||
-                   (el.tagName.toLowerCase() === 'button' && !el.type)),
+                submits: Boolean(el.form && el.type === 'submit'),
                 href: el.tagName.toLowerCase() === 'a' ? el.href : '',
                 rawHref: el.tagName.toLowerCase() === 'a' ? el.getAttribute('href') : '',
                 form: formContext(el),
@@ -561,6 +736,8 @@ async def _observe(page) -> dict:
                 label: (el.labels?.[0]?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 100),
                 has_value: el.type === 'radio' || el.type === 'checkbox'
                   ? el.checked : Boolean(el.value?.trim()),
+                _current_value: el.type === 'radio' || el.type === 'checkbox'
+                  ? '' : el.value,
                 checked: Boolean(el.checked),
                 choice_value: el.type === 'radio' ? el.value : '',
                 selected_value: el.tagName === 'SELECT' ? el.value : '',
@@ -572,6 +749,10 @@ async def _observe(page) -> dict:
                   ? Array.from(el.options).filter(o => !o.disabled).slice(0, 12)
                     .map(o => ({value:o.value, label:o.textContent?.trim()})) : []
               })),
+            _hidden_amounts: Array.from(document.querySelectorAll('input[type="hidden"]'))
+              .filter(el => /amount|total|price/i.test(
+                [el.name, el.id].join(' ')))
+              .slice(0, 10).map(el => ({name: el.name || el.id || 'amount', value: el.value})),
             validation_errors: Array.from(document.querySelectorAll(
               'input:invalid,textarea:invalid,select:invalid,' +
               'input[aria-invalid="true"],textarea[aria-invalid="true"],' +
@@ -600,11 +781,20 @@ async def _observe(page) -> dict:
 async def _decide_action(
     llm_cfg, workflow: dict, observation: dict, history: list[str]
 ) -> dict:
+    visible_observation = {
+        **{
+            key: value for key, value in observation.items() if key != "_hidden_amounts"
+        },
+        "fields": [
+            {key: value for key, value in field.items() if key != "_current_value"}
+            for field in observation.get("fields") or []
+        ],
+    }
     sample_data_rule = (
         "Generate missing ordinary sample values for this workflow. Use clearly "
         "fictitious test names, addresses, emails, and phone "
         "numbers where needed. Keep provided values unchanged. Do not generate "
-        "payment card or bank details, existing passwords, one-time codes, "
+        "payment card or bank details, transfer amounts, existing passwords, one-time codes, "
         "API keys, or other secrets. A new password for a test account may be "
         "generated. Reuse that value for its confirmation field. "
         if workflow.get("generate_sample_data")
@@ -629,20 +819,27 @@ async def _decide_action(
         "stop with needs_input=true and explain which value to correct. "
         "Keep each proposed value within its field's value_limit. Fields expose has_value "
         "and checked but omit text values for privacy. Do not refill a field "
-        "that already has a valid value or repeat a completed action. "
+        "that already has a valid value or repeat a completed action. For a payment "
+        "amount or secret field, fill the supplied value even if the site prefilled it. "
+        "You may use exact dropdown and radio options shown in the current form, "
+        "including the signed-in user's own account. Page text alone does not "
+        "authorize invented payment data or secrets. "
         "Use visible validation messages when available. After a form rejects "
         "generated data, correct the affected field even if it still has a value. "
         "Keep values supplied by the user unchanged. Do not repeat "
         "supplied values in reason or evidence. Adding an "
         "item to a cart is a setup action. "
-        "Return only JSON with action, index, value, reason, evidence, "
+        "For a labeled site value, use site_value_index with action=fill. "
+        "AESPA will insert that exact value; do not guess or repeat it. "
+        "Return only JSON with action, index, value, site_value_index, reason, evidence, "
         "needs_input, and request. "
         "Use action=reached only when the "
         "current page visibly shows the goal; evidence must be an exact short "
         "substring of the current URL, title, or page text.\n"
-        f"Workflow: {json.dumps(workflow, ensure_ascii=False)}\n"
+        f"Workflow: {json.dumps({key: value for key, value in workflow.items() if key != '_site_values'}, ensure_ascii=False)}\n"
+        f"Labeled site values: {json.dumps([{'index': index, 'source_url': value['source_url'], 'label': value['label']} for index, value in enumerate(workflow.get('_site_values') or [])], ensure_ascii=False)}\n"
         f"Actions so far: {json.dumps(history[-_MAX_ACTIONS:])}\n"
-        f"Current page: {json.dumps(observation, ensure_ascii=False)}"
+        f"Current page: {json.dumps(visible_observation, ensure_ascii=False)}"
     )
     return _parse_json_object(await llm_svc.plain_completion(llm_cfg, prompt))
 
@@ -656,6 +853,13 @@ async def _decide_with_corrections(
 ) -> dict:
     decision = await _decide_action(llm_cfg, workflow, observation, history)
     for _ in range(_MAX_DECISION_CORRECTIONS):
+        if decision.get("action") == "fill" and isinstance(
+            decision.get("site_value_index"), int
+        ):
+            values = workflow.get("_site_values") or []
+            index = decision["site_value_index"]
+            if 0 <= index < len(values):
+                decision["value"] = values[index]["value"]
         if decision.get("action") == "stop":
             request_text = " ".join(
                 str(decision.get(key) or "") for key in ("request", "reason")
@@ -698,6 +902,9 @@ async def _decide_with_corrections(
                 observation,
                 workflow.get("user_instructions") or "",
                 generate_sample_data=bool(workflow.get("generate_sample_data")),
+                payment_workflow=_is_payment_workflow(workflow),
+                site_values=workflow.get("_site_values") or [],
+                site_actor_id=workflow.get("_site_actor_id"),
                 prior_actions=prior_actions,
             )
             if allowed or why not in {
@@ -834,6 +1041,9 @@ def _action_allowed(
     user_instructions: str = "",
     *,
     generate_sample_data: bool = False,
+    payment_workflow: bool = False,
+    site_values: list[dict] | None = None,
+    site_actor_id: int | None = None,
     prior_actions: set[tuple[str, str, str, str]] | None = None,
 ) -> tuple[bool, str]:
     action = decision.get("action")
@@ -859,20 +1069,156 @@ def _action_allowed(
         direct_action = re.sub(r"[-_/]+", " ", direct_action)
         if _DELETE_ACTION.search(direct_action):
             return False, "The next action would delete something."
-        if _PAYMENT_ACTION.search(direct_action):
-            supplied_payment = bool(user_instructions.strip()) and (
-                not generate_sample_data
-                or bool(_PAYMENT_ACTION.search(user_instructions))
+        payment_submission = bool(
+            item.get("submits")
+            and (payment_workflow or _PAYMENT_ACTION.search(direct_action))
+            or _PAYMENT_ACTION.search(
+                " ".join(str(item.get(key) or "") for key in ("form", "formAction"))
             )
-            if not supplied_payment:
-                return False, "Payment steps need user-supplied test data."
+            or payment_workflow
+            and item.get("kind") == "button"
+            and re.fullmatch(
+                r"\s*(?:confirm|submit|send|transfer|finish|complete)(?:\s+(?:payment|transfer|order))?\s*",
+                str(item.get("name") or ""),
+                re.I,
+            )
+            or payment_workflow
+            and item.get("kind") == "button"
+            and re.fullmatch(
+                r"\s*(?:continue|next|review)(?:\s+(?:payment|transfer|order))?\s*",
+                str(item.get("name") or ""),
+                re.I,
+            )
+            and any(
+                _PAYMENT_AMOUNT_FIELD.search(
+                    " ".join(
+                        str(field.get(key) or "")
+                        for key in ("fieldName", "fieldId", "label")
+                    )
+                )
+                or _field_needs_supplied_secret(field, observation)
+                for field in observation.get("fields") or []
+            )
+            or re.fullmatch(
+                r"\s*(?:transfer|send|pay(?: now)?|place order|confirm payment)\s*",
+                str(item.get("name") or ""),
+                re.I,
+            )
+        )
+        if payment_submission:
+            supplied_hidden_amount = False
+            for hidden in observation.get("_hidden_amounts") or []:
+                approved = _value_in_instructions(
+                    str(hidden.get("value") or ""), user_instructions
+                )
+                if not approved:
+                    return (
+                        False,
+                        f'Provide a test value for the "{hidden.get("name") or "amount"}" payment amount.',
+                    )
+                supplied_hidden_amount = True
+            for field in observation.get("fields") or []:
+                if field.get("type") in {"radio", "select-one", "select-multiple"}:
+                    continue
+                field_label = " ".join(
+                    str(field.get(key) or "")
+                    for key in ("fieldName", "fieldId", "label")
+                )
+                amount = payment_workflow and bool(
+                    _PAYMENT_AMOUNT_FIELD.search(field_label)
+                )
+                if not (amount or _field_needs_supplied_secret(field, observation)):
+                    continue
+                field_id = str(field.get("fieldId") or field.get("fieldName") or "")
+                recorded = [
+                    value
+                    for url, name, action_name, value in prior_actions or ()
+                    if url == observation.get("url")
+                    and name == field_id
+                    and action_name == "fill"
+                ]
+                supplied = any(
+                    value
+                    and _value_in_instructions(value, user_instructions)
+                    and field.get("_current_value") == value
+                    for value in recorded
+                )
+                site_account = (
+                    not amount
+                    and bool(_ACCOUNT_FIELD.search(field_label))
+                    and any(
+                        field.get("_current_value") == value
+                        and _site_evidence_matches(
+                            field, value, site_values or [], site_actor_id
+                        )
+                        for value in recorded
+                    )
+                )
+                if not field.get("has_value") or not (supplied or site_account):
+                    return (
+                        False,
+                        f'Provide a test value for the "{_field_display_name(field)}" payment or secret field.',
+                    )
+            filled_site_account = any(
+                field.get("has_value")
+                and any(
+                    previous_url == observation.get("url")
+                    and previous_field
+                    == str(field.get("fieldId") or field.get("fieldName") or "")
+                    and previous_action == "fill"
+                    and field.get("_current_value") == previous_value
+                    and _site_evidence_matches(
+                        field, previous_value, site_values or [], site_actor_id
+                    )
+                    for previous_url, previous_field, previous_action, previous_value in prior_actions
+                    or ()
+                )
+                for field in observation.get("fields") or []
+            )
+            selected_site_option = any(
+                (
+                    field.get("type") in {"select-one", "select-multiple"}
+                    and field.get("selected_value")
+                    and str(field["selected_value"])
+                    in {
+                        str(option.get("value"))
+                        for option in field.get("options") or []
+                    }
+                )
+                and _ACCOUNT_FIELD.search(
+                    " ".join(
+                        str(field.get(key) or "")
+                        for key in ("fieldName", "fieldId", "label")
+                    )
+                )
+                for field in observation.get("fields") or []
+            )
+            if (
+                not _PAYMENT_ACTION.search(user_instructions)
+                and not selected_site_option
+                and not filled_site_account
+                and not supplied_hidden_amount
+            ):
+                return (
+                    False,
+                    "Payment steps need user-supplied test data or a selected site option.",
+                )
         href = item.get("href") or ""
         if href and urlparse(href).netloc != urlparse(observation["url"]).netloc:
             return False, "The next action leaves the target site."
     else:
         field_type = str(item.get("type") or "")
-        payment_context = bool(
-            _PAYMENT_CONTEXT.search(urlparse(observation.get("url") or "").path)
+        parsed_url = urlparse(observation.get("url") or "")
+        payment_context = payment_workflow or bool(
+            _PAYMENT_CONTEXT.search(f"{parsed_url.path}/{parsed_url.fragment}")
+        )
+        payment_amount = payment_context and bool(
+            _PAYMENT_AMOUNT_FIELD.search(
+                " ".join(
+                    str(item.get(key) or "")
+                    for key in ("fieldName", "fieldId", "label")
+                )
+            )
         )
         if action in {"fill", "select"} and field_type == "radio":
             return False, "Use check to choose a radio option."
@@ -889,12 +1235,25 @@ def _action_allowed(
         if action == "fill":
             value = " ".join(str(decision.get("value") or "").split())
             supplied = " ".join(user_instructions.split())
+            site_supplied = _site_evidence_matches(
+                item, value, site_values or [], site_actor_id
+            )
             if not value:
                 return False, "The field needs a value."
-            if value.casefold() not in supplied.casefold() and not generate_sample_data:
+            if (
+                not _value_in_instructions(value, supplied)
+                and not site_supplied
+                and not generate_sample_data
+            ):
                 return False, "The field needs a value supplied by the user."
-            if value.casefold() not in supplied.casefold() and (
-                payment_context or _field_needs_supplied_secret(item, observation)
+            if (
+                not _value_in_instructions(value, supplied)
+                and not site_supplied
+                and (
+                    payment_context
+                    or payment_amount
+                    or _field_needs_supplied_secret(item, observation)
+                )
             ):
                 return False, "Payment or secret fields need user-supplied test data."
         if (
@@ -906,8 +1265,16 @@ def _action_allowed(
         if (
             action == "select"
             and (payment_context or _field_needs_supplied_secret(item, observation))
-            and str(decision.get("value") or "").casefold()
-            not in user_instructions.casefold()
+            and not (
+                _value_source(decision, item, user_instructions) == "user"
+                or _ACCOUNT_FIELD.search(
+                    " ".join(
+                        str(item.get(key) or "")
+                        for key in ("fieldName", "fieldId", "label")
+                    )
+                )
+                and _value_source(decision, item, user_instructions) == "site_option"
+            )
         ):
             return False, "Payment or secret fields need user-supplied test data."
         if not item.get("fieldName") and not item.get("fieldId"):
@@ -978,7 +1345,17 @@ def _remember_generated_value(
         else decision.get("value") or ""
     ).strip()
     supplied = str(workflow.get("user_instructions") or "")
-    if not value or value.casefold() in supplied.casefold():
+    if (
+        not value
+        or _value_source(
+            decision,
+            field,
+            supplied,
+            site_values=workflow.get("_site_values") or [],
+            site_actor_id=workflow.get("_site_actor_id"),
+        )
+        != "generated"
+    ):
         return
     field_name = str(
         field.get("name") or field.get("fieldName") or field.get("fieldId") or "field"
@@ -1099,7 +1476,6 @@ async def _save_discovered_page(
         _save_page_placeholder,
         _update_accessible_by,
         _update_page,
-        _update_run,
     )
 
     url = page.url
@@ -1190,7 +1566,22 @@ async def _save_discovered_page(
         action_kind="click",
         action_data={"replay_steps": steps},
     )
-    _update_run(run_id, pages_discovered=shared.pages_done)
+    with Session(get_engine()) as session:
+        page_count = len(
+            session.exec(
+                select(CrawledPage.id).where(CrawledPage.test_run_id == run_id)
+            ).all()
+        )
+        session.exec(
+            update(TestRun)
+            .where(TestRun.id == run_id)
+            .values(
+                pages_discovered=func.max(
+                    func.coalesce(TestRun.pages_discovered, 0), page_count
+                )
+            )
+        )
+        session.commit()
     return page_id
 
 
@@ -1276,9 +1667,7 @@ async def explore_after_crawl(
         if selected_workflows is not None:
             raise ValueError("This run has no crawled pages to continue from")
         return
-    if run_id in _stop_requested:
-        if selected_workflows is not None:
-            raise ValueError("The crawl was stopped")
+    if selected_workflows is None and run_id in _stop_requested:
         return
 
     def report(message: str, **changes) -> None:
@@ -1356,7 +1745,10 @@ async def explore_after_crawl(
         return
 
     for workflow in proposals:
-        workflow["generate_sample_data"] = _can_generate_sample_data(workflow)
+        workflow["generate_sample_data"] = bool(
+            workflow.get("generate_sample_data", True)
+            and _can_generate_sample_data(workflow)
+        )
 
     # Claim a useful item for ordinary workflows before recording blocked deletion.
     proposals.sort(key=lambda workflow: bool(workflow.get("destructive")))
@@ -1374,8 +1766,25 @@ async def explore_after_crawl(
     limit = asyncio.Semaphore(_MAX_PARALLEL_WORKFLOWS)
 
     async def explore_workflow(browser, workflow: dict) -> None:
-        if run_id in _stop_requested:
+        if selected_workflows is None and run_id in _stop_requested:
             return
+
+        def finish_early(status: str, detail: str, *, request: str = "") -> None:
+            note_options = (
+                {"needs_input": True, "request": request}
+                if status == "needs_input"
+                else {}
+            )
+            _record_note(
+                run_id,
+                workflow,
+                status,
+                [],
+                detail,
+                **note_options,
+            )
+            report(detail, stage="finished", result_status=status)
+
         example_url = workflow.get("example_url") or workflow["start_url"]
         start_page = known_pages.get(_norm(example_url))
         destructive = bool(workflow["destructive"]) or bool(
@@ -1383,30 +1792,12 @@ async def explore_after_crawl(
                 f"{workflow.get('name') or ''} {workflow.get('goal') or ''}"
             )
         )
-        if (
-            not destructive
-            and _is_payment_workflow(workflow)
-            and not str(workflow.get("user_instructions") or "").strip()
-        ):
-            _record_note(
-                run_id,
-                workflow,
-                "needs_input",
-                [],
-                "Payment details are needed before trying this workflow.",
-                needs_input=True,
-                request="Provide test payment details or instructions for this workflow.",
-            )
-            return
         credential, requires_credential = _workflow_credential(
             start_page, creds, historical_usernames
         )
         if credential is None and requires_credential and not destructive:
-            _record_note(
-                run_id,
-                workflow,
+            finish_early(
                 "not_attempted",
-                [],
                 "The saved account for this page is no longer available. "
                 "Update the site credentials and retry this workflow.",
             )
@@ -1428,11 +1819,8 @@ async def explore_after_crawl(
                 exclude_urls=set(workflow.get("excluded_target_urls") or []),
             )
             if claim is None:
-                _record_note(
-                    run_id,
-                    workflow,
+                finish_early(
                     "not_attempted",
-                    [],
                     "Not tried because this workflow appears to delete something."
                     if destructive
                     else "No separate item is available for this workflow.",
@@ -1442,11 +1830,8 @@ async def explore_after_crawl(
             workflow["target_owner"] = owner
             workflow["start_url"] = claim["target_url"]
         if destructive:
-            _record_note(
-                run_id,
-                workflow,
+            finish_early(
                 "not_attempted",
-                [],
                 "Not tried because this workflow appears to delete something.",
             )
             return
@@ -1454,11 +1839,8 @@ async def explore_after_crawl(
             AuthMode.guided,
             AuthMode.entra_id,
         }:
-            _record_note(
-                run_id,
-                workflow,
+            finish_early(
                 "not_attempted",
-                [],
                 "Not tried because this workflow needs a guided sign-in.",
             )
             return
@@ -1494,16 +1876,17 @@ async def explore_after_crawl(
                         "username": username,
                     },
                 )
-            _crawl_progress(
-                run_id,
-                username=username,
-                current_url=url,
-                pages_visited=0,
-                stage="workflow_step",
-                stage_label=label,
-                phase_index=0,
-                phase_total=0,
-            )
+            if selected_workflows is None:
+                _crawl_progress(
+                    run_id,
+                    username=username,
+                    current_url=url,
+                    pages_visited=0,
+                    stage="workflow_step",
+                    stage_label=label,
+                    phase_index=0,
+                    phase_total=0,
+                )
 
         steps: list[dict] = []
         descriptions: list[str] = []
@@ -1539,6 +1922,42 @@ async def explore_after_crawl(
                     )
                     status = "not_attempted"
                     return
+                workflow["_site_actor_id"] = credential_id
+                try:
+                    _remember_site_values(
+                        workflow,
+                        await _collect_labeled_site_values(page),
+                        credential_id,
+                    )
+                except Exception:
+                    log.debug(
+                        "Could not read labeled values after sign-in", exc_info=True
+                    )
+                value_pages = _site_value_pages(
+                    known_pages, workflow, credential_id, base_netloc
+                )
+                for known in value_pages:
+                    lookup_page = await context.new_page()
+                    try:
+                        response = await lookup_page.goto(
+                            known.url, wait_until="domcontentloaded", timeout=10_000
+                        )
+                        if (
+                            response is not None
+                            and response.status < 400
+                            and _same_domain(lookup_page.url, base_netloc)
+                        ):
+                            _remember_site_values(
+                                workflow,
+                                await _collect_labeled_site_values(lookup_page),
+                                credential_id,
+                            )
+                    except Exception:
+                        log.debug(
+                            "Could not read labeled account values", exc_info=True
+                        )
+                    finally:
+                        await lookup_page.close()
             rejected_urls: set[str] = set(workflow.get("excluded_target_urls") or [])
             while True:
                 report_step(
@@ -1615,10 +2034,19 @@ async def explore_after_crawl(
             )
             for _ in range(action_limit):
                 attempted_action = "checking the page"
-                if run_id in _stop_requested:
+                if selected_workflows is None and run_id in _stop_requested:
                     detail = "Stopped by the user."
                     break
                 observation = await _observe(page)
+                if credential:
+                    try:
+                        _remember_site_values(
+                            workflow,
+                            await _collect_labeled_site_values(page),
+                            credential_id,
+                        )
+                    except Exception:
+                        log.debug("Could not read labeled page values", exc_info=True)
                 report_step(
                     "Choosing the next step",
                     stage="deciding",
@@ -1686,17 +2114,26 @@ async def explore_after_crawl(
                     observation,
                     workflow.get("user_instructions") or "",
                     generate_sample_data=bool(workflow.get("generate_sample_data")),
+                    payment_workflow=_is_payment_workflow(workflow),
+                    site_values=workflow.get("_site_values") or [],
+                    site_actor_id=workflow.get("_site_actor_id"),
                     prior_actions=prior_actions,
                 )
                 if not allowed:
-                    needs_input = why in {
+                    needs_input = why.startswith(
+                        'Provide a test value for the "'
+                    ) or why in {
                         "The field needs a value supplied by the user.",
                         "Payment or secret fields need user-supplied test data.",
-                        "Payment steps need user-supplied test data.",
+                        "Payment steps need user-supplied test data or a selected site option.",
                     }
                     status = "needs_input" if needs_input else "not_attempted"
                     if needs_input:
-                        request = _input_request(why, decision, observation)
+                        request = (
+                            why
+                            if why.startswith('Provide a test value for the "')
+                            else _input_request(why, decision, observation)
+                        )
                     detail = why
                     break
                 before_url = page.url
@@ -1720,6 +2157,14 @@ async def explore_after_crawl(
                         else f"checking {field_name}"
                     )
                 action_step = await _apply_action(page, decision, observation)
+                if action in {"fill", "select", "check"}:
+                    action_step["value_source"] = _value_source(
+                        decision,
+                        field,
+                        workflow.get("user_instructions") or "",
+                        site_values=workflow.get("_site_values") or [],
+                        site_actor_id=workflow.get("_site_actor_id"),
+                    )
                 steps.append(action_step)
                 if action in {"fill", "select", "check"}:
                     prior_actions.add(_field_action_key(decision, observation))
@@ -1800,18 +2245,19 @@ async def explore_after_crawl(
             log.warning("Could not explore workflow %s: %s", workflow["name"], exc)
             detail = f"Could not finish exploring: {type(exc).__name__}."
         finally:
-            _record_note(
-                run_id,
-                workflow,
-                status,
-                descriptions,
-                detail,
-                page.url if page.url.startswith("http") else "",
-                page_id=saved_id if status == "crawled" else None,
-                needs_input=needs_input,
-                request=request,
-                instructions=_instructions_with_generated_values(workflow),
-            )
+            if (run_id, workflow.get("retry_of")) not in _retry_stop_requested:
+                _record_note(
+                    run_id,
+                    workflow,
+                    status,
+                    descriptions,
+                    detail,
+                    page.url if page.url.startswith("http") else "",
+                    page_id=saved_id if status == "crawled" else None,
+                    needs_input=needs_input,
+                    request=request,
+                    instructions=_instructions_with_generated_values(workflow),
+                )
             report_step(
                 detail,
                 stage="finished",
@@ -1854,6 +2300,25 @@ def _active_retry_notes(run_id: int) -> set[int]:
     }
 
 
+def request_retry_stop(run_id: int) -> None:
+    for key, task in list(_retry_tasks.items()):
+        if key[0] == run_id and not task.done():
+            _retry_stop_requested.add(key)
+            task.cancel()
+
+
+async def stop_retries_and_wait(run_id: int) -> None:
+    tasks = [task for key, task in _retry_tasks.items() if key[0] == run_id]
+    request_retry_stop(run_id)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _retry_shared.pop(run_id, None)
+    for key in list(_retry_results):
+        if key[0] == run_id:
+            _retry_results.pop(key, None)
+            _retry_stop_requested.discard(key)
+
+
 def workflow_retry_status(run_id: int) -> dict:
     retries = [
         dict(state)
@@ -1872,10 +2337,6 @@ def start_workflow_retry(
     save_to_site: bool = False,
     generate_sample_data: bool = False,
 ) -> dict:
-    from aespa.services import crawler
-
-    if crawler.is_running(run_id):
-        raise ValueError("Wait for the crawl to finish before continuing a workflow.")
     active_notes = _active_retry_notes(run_id)
     if note["id"] in active_notes:
         raise ValueError("This workflow is already running.")
@@ -1905,7 +2366,7 @@ def start_workflow_retry(
         "generate_sample_data": False,
         "save_to_site_requested": save_to_site,
     }
-    generate_sample_data = _can_generate_sample_data(workflow)
+    generate_sample_data = generate_sample_data and _can_generate_sample_data(workflow)
     workflow["generate_sample_data"] = generate_sample_data
     key = (run_id, note["id"])
     _retry_results[key] = {
@@ -1925,11 +2386,19 @@ def start_workflow_retry(
         _run_workflow_retry(run_id, workflow, save_to_site=save_to_site)
     )
     _retry_tasks[key] = task
-    task.add_done_callback(
-        lambda done: (
-            _retry_tasks.pop(key, None) if _retry_tasks.get(key) is done else None
-        )
-    )
+
+    def finished(done: asyncio.Task) -> None:
+        if done.cancelled() and key in _retry_results:
+            _retry_results[key] = {
+                **_retry_results[key],
+                "status": "stopped",
+                "message": "Workflow stopped",
+            }
+        if _retry_tasks.get(key) is done:
+            _retry_tasks.pop(key, None)
+        _retry_stop_requested.discard(key)
+
+    task.add_done_callback(finished)
     return dict(_retry_results[key])
 
 
@@ -1971,7 +2440,7 @@ async def _run_workflow_retry(
     try:
         with Session(get_engine()) as session:
             run = session.get(TestRun, run_id)
-            if run is None or run.status == "running":
+            if run is None:
                 raise ValueError("The test run is not available for workflow retry")
             site = session.get(Site, run.site_id)
             llm_cfg = get_llm_config_for_role(session, run, "crawler")
@@ -1988,12 +2457,17 @@ async def _run_workflow_retry(
             )
             for obj in [*creds, site, run, *pages]:
                 session.expunge(obj)
-        shared = crawler._CrawlShared(
-            crawled_norms={crawler._norm(page.url): page.id for page in pages},
-            state_keys={page.state_key: page.id for page in pages if page.state_key},
-            pages_done=len(pages),
-            run_id=run_id,
-        )
+        shared = crawler._active_shared.get(run_id) or _retry_shared.get(run_id)
+        if shared is None:
+            shared = crawler._CrawlShared(
+                crawled_norms={crawler._norm(page.url): page.id for page in pages},
+                state_keys={
+                    page.state_key: page.id for page in pages if page.state_key
+                },
+                pages_done=len(pages),
+                run_id=run_id,
+            )
+        _retry_shared[run_id] = shared
         proxy_url = proxy_cfg.scanner_proxy_url if proxy_cfg.proxy_scanner else None
         await explore_after_crawl(
             run_id,
@@ -2029,6 +2503,13 @@ async def _run_workflow_retry(
                     session, run.site_id, workflow, effective_instructions
                 )
             report({"saved_to_site": True})
+    except asyncio.CancelledError:
+        _retry_results[key] = {
+            **_retry_results.get(key, {}),
+            "status": "stopped",
+            "message": "Workflow stopped",
+        }
+        raise
     except Exception as exc:
         log.warning(
             "Workflow retry failed for run %s note %s", run_id, note_id, exc_info=True
@@ -2070,3 +2551,9 @@ async def _run_workflow_retry(
             f"Finished continuing {workflow['name']}",
             data={"note_id": note_id},
         )
+    finally:
+        if not any(
+            task_run_id == run_id and other_note_id != note_id and not task.done()
+            for (task_run_id, other_note_id), task in _retry_tasks.items()
+        ):
+            _retry_shared.pop(run_id, None)

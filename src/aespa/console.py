@@ -341,6 +341,19 @@ class InteractiveConsoleHandler(logging.Handler):
         if self.mode != SETTINGS:
             return False
         with self._output_lock:
+            if (
+                self.settings_section in ("authentication", "server")
+                and not self.settings_editing
+                and key.lower() == "c"
+                and self.authentication_key
+            ):
+                self.settings_status = (
+                    "Authentication key copied."
+                    if _copy_to_clipboard(self.authentication_key)
+                    else "Could not copy the key. Select it in the terminal to copy it."
+                )
+                self._redraw_locked()
+                return True
             if self.settings_section == "database":
                 return self._handle_database_key(key)
             if self.settings_section == "logging":
@@ -947,10 +960,16 @@ class InteractiveConsoleHandler(logging.Handler):
                 "",
                 self.authentication_key or "Authentication is not enabled.",
                 "",
-                "Enter this key on the AESPA sign-in page.",
-                "Press ~ or ` to open AESPA in your browser.",
-                "Press Esc to return to Settings.",
             ]
+            if self.authentication_key:
+                lines.extend(
+                    [
+                        "Enter this key on the AESPA sign-in page.",
+                        "Press C to copy the key.",
+                        "Press ~ or ` to open AESPA in your browser.",
+                    ]
+                )
+            lines.append("Press Esc to return to Settings.")
             if self.settings_status:
                 lines.extend(["", self.settings_status])
             return [
@@ -1010,6 +1029,7 @@ class InteractiveConsoleHandler(logging.Handler):
         if self.authentication_key is not None:
             lines[4:4] = [
                 f"  Authentication key  {self.authentication_key}",
+                "  Press C to copy the key",
                 "  Press ~ to open AESPA in your browser",
             ]
         if self.allow_port_change:
@@ -1395,6 +1415,32 @@ def _legend(
         "[1-6] Views  [~ or `] Open browser  [↑/↓] Select  [Enter] Expand  "
         "[Wheel/PgUp/PgDn] Scroll  [Ctrl+C] Quit"
     )
+
+
+def _copy_to_clipboard(value: str) -> bool:
+    if sys.platform == "darwin":
+        command = ["pbcopy"]
+    elif sys.platform == "win32":
+        command = ["clip"]
+    elif shutil.which("wl-copy"):
+        command = ["wl-copy"]
+    elif shutil.which("xclip"):
+        command = ["xclip", "-selection", "clipboard"]
+    else:
+        return False
+    try:
+        subprocess.run(
+            command,
+            input=value,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return True
 
 
 def _listening_url(host: str, port: int) -> str:

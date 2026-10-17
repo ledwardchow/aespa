@@ -322,6 +322,7 @@ async def delete_test_run(run_id: int, session: Session = Depends(get_session)) 
     # persisted status is not sufficient.
     if crawler_svc.is_running(run_id):
         await crawler_svc.stop_and_wait(run_id)
+    await crawl_workflows_svc.stop_retries_and_wait(run_id)
     if scanner_svc.is_thinking_running(run_id):
         await scanner_svc.stop_thinking_and_wait(run_id)
     if validator_svc.is_validating(run_id):
@@ -583,6 +584,8 @@ async def start_test_run(
     body: StartCrawlBody | None = None,
     session: Session = Depends(get_session),
 ) -> TestRunSummary:
+    if crawl_workflows_svc.workflow_retry_status(run_id)["status"] == "running":
+        raise HTTPException(status_code=409, detail="Wait for workflows to finish.")
     run = await web_runs_svc.start(session, run_id, body)
     return _run_summary(run, session)
 
@@ -621,6 +624,8 @@ async def restart_test_run(
         run.crawl_credential_id = body.crawl_credential_id
     else:
         run.crawl_credential_id = None
+    if crawl_workflows_svc.workflow_retry_status(run_id)["status"] == "running":
+        raise HTTPException(status_code=409, detail="Wait for workflows to finish.")
     _clear_crawl_state(session, run)
     run.crawler_mode = next_crawler_mode
     run.page_selection = next_page_selection
@@ -639,6 +644,8 @@ async def resume_test_run_crawl(
 ) -> TestRunSummary:
     """Resume a quota-paused crawl using its persisted crawl artifacts."""
     run = _get_run_or_404(session, run_id)
+    if crawl_workflows_svc.workflow_retry_status(run_id)["status"] == "running":
+        raise HTTPException(status_code=409, detail="Wait for workflows to finish.")
     from aespa.services import run_pause as run_pause_svc
 
     pause = run_pause_svc.get_pause("crawl", run_id)
@@ -663,6 +670,8 @@ def clear_test_run_crawl(
 ) -> TestRunSummary:
     """Wipe crawled pages/links for this run without starting a new crawl."""
     run = _get_run_or_404(session, run_id)
+    if crawl_workflows_svc.workflow_retry_status(run_id)["status"] == "running":
+        raise HTTPException(status_code=409, detail="Wait for workflows to finish.")
     if run.status == TestRunStatus.running:
         raise HTTPException(
             status_code=409, detail="Stop the run before clearing crawl data."
@@ -764,6 +773,7 @@ def stop_test_run(
         raise HTTPException(status_code=409, detail="Crawl is not currently running")
     crawl_then_pentest.cancel(run_id)
     crawler_svc.request_stop(run_id)
+    crawl_workflows_svc.request_retry_stop(run_id)
     # The Dynamic Scan can run at the same time as the crawler and owns the
     # shared run status once its phase starts. Stopping the crawler must not
     # overwrite an active or completed scan result.
@@ -1164,9 +1174,7 @@ async def retry_crawl_workflow(
     body: WorkflowRetryBody,
     session: Session = Depends(get_session),
 ) -> dict:
-    run = _get_run_or_404(session, run_id)
-    if run.status == TestRunStatus.running:
-        raise HTTPException(status_code=409, detail="Wait for the run to finish first.")
+    _get_run_or_404(session, run_id)
     note = next(
         (
             item

@@ -25,12 +25,14 @@ export function AuthenticationSettings() {
   }
 
   return (
-    <section className="card">
-      <h2>Authentication key</h2>
-      <p className="subtle">
-        This key grants access to AESPA settings and scan data. Keep it private.
+    <section className="card" style={{ maxWidth: 680 }}>
+      <h2 className="form-section-title">Authentication key</h2>
+      <p className="field-hint">
+        Use this key to sign in if AESPA did not sign you in automatically.
       </p>
-      <p className="subtle">Integrations use tokens from the API extension's settings instead.</p>
+      <p className="field-hint" style={{ marginBottom: 12 }}>
+        Integrations use tokens from the API extension's settings instead.
+      </p>
       <div className="field">
         <label htmlFor="settings-authentication-key">Authentication key</label>
         <input

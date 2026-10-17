@@ -78,7 +78,7 @@ function WarningDialog({ pending, onCancel, onView, onConfirm, onRetry }) {
   );
 }
 
-export function useUncrawledWorkflowWarning({ runId, onStart, onViewWorkflows }) {
+export function useUncrawledWorkflowWarning({ runId, onStart, onViewWorkflows, onAcknowledged }) {
   const [pending, setPending] = useState(null);
   const pendingRef = useRef(null);
   const busy = useRef(false);
@@ -119,10 +119,11 @@ export function useUncrawledWorkflowWarning({ runId, onStart, onViewWorkflows })
   const confirm = async () => {
     if (!pendingRef.current || busy.current) return;
     busy.current = true;
-    const { action, coverageMode } = pendingRef.current;
+    const { action, coverageMode, workflows } = pendingRef.current;
     updatePending(null);
     try {
-      await onStart(action, coverageMode);
+      const started = await onStart(action, coverageMode);
+      if (started === true) onAcknowledged?.(workflows.map((note) => note.id));
     } finally {
       busy.current = false;
     }

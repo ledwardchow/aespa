@@ -14,6 +14,7 @@ import { SastSettings } from "./SastSettings.jsx";
 import { SystemSettingsPanels } from "./DebugPage.jsx";
 import { UpstreamProxySettings } from "./UpstreamProxySettings.jsx";
 import { RetireListSettings } from "./RetireListSettings.jsx";
+import { AuthenticationSettings } from "./AuthenticationSettings.tsx";
 
 const TOP_LEVEL_TABS = [
   { key: "global", label: "Global" },
@@ -39,6 +40,7 @@ const GLOBAL_TABS = [
   { key: "debug", label: "Debug Settings" },
   { key: "proxy", label: "Connectivity" },
   { key: "libraries", label: "Vulnerable Libraries" },
+  { key: "authentication", label: "Authentication Key" },
 ];
 
 export function ScanPolicyPage({
@@ -119,7 +121,7 @@ export function ScanPolicyPage({
           />
         )}
         <div className={`scroll-content ${styles.scroll}`}>
-          {tab === "global" && !["proxy", "libraries"].includes(globalTab) && (
+          {tab === "global" && !["proxy", "libraries", "authentication"].includes(globalTab) && (
             <div className={styles.systemSettingsPanels}>
               <SystemSettingsPanels
                 tab={globalTab}
@@ -141,6 +143,7 @@ export function ScanPolicyPage({
           )}
           {tab === "global" && globalTab === "proxy" && <UpstreamProxySettings />}
           {tab === "global" && globalTab === "libraries" && <RetireListSettings />}
+          {tab === "global" && globalTab === "authentication" && <AuthenticationSettings />}
           {tab === "systems" && <ComponentMapperSettings />}
           {tab === "dast" && dastTab === "scan-behaviour" && (
             <GlobalPolicySettings tab="scan-behaviour" />

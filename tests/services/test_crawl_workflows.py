@@ -234,7 +234,7 @@ def test_inferred_workflow_must_start_on_an_observed_page(monkeypatch):
         "Submit a product review",
     ]
     assert proposals[1]["destructive"] is False
-    assert [item["generate_sample_data"] for item in proposals] == [False, True]
+    assert [item["generate_sample_data"] for item in proposals] == [True, True]
 
 
 def test_inference_asks_for_actions_instead_of_generic_pages(monkeypatch):
@@ -537,7 +537,7 @@ def test_state_change_guard_allows_cart_setup_and_waits_for_payment_data():
     assert crawl_workflows._action_allowed(
         {"action": "click", "index": 2, "risk": "safe"}, observation
     )[0]
-    assert not crawl_workflows._action_allowed(
+    assert crawl_workflows._action_allowed(
         {"action": "click", "index": 3, "risk": "safe"}, observation
     )[0]
 
@@ -1256,7 +1256,7 @@ def test_saved_payment_and_delete_workflows_do_not_generate_data():
         ),
     )
     proposals = crawl_workflows._saved_workflow_proposals(site)
-    assert [item["generate_sample_data"] for item in proposals] == [False, False]
+    assert [item["generate_sample_data"] for item in proposals] == [True, False]
     assert [item["destructive"] for item in proposals] == [False, True]
 
 
@@ -1397,14 +1397,14 @@ def test_retry_checkbox_waits_for_success_before_saving(
         saved = sites.workflow_data_for_site(session.get(Site, site_id))
     assert saved == []
     assert _retry_state(run_id, 23)["saved_to_site"] is False
-    assert attempts == [(True, True, "Use 1 Example Street")]
+    assert attempts == [(True, False, "Use 1 Example Street")]
 
     async def retry_without_input():
         crawl_workflows.start_workflow_retry(run_id, note, "")
         await crawl_workflows._retry_tasks[(run_id, 23)]
 
     asyncio.run(retry_without_input())
-    assert attempts[-1] == (False, True, "")
+    assert attempts[-1] == (False, False, "")
 
     async def generate():
         crawl_workflows.start_workflow_retry(
@@ -1422,12 +1422,12 @@ def test_retry_checkbox_waits_for_success_before_saving(
         await crawl_workflows._retry_tasks[(run_id, 23)]
 
     asyncio.run(retry_approved_note())
-    assert attempts[-1] == (False, True, "")
+    assert attempts[-1] == (False, False, "")
     crawl_workflows._retry_tasks.pop((run_id, 23), None)
     crawl_workflows._retry_results.pop((run_id, 23), None)
 
 
-def test_retry_keeps_saved_values_and_excludes_payment_even_if_requested(monkeypatch):
+def test_retry_keeps_saved_values_and_guards_payment_fields(monkeypatch):
     run_id = 9_720
     workflows = []
 
@@ -1452,9 +1452,9 @@ def test_retry_keeps_saved_values_and_excludes_payment_even_if_requested(monkeyp
 
     try:
         asyncio.run(retry())
-        assert workflows[0]["generate_sample_data"] is False
+        assert workflows[0]["generate_sample_data"] is True
         assert workflows[0]["user_instructions"] == "Use the supplied test account"
-        assert _retry_state(run_id, 24)["generate_sample_data"] is False
+        assert _retry_state(run_id, 24)["generate_sample_data"] is True
         with pytest.raises(ValueError, match="cannot be retried"):
             crawl_workflows.start_workflow_retry(
                 run_id,
@@ -1718,6 +1718,11 @@ def test_workflow_retry_api_accepts_unfinished_notes_but_not_destructive_or_old_
         "save_to_site": True,
         "generate_sample_data": False,
     }
+    with Session(isolated_db_engine) as session:
+        running = session.get(TestRun, run_id)
+        running.status = "running"
+        session.add(running)
+        session.commit()
     generated = isolated_client.post(
         f"/api/test-runs/{run_id}/crawl/workflows/{notes[0]['id']}/retry",
         json={"instructions": "", "generate_sample_data": True},
@@ -2158,12 +2163,7 @@ def test_workflows_run_at_once_in_separate_browser_sessions(monkeypatch):
             "crawl_workflow",
             f"Workflow {index}: Choosing the next step",
         ) in log_lines
-    assert {event["stage"] for event in progress_events} == {"workflow_step"}
-    assert any(
-        event["stage_label"] == "Workflow 0: Opening the starting page"
-        and event["username"] == "unauthenticated"
-        for event in progress_events
-    )
+    assert progress_events == []
 
 
 def test_workflow_exploration_executes_action_and_reports_step(monkeypatch):
@@ -2444,11 +2444,11 @@ def test_inferred_workflows_after_payment_and_delete_are_all_tried(monkeypatch):
         )
     )
     statuses = dict(notes)
-    assert statuses["Make payment"] == "needs_input"
+    assert statuses["Make payment"] == "not_reached"
     assert statuses["Delete address"] == "not_attempted"
     assert [statuses[f"Workflow {index}"] for index in range(6)] == ["not_reached"] * 6
     assert [workflow["generate_sample_data"] for workflow in workflows] == [
-        False,
+        True,
         False,
         True,
         True,
@@ -2459,7 +2459,7 @@ def test_inferred_workflows_after_payment_and_delete_are_all_tried(monkeypatch):
     ]
 
 
-def test_payment_and_delete_workflows_stop_before_browser_actions(monkeypatch):
+def test_payment_opens_browser_while_delete_stays_blocked(monkeypatch):
     import playwright.async_api
 
     from aespa.services import crawler
@@ -2492,9 +2492,7 @@ def test_payment_and_delete_workflows_stop_before_browser_actions(monkeypatch):
 
     class Browser:
         async def new_context(self, **_kwargs):
-            raise AssertionError(
-                "Payment and deletion must stop before browser actions"
-            )
+            raise AssertionError("Payment browser opened")
 
         async def close(self):
             pass
@@ -2525,25 +2523,23 @@ def test_payment_and_delete_workflows_stop_before_browser_actions(monkeypatch):
             ("Delete address", "Remove an address", True),
         )
     ]
-    asyncio.run(
-        crawl_workflows.explore_after_crawl(
-            9_721,
-            llm_cfg=None,
-            site=SimpleNamespace(base_url="https://shop.test", login_url=""),
-            creds=[],
-            shared=None,
-            max_pages=10,
-            browser_engine="chromium",
-            browser_visible=False,
-            pw_proxy={},
-            global_http_header={},
-            selected_workflows=workflows,
+    with pytest.raises(AssertionError, match="Payment browser opened"):
+        asyncio.run(
+            crawl_workflows.explore_after_crawl(
+                9_721,
+                llm_cfg=None,
+                site=SimpleNamespace(base_url="https://shop.test", login_url=""),
+                creds=[],
+                shared=None,
+                max_pages=10,
+                browser_engine="chromium",
+                browser_visible=False,
+                pw_proxy={},
+                global_http_header={},
+                selected_workflows=workflows,
+            )
         )
-    )
-    assert notes == [
-        ("Make payment", "needs_input", True, False),
-        ("Delete address", "not_attempted", None, False),
-    ]
+    assert notes == [("Delete address", "not_attempted", None, False)]
 
 
 def _payment_observation() -> dict:
@@ -2635,3 +2631,582 @@ def test_needs_input_request_names_the_field_or_option():
         )
         == 'Provide a sample value for the "postcode" field.'
     )
+
+
+def test_live_account_option_and_labeled_value_need_exact_authenticated_evidence():
+    option = {
+        "fieldName": "from_account",
+        "type": "select-one",
+        "options": [{"value": "own-42", "label": "My account"}],
+    }
+    account = {"fieldName": "own_account_number", "type": "text"}
+    observation = {
+        "url": "https://bank.test/#/transfers",
+        "fields": [option, account],
+        "controls": [],
+    }
+    assert crawl_workflows._action_allowed(
+        {"action": "select", "index": 0, "value": "own-42"},
+        observation,
+        payment_workflow=True,
+        site_actor_id=7,
+    ) == (True, "")
+    assert not crawl_workflows._action_allowed(
+        {"action": "select", "index": 0, "value": "invented"},
+        observation,
+        payment_workflow=True,
+        site_actor_id=7,
+    )[0]
+    assert crawl_workflows._action_allowed(
+        {"action": "select", "index": 0, "value": "own-42"},
+        observation,
+        payment_workflow=True,
+    )[0]
+
+    evidence = [
+        {
+            "source_url": "https://bank.test/#/accounts",
+            "label": "Own account number",
+            "value": "12345678",
+            "actor_id": 7,
+        }
+    ]
+    assert crawl_workflows._action_allowed(
+        {"action": "fill", "index": 1, "value": "12345678"},
+        observation,
+        payment_workflow=True,
+        site_actor_id=7,
+        site_values=evidence,
+    ) == (True, "")
+    assert not crawl_workflows._action_allowed(
+        {"action": "fill", "index": 1, "value": "12345678"},
+        observation,
+        payment_workflow=True,
+        site_actor_id=8,
+        site_values=evidence,
+    )[0]
+    assert not crawl_workflows._action_allowed(
+        {"action": "fill", "index": 1, "value": "87654321"},
+        observation,
+        payment_workflow=True,
+        site_actor_id=7,
+        site_values=evidence,
+    )[0]
+
+
+def test_transfer_amount_cannot_use_generated_or_account_evidence():
+    observation = {
+        "url": "https://bank.test/#/transfers",
+        "fields": [{"fieldId": "transfer-own-amount", "type": "text"}],
+        "controls": [],
+    }
+    evidence = [
+        {
+            "source_url": "https://bank.test/#/accounts",
+            "label": "Own account number",
+            "value": "12345678",
+            "actor_id": 7,
+        }
+    ]
+    for value in ("50", "12345678"):
+        assert crawl_workflows._action_allowed(
+            {"action": "fill", "index": 0, "value": value},
+            observation,
+            generate_sample_data=True,
+            payment_workflow=True,
+            site_actor_id=7,
+            site_values=evidence,
+        ) == (False, "Payment or secret fields need user-supplied test data.")
+
+
+def test_existing_shipping_address_can_fill_matching_field_only():
+    evidence = [
+        {
+            "source_url": "https://shop.test/account/addresses",
+            "label": "Shipping address",
+            "value": "1 Example Street",
+            "actor_id": 7,
+        }
+    ]
+    observation = {
+        "url": "https://shop.test/checkout",
+        "fields": [
+            {"fieldName": "shippingAddress", "type": "text"},
+            {"fieldName": "billingAddress", "type": "text"},
+        ],
+        "controls": [],
+    }
+    assert crawl_workflows._action_allowed(
+        {"action": "fill", "index": 0, "value": "1 Example Street"},
+        observation,
+        site_values=evidence,
+        site_actor_id=7,
+    ) == (True, "")
+    assert not crawl_workflows._action_allowed(
+        {"action": "fill", "index": 1, "value": "1 Example Street"},
+        observation,
+        site_values=evidence,
+        site_actor_id=7,
+    )[0]
+
+
+def test_labeled_site_values_are_not_saved_in_workflow_notes(monkeypatch):
+    from aespa.services import crawler
+
+    recorded = []
+    monkeypatch.setattr(
+        crawler,
+        "_crawl_log",
+        lambda _run_id, _phase, _status, _message, **kwargs: recorded.append(
+            kwargs["data"]["note"]
+        ),
+    )
+    workflow = {
+        "name": "Transfer",
+        "goal": "Open transfer",
+        "reason": "Found in crawl",
+        "start_url": "https://bank.test/#/transfers",
+        "_site_actor_id": 7,
+        "_site_values": [
+            {
+                "source_url": "https://bank.test/#/accounts",
+                "label": "Own account number",
+                "value": "12345678",
+                "actor_id": 7,
+            }
+        ],
+    }
+    crawl_workflows._record_note(1, workflow, "not_reached", [], "Needs amount")
+    assert "12345678" not in json.dumps(recorded)
+    assert "_site_values" not in recorded[0]
+
+
+def test_labeled_account_values_are_read_from_live_dom_pairs(monkeypatch):
+    class Page:
+        url = "https://bank.test/#/accounts"
+
+        async def evaluate(self, _script):
+            return [
+                {"label": "Own account number", "value": "12345678"},
+                {"label": "Shipping address", "value": "1 Example Street"},
+                {"label": "One-time code", "value": "123456"},
+                {"label": "Card number", "value": "4111111111111111"},
+            ]
+
+    values = asyncio.run(crawl_workflows._collect_labeled_site_values(Page()))
+    assert values == [
+        {
+            "source_url": "https://bank.test/#/accounts",
+            "label": "Own account number",
+            "value": "12345678",
+        },
+        {
+            "source_url": "https://bank.test/#/accounts",
+            "label": "Shipping address",
+            "value": "1 Example Street",
+        },
+    ]
+
+
+def test_account_evidence_value_is_not_sent_in_workflow_prompt(monkeypatch):
+    prompts = []
+
+    async def completion(_config, prompt):
+        prompts.append(prompt)
+        return '{"action":"stop"}'
+
+    monkeypatch.setattr(crawl_workflows.llm_svc, "plain_completion", completion)
+    workflow = {
+        "name": "Transfer",
+        "goal": "Open transfer",
+        "_site_values": [
+            {
+                "source_url": "https://bank.test/#/accounts",
+                "label": "Own account number",
+                "value": "12345678",
+                "actor_id": 7,
+            }
+        ],
+    }
+    asyncio.run(
+        crawl_workflows._decide_action(
+            object(),
+            workflow,
+            {
+                "fields": [{"_current_value": "12345678"}],
+                "_hidden_amounts": [{"name": "order_total", "value": "12345678"}],
+            },
+            [],
+        )
+    )
+    assert "Own account number" in prompts[0]
+    assert "12345678" not in prompts[0]
+
+
+def test_labeled_site_value_index_resolves_to_exact_value(monkeypatch):
+    async def decision(*_args):
+        return {"action": "fill", "index": 0, "site_value_index": 0}
+
+    monkeypatch.setattr(crawl_workflows, "_decide_action", decision)
+    workflow = {
+        "name": "Transfer",
+        "goal": "Open transfer",
+        "_site_actor_id": 7,
+        "_site_values": [
+            {
+                "source_url": "https://bank.test/#/accounts",
+                "label": "Own account number",
+                "value": "12345678",
+                "actor_id": 7,
+            }
+        ],
+    }
+    observation = {
+        "url": "https://bank.test/#/transfers",
+        "fields": [{"fieldName": "own_account_number", "type": "text"}],
+        "controls": [],
+    }
+    result = asyncio.run(
+        crawl_workflows._decide_with_corrections(object(), workflow, observation, [])
+    )
+    assert result["value"] == "12345678"
+
+
+def test_form_value_sources_are_explicit_and_actor_bound():
+    field = {"fieldName": "billing_address"}
+    evidence = [
+        {
+            "source_url": "https://shop.test/profile",
+            "label": "Billing address",
+            "value": "1 Test Lane",
+            "actor_id": 7,
+        }
+    ]
+    decision = {"action": "fill", "value": "1 Test Lane"}
+    assert (
+        crawl_workflows._value_source(
+            decision, field, "", site_values=evidence, site_actor_id=7
+        )
+        == "site_value"
+    )
+    assert (
+        crawl_workflows._value_source(
+            decision, field, "", site_values=evidence, site_actor_id=8
+        )
+        == "generated"
+    )
+    assert crawl_workflows._value_source(decision, field, "1 Test Lane") == "user"
+    option = {"fieldName": "from_account", "options": [{"value": "own-1"}]}
+    assert (
+        crawl_workflows._value_source(
+            {"action": "select", "value": "own-1"}, option, ""
+        )
+        == "site_option"
+    )
+
+
+def test_stopping_retry_before_it_starts_settles_its_status(monkeypatch):
+    async def retry(*_args, **_kwargs):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(crawl_workflows, "_run_workflow_retry", retry)
+    note = {
+        "id": 991,
+        "name": "Account form",
+        "goal": "Open account form",
+        "start_url": "https://bank.test/account",
+    }
+
+    async def run():
+        crawl_workflows.start_workflow_retry(991, note, "")
+        crawl_workflows.request_retry_stop(991)
+        await asyncio.gather(
+            crawl_workflows._retry_tasks[(991, 991)], return_exceptions=True
+        )
+        await asyncio.sleep(0)
+        assert (
+            crawl_workflows.workflow_retry_status(991)["retries"][0]["status"]
+            == "stopped"
+        )
+        await crawl_workflows.stop_retries_and_wait(991)
+        assert crawl_workflows.workflow_retry_status(991)["retries"] == []
+
+    asyncio.run(run())
+
+
+def test_reached_page_keeps_exact_site_fill_in_local_replay(
+    isolated_db_engine, monkeypatch
+):
+    from aespa.services import crawler
+
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Bank", base_url="https://bank.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(site_id=site.id, name="Transfer test")
+        session.add(run)
+        session.commit()
+        run_id = run.id
+
+    class Page:
+        url = "https://bank.test/#/transfers/complete"
+
+        async def title(self):
+            return "Transfer complete"
+
+        async def evaluate(self, script):
+            return [] if "a[href]" in script else "Transfer complete"
+
+    async def snapshot(*_args, **_kwargs):
+        return {"key": "transfer-complete"}
+
+    async def no_intelligence(**_kwargs):
+        return None
+
+    async def analyze(*_args):
+        return "Transfer complete", None, {}
+
+    monkeypatch.setattr(crawler, "_interactive_state_snapshot", snapshot)
+    monkeypatch.setattr(crawler, "_record_page_intelligence", no_intelligence)
+    monkeypatch.setattr(crawler, "_save_credential_view", lambda *_args: None)
+    monkeypatch.setattr(crawler, "_update_accessible_by", lambda *_args: None)
+    monkeypatch.setattr(crawler, "_save_link", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(crawl_workflows.llm_svc, "analyse_page", analyze)
+    step = {"kind": "fill", "selector": '[name="fromAccount"]', "value": "12345678"}
+    shared = crawler._CrawlShared(
+        crawled_norms={}, state_keys={}, pages_done=0, run_id=run_id
+    )
+    page_id = asyncio.run(
+        crawl_workflows._save_discovered_page(
+            run_id=run_id,
+            page=Page(),
+            root_url="https://bank.test/#/transfers",
+            steps=[step],
+            parent_id=None,
+            credential_id=None,
+            username="test",
+            shared=shared,
+            max_pages=10,
+            llm_cfg=object(),
+        )
+    )
+    with Session(isolated_db_engine) as session:
+        saved = session.get(CrawledPage, page_id)
+        assert json.loads(saved.replay_steps_json)["steps"] == [step]
+        assert session.get(TestRun, run_id).pages_discovered == 1
+
+
+def test_clear_rejects_an_active_workflow_retry(
+    isolated_db_engine, isolated_client, monkeypatch
+):
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Bank", base_url="https://bank.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(site_id=site.id, name="Transfer test")
+        session.add(run)
+        session.commit()
+        run_id = run.id
+
+    monkeypatch.setattr(
+        crawl_workflows,
+        "workflow_retry_status",
+        lambda _run_id: {"status": "running", "retries": []},
+    )
+    response = isolated_client.post(f"/api/test-runs/{run_id}/crawl/clear")
+    assert response.status_code == 409
+    with Session(isolated_db_engine) as session:
+        assert session.get(TestRun, run_id) is not None
+
+
+def test_delete_waits_for_workflow_retries(
+    isolated_db_engine, isolated_client, monkeypatch
+):
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Bank", base_url="https://bank.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(site_id=site.id, name="Transfer test")
+        session.add(run)
+        session.commit()
+        run_id = run.id
+
+    waited = []
+
+    async def stop_retries(_run_id):
+        with Session(isolated_db_engine) as session:
+            waited.append((_run_id, session.get(TestRun, _run_id) is not None))
+
+    monkeypatch.setattr(crawl_workflows, "stop_retries_and_wait", stop_retries)
+    response = isolated_client.delete(f"/api/test-runs/{run_id}")
+    assert response.status_code == 204
+    assert waited == [(run_id, True)]
+    with Session(isolated_db_engine) as session:
+        assert session.get(TestRun, run_id) is None
+
+
+def test_transfer_submit_requires_user_supplied_amount_even_when_prefilled():
+    url = "https://bank.test/#/transfers"
+    observation = {
+        "url": url,
+        "controls": [{"name": "Transfer", "kind": "button", "submits": True}],
+        "fields": [
+            {
+                "fieldId": "transfer-own-from",
+                "label": "From Account",
+                "type": "select-one",
+                "selected_value": "own-1",
+                "options": [{"value": "own-1", "label": "My account"}],
+            },
+            {
+                "fieldId": "transfer-own-amount",
+                "type": "number",
+                "has_value": True,
+                "_current_value": "5.00",
+            },
+        ],
+    }
+    decision = {"action": "click", "index": 0}
+    allowed, reason = crawl_workflows._action_allowed(
+        decision, observation, payment_workflow=True
+    )
+    assert not allowed
+    assert '"transfer-own-amount"' in reason
+    assert crawl_workflows._action_allowed(
+        decision,
+        observation,
+        "Use 5.00 for this transfer",
+        payment_workflow=True,
+        prior_actions={(url, "transfer-own-amount", "fill", "5.00")},
+    ) == (True, "")
+
+    observation["fields"][1]["_current_value"] = "50.00"
+    assert not crawl_workflows._action_allowed(
+        decision,
+        observation,
+        "Use 5.00 for this transfer",
+        payment_workflow=True,
+        prior_actions={(url, "transfer-own-amount", "fill", "5.00")},
+    )[0]
+
+
+def test_js_confirm_payment_checks_the_amount():
+    observation = {
+        "url": "https://example.test/checkout",
+        "controls": [{"name": "Confirm", "kind": "button", "submits": False}],
+        "fields": [
+            {
+                "fieldId": "amount",
+                "type": "number",
+                "has_value": True,
+                "_current_value": "50",
+            }
+        ],
+    }
+    assert not crawl_workflows._action_allowed(
+        {"action": "click", "index": 0}, observation, payment_workflow=True
+    )[0]
+    observation["fields"][0]["fieldId"] = "order_total"
+    assert not crawl_workflows._action_allowed(
+        {"action": "click", "index": 0}, observation, payment_workflow=True
+    )[0]
+
+
+def test_js_confirm_payment_checks_a_hidden_total():
+    observation = {
+        "url": "https://example.test/checkout",
+        "controls": [{"name": "Confirm", "kind": "button", "submits": False}],
+        "fields": [],
+        "_hidden_amounts": [{"name": "orderTotal", "value": "50"}],
+    }
+    decision = {"action": "click", "index": 0}
+    assert not crawl_workflows._action_allowed(
+        decision, observation, payment_workflow=True
+    )[0]
+    assert crawl_workflows._action_allowed(
+        decision, observation, "Use 50 for this order", payment_workflow=True
+    ) == (True, "")
+
+
+def test_payment_amount_must_match_a_complete_supplied_value():
+    observation = {
+        "url": "https://example.test/checkout",
+        "controls": [],
+        "fields": [{"fieldId": "amount", "type": "number"}],
+    }
+    assert not crawl_workflows._action_allowed(
+        {"action": "fill", "index": 0, "value": "5"},
+        observation,
+        "Use 50 for this transfer",
+        payment_workflow=True,
+    )[0]
+
+
+def test_counterparty_account_text_cannot_fill_own_account_field():
+    field = {"fieldName": "fromAccount", "type": "text"}
+    counterparty = {
+        "source_url": "https://bank.test/#/transactions/123",
+        "label": "Counterparty account",
+        "value": "98765432",
+        "actor_id": 7,
+    }
+    own = {
+        "source_url": "https://bank.test/#/accounts",
+        "label": "Own account number",
+        "value": "12345678",
+        "actor_id": 7,
+    }
+    assert not crawl_workflows._site_evidence_matches(
+        field, "98765432", [counterparty], 7
+    )
+    assert crawl_workflows._site_evidence_matches(field, "12345678", [own], 7)
+
+
+def test_payment_tab_can_open_before_form_values_are_supplied():
+    observation = {
+        "url": "https://bank.test/#/transfers",
+        "controls": [{"name": "Pay Someone", "kind": "button", "submits": False}],
+        "fields": [],
+    }
+    assert crawl_workflows._action_allowed(
+        {"action": "click", "index": 0}, observation, payment_workflow=True
+    ) == (True, "")
+
+
+def test_site_value_lookup_uses_relevant_pages_accessible_to_same_account():
+    pages = {
+        "summary": SimpleNamespace(
+            url="https://example.test/dashboard/overview",
+            title="Your savings and checking accounts",
+            page_text="Savings balance and account number",
+            accessible_by="[7]",
+            replay_credential_id=None,
+            depth=2,
+        ),
+        "other": SimpleNamespace(
+            url="https://example.test/customer/details",
+            title="Your savings account",
+            page_text="Account number",
+            accessible_by="[8]",
+            replay_credential_id=None,
+            depth=1,
+        ),
+        "help": SimpleNamespace(
+            url="https://example.test/help",
+            title="Help",
+            page_text="Contact support",
+            accessible_by="[7]",
+            replay_credential_id=None,
+            depth=1,
+        ),
+    }
+    selected = crawl_workflows._site_value_pages(
+        pages,
+        {"name": "Move money between savings accounts", "goal": "Transfer savings"},
+        7,
+        "example.test",
+    )
+    assert [page.url for page in selected] == [
+        "https://example.test/dashboard/overview",
+        "https://example.test/help",
+    ]

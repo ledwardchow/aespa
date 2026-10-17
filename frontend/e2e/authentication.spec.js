@@ -13,7 +13,7 @@ test("key sign-in remembers the browser and preserves the requested page", async
     authenticated = true;
     return route.fulfill({ json: { authenticated: true, csrf_token: "csrf" } });
   });
-  await page.goto("/#/settings/authentication");
+  await page.goto("/#/scan-policy/global/authentication");
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
   await page.getByLabel("Authentication key", { exact: true }).fill("wrong-key");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
@@ -23,7 +23,7 @@ test("key sign-in remembers the browser and preserves the requested page", async
   await expect(
     page.getByRole("heading", { name: "Authentication key", exact: true }),
   ).toBeVisible();
-  await expect(page).toHaveURL(/#\/settings\/authentication$/);
+  await expect(page).toHaveURL(/#\/scan-policy\/global\/authentication$/);
   await page.reload();
   await expect(
     page.getByRole("heading", { name: "Authentication key", exact: true }),
@@ -38,7 +38,7 @@ test("Settings only requests the key when Show is pressed", async ({ page }) => 
     requests += 1;
     return route.fulfill({ json: { key: "management-key" } });
   });
-  await page.goto("/#/settings/authentication");
+  await page.goto("/#/scan-policy/global/authentication");
   const field = page.getByLabel("Authentication key", { exact: true });
   await expect(field).toHaveAttribute("type", "password");
   expect(requests).toBe(0);
@@ -58,10 +58,10 @@ test("a launcher link exchanges its secret and cleans the address", async ({ pag
     expect(route.request().postDataJSON()).toEqual({ token: "single-use-secret" });
     return route.fulfill({ json: { authenticated: true, csrf_token: "csrf" } });
   });
-  await page.goto("/#aespa-login=single-use-secret&next=%23%2Fsettings%2Fauthentication");
+  await page.goto("/#aespa-login=single-use-secret&next=%23%2Fscan-policy%2Fglobal%2Fauthentication");
   await expect(
     page.getByRole("heading", { name: "Authentication key", exact: true }),
   ).toBeVisible();
-  await expect(page).toHaveURL(/#\/settings\/authentication$/);
+  await expect(page).toHaveURL(/#\/scan-policy\/global\/authentication$/);
   expect(exchanges).toBe(1);
 });
