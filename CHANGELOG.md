@@ -6,7 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **Site settings export**: The Export button lets you download a site's settings and saved accounts without its test runs or results, or download everything. Importing a settings-only file creates a site ready for new runs.
+- **Site settings export**: The Export button lets you download a site's settings and saved accounts without its test runs or results, or download everything. Importing a settings-only file creates a site ready for new runs, including when saved workflows have blank instructions.
 
 - **Local authentication**: AESPA now requires an authentication key for its interface and management API. The startup screen tells you to press C to copy the key. C works in every console view, and the bottom legend confirms when the key has been copied. Server Settings/Authentication shows the key and lets you copy or rotate it. Rotation asks for confirmation and saves the new key. Browser sessions need the new key on their next request. Keys supplied through `AESPA_AUTH_KEY_FILE` must be changed in that file. The legend also lists the tilde/backtick browser shortcut. Browsers remember sign-in for 30 days, and the Authentication Key tab under Settings > Global shows or copies the key in the same layout as other Global settings. Desktop apps sign in automatically. The API extension keeps its existing tokens and can use an optional separate port outside Docker. Docker keeps the integration API on its normal port and publishes the management port on localhost by default.
 

@@ -44,3 +44,4 @@ node_modules/
 
 # Local implementation plans (kept on disk, not committed)
 /docs/implementation-plans/
+/.tmp
