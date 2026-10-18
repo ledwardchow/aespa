@@ -39,7 +39,7 @@ import {
   readAcknowledgedWorkflowIds,
   visibleWorkflowInputNotes,
 } from "./workflowAcknowledgement.js";
-import { retriesByNote } from "./workflowRetries.js";
+import { crawlerAgentForRetries, mergeRetries, retriesByNote } from "./workflowRetries.js";
 import { WebRunSastLeadsTab } from "../../shared/leads/RunLeadsTab.jsx";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
@@ -103,7 +103,7 @@ function TestRunContent({
       webRunsApi.getWorkflowRetryStatus(runId),
     ]);
     setWorkflowNotes(result?.notes || []);
-    setWorkflowRetries(retriesByNote(retry));
+    setWorkflowRetries((current) => mergeRetries(current, retriesByNote(retry)));
   }, [runId]);
   usePolling(loadWorkflowNotes, { intervalMs: 5000 });
   const waitingWorkflows = visibleWorkflowInputNotes(
@@ -167,8 +167,16 @@ function TestRunContent({
   });
 
   const crawlerAgent = agents.find((agent) => agent.id === "crawler");
-  const crawlerTask = crawlerAgent ? agentCurrentTask(crawlerAgent) : null;
-  const crawlerActive = isCrawlerAgentActive(crawlerAgent, crawlStopRequested);
+  const displayedCrawlerAgent = crawlerAgentForRetries(crawlerAgent, workflowRetries);
+  const displayedAgents =
+    displayedCrawlerAgent === crawlerAgent
+      ? agents
+      : crawlerAgent
+        ? agents.map((agent) => (agent.id === "crawler" ? displayedCrawlerAgent : agent))
+        : [...agents, displayedCrawlerAgent];
+  const crawlerTask = displayedCrawlerAgent ? agentCurrentTask(displayedCrawlerAgent) : null;
+  const mainCrawlerActive = isCrawlerAgentActive(crawlerAgent, crawlStopRequested);
+  const crawlerActive = isCrawlerAgentActive(displayedCrawlerAgent, crawlStopRequested);
 
   // Initial load
   const loadAll = useCallback(async () => {
@@ -245,7 +253,7 @@ function TestRunContent({
   // Poll run metadata (including per_user_progress current URLs) while crawling
   // or while the backend is unwinding after a stop request.
   useEffect(() => {
-    if (!crawlerActive) return;
+    if (!mainCrawlerActive) return;
     const iv = setInterval(() => {
       Promise.all([webRunsApi.getRun(runId), webRunsApi.getCrawlStatus(runId).catch(() => null)])
         .then(([r, crawlStatus]) => {
@@ -281,7 +289,7 @@ function TestRunContent({
         });
     }, 2000);
     return () => clearInterval(iv);
-  }, [crawlerActive, runId, crawlStopRequested, setAgents]);
+  }, [mainCrawlerActive, runId, crawlStopRequested, setAgents]);
 
   // Poll thinking-scan status independently.
   useEffect(() => {
@@ -468,7 +476,7 @@ function TestRunContent({
     !isDynamicScanActive(effectiveThinkingStatus);
   const canClearCrawl =
     run && !crawlStopRequested && ["stopped", "failed", "complete"].includes(run.status);
-  const canStop = isCrawlerAgentActive(crawlerAgent) && !crawlStopRequested;
+  const canStop = mainCrawlerActive && !crawlStopRequested;
   const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
   const canStartAnyScan =
     run?.status !== "running" &&
@@ -707,14 +715,14 @@ function TestRunContent({
             <WebRunCrawlProgress
               run={run}
               crawlerTask={crawlerTask}
-              crawlerActive={crawlerActive}
+              crawlerActive={mainCrawlerActive}
             />
           </>
         )}
 
         <WebRunSitemapGraph
           site={sitemapSite}
-          crawlerActive={crawlerActive}
+          crawlerActive={mainCrawlerActive}
           runId={runId}
           run={run}
           activityLog={activityLog}
@@ -786,7 +794,7 @@ function TestRunContent({
             run={run}
             thinkingStatus={thinkingStatus}
             activityLog={activityLog}
-            agents={agents}
+            agents={displayedAgents}
             sitePlanData={sitePlanData}
             onClearLog={async () => {
               await webRunsApi.clearScanLog(runId);

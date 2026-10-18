@@ -22,6 +22,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Workflow activity**: Continuing a workflow now shows the Crawler as active until all running workflows finish. The Activity Log shows each retry's browser steps and whether it reached the workflow, needs more test data, failed, or was stopped.
+
 - **Crawl Data tab**: The Intelligence tab on a web run's Attack Surface page is now called Crawl Data, and its panel heading changed from Target Intelligence to Crawl Data.
 
 - **Site map side panel order**: The Display section now appears at the top of the site map side panel, above Users.

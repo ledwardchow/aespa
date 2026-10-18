@@ -363,6 +363,7 @@ def test_shipping_workflow_skips_shipped_example_for_processing_order(
         "start_url": shipped_url,
         "example_url": shipped_url,
         "destructive": False,
+        "retry_of": 123,
     }
     asyncio.run(
         crawl_workflows.explore_after_crawl(
@@ -383,6 +384,20 @@ def test_shipping_workflow_skips_shipped_example_for_processing_order(
     assert decisions == [processing_url]
     assert workflow["excluded_target_urls"] == [shipped_url]
     assert notes == [(processing_url, "not_reached")]
+    with Session(isolated_db_engine) as session:
+        steps = list(
+            session.exec(
+                select(ScanLog).where(
+                    ScanLog.test_run_id == run_id,
+                    ScanLog.phase == "crawl_workflow_retry",
+                )
+            )
+        )
+    assert all(entry.run_kind == "web" for entry in steps)
+    assert [entry.message for entry in steps][-2:] == [
+        "Mark an order as shipped: Checking the page",
+        "Mark an order as shipped: Choosing the next step",
+    ]
 
 
 def test_parallel_workflows_claim_different_items(tmp_path, monkeypatch):
@@ -2141,6 +2156,20 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
     assert status["saved_to_site"] is False
     with Session(isolated_db_engine) as session:
         assert sites.workflow_data_for_site(session.get(Site, site_id)) == []
+        retry_log = list(
+            session.exec(
+                select(ScanLog).where(
+                    ScanLog.test_run_id == run_id,
+                    ScanLog.phase == "crawl_workflow_retry",
+                )
+            )
+        )
+    assert [(entry.status, entry.run_kind) for entry in retry_log] == [
+        ("start", "web"),
+        ("complete", "web"),
+    ]
+    assert "Needs more test data" in retry_log[-1].message
+    assert "Use 1 Example Street" not in retry_log[-1].message
 
     async def failed_explore(_run_id, **_kwargs):
         raise RuntimeError("Browser closed")
@@ -2151,6 +2180,17 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
         crawl_workflows._run_workflow_retry(run_id, workflow, save_to_site=True)
     )
     assert _retry_state(run_id, 123)["status"] == "error"
+    with Session(isolated_db_engine) as session:
+        retry_log = list(
+            session.exec(
+                select(ScanLog).where(
+                    ScanLog.test_run_id == run_id,
+                    ScanLog.phase == "crawl_workflow_retry",
+                )
+            )
+        )
+    assert retry_log[-1].status == "error"
+    assert retry_log[-1].run_kind == "web"
     with Session(isolated_db_engine) as session:
         assert sites.workflow_data_for_site(session.get(Site, site_id)) == [
             {
@@ -3264,10 +3304,20 @@ def test_form_value_sources_are_explicit_and_actor_bound():
 
 
 def test_stopping_retry_before_it_starts_settles_its_status(monkeypatch):
+    from aespa.services import crawler
+
     async def retry(*_args, **_kwargs):
         await asyncio.sleep(60)
 
+    events = []
     monkeypatch.setattr(crawl_workflows, "_run_workflow_retry", retry)
+    monkeypatch.setattr(
+        crawler,
+        "_crawl_log",
+        lambda _run_id, phase, status, message, **_kwargs: events.append(
+            (phase, status, message)
+        ),
+    )
     note = {
         "id": 991,
         "name": "Account form",
@@ -3290,6 +3340,9 @@ def test_stopping_retry_before_it_starts_settles_its_status(monkeypatch):
         assert crawl_workflows.workflow_retry_status(991)["retries"] == []
 
     asyncio.run(run())
+    assert events == [
+        ("crawl_workflow_retry", "info", "Stopped continuing Account form")
+    ]
 
 
 def test_reached_page_keeps_exact_site_fill_in_local_replay(

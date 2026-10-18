@@ -235,6 +235,7 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
   };
   const agentCurrentTask = (agent) => {
     agent = normalizeAgentForRun(agent);
+    if (agent?.id === "crawler" && agent.workflowRetryActive) return agent.currentTask;
     const crawlEvents = agentCrawlEvents(agent);
     const explicitCrawlerStage =
       agent?.id === "crawler" &&

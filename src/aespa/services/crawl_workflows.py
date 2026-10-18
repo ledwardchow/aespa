@@ -29,6 +29,7 @@ from aespa.models import (
     TestRun,
 )
 from aespa.schemas import SiteWorkflowInput
+from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import traffic as traffic_svc
 from aespa.services import workflow_targets
@@ -1693,6 +1694,9 @@ async def explore_after_crawl(
         return
     if selected_workflows is None and run_id in _stop_requested:
         return
+    is_retry = bool(selected_workflows) and all(
+        workflow.get("retry_of") is not None for workflow in selected_workflows
+    )
 
     def report(message: str, **changes) -> None:
         if progress is not None:
@@ -1916,7 +1920,7 @@ async def explore_after_crawl(
             if changes.get("stage") != "finished":
                 _crawl_log(
                     run_id,
-                    "crawl_workflow",
+                    "crawl_workflow_retry" if is_retry else "crawl_workflow",
                     "info",
                     label,
                     page_url=url,
@@ -2389,6 +2393,15 @@ def workflow_retry_status(run_id: int) -> dict:
     return {"status": "running" if running else "idle", "retries": retries}
 
 
+def _retry_result_message(status: str) -> str:
+    return {
+        "crawled": "Reached the workflow",
+        "needs_input": "Needs more test data",
+        "not_attempted": "Could not try this workflow",
+        "not_reached": "Could not reach the workflow",
+    }.get(status, "Finished checking the workflow")
+
+
 def start_workflow_retry(
     run_id: int,
     note: dict,
@@ -2448,12 +2461,26 @@ def start_workflow_retry(
     _retry_tasks[key] = task
 
     def finished(done: asyncio.Task) -> None:
-        if done.cancelled() and key in _retry_results:
+        if (
+            done.cancelled()
+            and key in _retry_results
+            and _retry_results[key].get("status") == "running"
+        ):
             _retry_results[key] = {
                 **_retry_results[key],
                 "status": "stopped",
                 "message": "Workflow stopped",
             }
+            from aespa.services import crawler
+
+            with events_svc.run_kind_scope("web"):
+                crawler._crawl_log(
+                    run_id,
+                    "crawl_workflow_retry",
+                    "info",
+                    f"Stopped continuing {workflow['name']}",
+                    data={"note_id": note["id"]},
+                )
         if _retry_tasks.get(key) is done:
             _retry_tasks.pop(key, None)
         _retry_stop_requested.discard(key)
@@ -2463,6 +2490,15 @@ def start_workflow_retry(
 
 
 async def _run_workflow_retry(
+    run_id: int, workflow: dict, *, save_to_site: bool = False
+) -> None:
+    # Retry tasks run independently of the main crawl and need their own
+    # namespace for persisted activity when API and web run IDs overlap.
+    with events_svc.run_kind_scope("web"):
+        await _run_workflow_retry_scoped(run_id, workflow, save_to_site=save_to_site)
+
+
+async def _run_workflow_retry_scoped(
     run_id: int, workflow: dict, *, save_to_site: bool = False
 ) -> None:
     from aespa.services import crawler
@@ -2578,6 +2614,13 @@ async def _run_workflow_retry(
             "status": "stopped",
             "message": "Workflow stopped",
         }
+        crawler._crawl_log(
+            run_id,
+            "crawl_workflow_retry",
+            "info",
+            f"Stopped continuing {workflow['name']}",
+            data={"note_id": note_id},
+        )
         raise
     except Exception as exc:
         log.warning(
@@ -2617,8 +2660,12 @@ async def _run_workflow_retry(
             run_id,
             "crawl_workflow_retry",
             "complete",
-            f"Finished continuing {workflow['name']}",
-            data={"note_id": note_id},
+            f"Finished continuing {workflow['name']}: "
+            f"{_retry_result_message(_retry_results[key]['result_status'])}",
+            data={
+                "note_id": note_id,
+                "result_status": _retry_results[key]["result_status"],
+            },
         )
     finally:
         if not any(
