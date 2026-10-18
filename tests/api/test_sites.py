@@ -623,6 +623,40 @@ def test_delete_credential_wrong_site(client):
 
 
 # --- Merged from test_sites_export_import.py ---
+
+
+@pytest.mark.parametrize("instructions", ["", "   ", None])
+def test_import_config_only_with_unfilled_workflow_instructions(client, instructions):
+    workflow = {
+        "name": "Checkout",
+        "goal": "Open checkout form",
+        "start_url": "https://juice.local/cart",
+    }
+    if instructions is not None:
+        workflow["instructions"] = instructions
+    bundle = {
+        "export_version": 1,
+        "site": {
+            "name": "Imported config",
+            "base_url": "https://juice.local",
+            "workflow_data_json": json.dumps([workflow]),
+        },
+        "credentials": [],
+        "test_runs": [],
+    }
+
+    response = client.post("/api/sites/import", json=bundle)
+    assert response.status_code == 201
+    imported = response.json()
+    assert imported["workflow_data"] == [{**workflow, "instructions": ""}]
+    detail = client.get(f"/api/sites/{imported['id']}")
+    assert detail.status_code == 200
+    assert detail.json() == imported
+    exported = client.get(f"/api/sites/{imported['id']}/export")
+    assert exported.status_code == 200
+    assert json.loads(exported.json()["site"]["workflow_data_json"]) == [workflow]
+
+
 @pytest.fixture
 def session(db_session):
     return db_session
