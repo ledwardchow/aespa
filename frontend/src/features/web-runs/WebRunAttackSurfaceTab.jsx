@@ -102,7 +102,7 @@ export function WebRunAttackSurfaceTab({
           }
           onClick={() => setSubTab("intelligence")}
         >
-          Intelligence
+          Crawl Data
           {intelligenceTotal > 0 ? (
             <span className="traffic-count">{intelligenceTotal}</span>
           ) : null}

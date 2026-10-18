@@ -20,6 +20,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Crawl Data tab**: The Intelligence tab on a web run's Attack Surface page is now called Crawl Data, and its panel heading changed from Target Intelligence to Crawl Data.
+
+- **Site map side panel order**: The Display section now appears at the top of the site map side panel, above Users.
+
 - **Saved site workflows**: Workflows found during a crawl now appear in the site's Workflows list for future runs, including workflows that need input. Saving an older crawl to the site also adds its workflows. Sample data is saved only when you choose to save it after a successful retry. If the site already has 20 workflows, the retry still finishes and shows that its sample data could not be saved.
 
 - **Site form tabs**: Adding or editing a site now uses Site, Credentials, Workflows, and Instructions tabs instead of one long page, with Save always visible at the bottom. Accounts are listed beside the selected account's settings, and each login field takes one row. Login methods use plain names, such as "Form fill + TOTP code" and "Log in myself in a browser". The per-account login page is under **Override login page URL**. The Workflows tab appears once a crawl has saved a workflow for the site. If a value is missing on another tab when you save, the form opens that tab and marks it.

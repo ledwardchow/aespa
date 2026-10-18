@@ -176,12 +176,6 @@ export function WebRunSitemapGraph({
     <div className="graph-layout" style={{ display: active ? "flex" : "none" }}>
       <div className="sitemap-graph-main">
         <SitemapSidePanel>
-          <WebRunUserCrawlProgress
-            run={run}
-            crawlerActive={crawlerActive}
-            activityLog={activityLog}
-          />
-          <RouteGroupsSummary groups={run?.route_groups} onSelectExample={selectRouteExample} />
           <SidePanelSection
             id="display"
             title="Display"
@@ -232,6 +226,12 @@ export function WebRunSitemapGraph({
               </label>
             </div>
           </SidePanelSection>
+          <WebRunUserCrawlProgress
+            run={run}
+            crawlerActive={crawlerActive}
+            activityLog={activityLog}
+          />
+          <RouteGroupsSummary groups={run?.route_groups} onSelectExample={selectRouteExample} />
         </SitemapSidePanel>
         <div className="graph-canvas-wrap">
           <div className="sitemap-search">
