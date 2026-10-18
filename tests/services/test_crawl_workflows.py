@@ -2166,7 +2166,7 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
         )
     assert [(entry.status, entry.run_kind) for entry in retry_log] == [
         ("start", "web"),
-        ("complete", "web"),
+        ("warning", "web"),
     ]
     assert "Needs more test data" in retry_log[-1].message
     assert "Use 1 Example Street" not in retry_log[-1].message

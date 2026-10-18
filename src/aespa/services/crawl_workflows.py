@@ -2659,7 +2659,12 @@ async def _run_workflow_retry_scoped(
         crawler._crawl_log(
             run_id,
             "crawl_workflow_retry",
-            "complete",
+            {
+                "crawled": "complete",
+                "needs_input": "warning",
+                "not_attempted": "warning",
+                "not_reached": "error",
+            }.get(_retry_results[key]["result_status"], "info"),
             f"Finished continuing {workflow['name']}: "
             f"{_retry_result_message(_retry_results[key]['result_status'])}",
             data={
