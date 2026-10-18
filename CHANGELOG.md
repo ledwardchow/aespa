@@ -6,7 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **OpenAI refusal recovery**: Global settings now has an option to retry a web or API scan step once with shorter instructions when ChatGPT-plan or Codex blocks it for cybersecurity risk. The option starts off. The first request, target, tools, and scan limits stay the same, and a second refusal leaves the test unresolved.
+- **OpenAI refusal recovery**: Global settings now has an option to retry a web or API scan step once with shorter instructions when ChatGPT-plan or Codex blocks it for cybersecurity risk. The option starts off. The first request, target, tools, and scan limits stay the same. The activity log shows when the shorter retry starts, whether the provider accepts it, and whether a second refusal leaves the test unresolved.
 
 - **Site settings export**: The Export button lets you download a site's settings and saved accounts without its test runs or results, or download everything. Importing a settings-only file creates a site ready for new runs, including when saved workflows have blank instructions.
 

@@ -8277,6 +8277,12 @@ async def thinking_agentic_loop(
                 # A completed turn means we are past any earlier refusal.
                 consecutive_refusals = 0
                 network_attempt = 0
+                recovered_turn = bool(
+                    recovery_active
+                    and recovery_marker is not None
+                    and recovery_marker.get("attempt") == "sent"
+                    and recovery_marker.get("step") == tool_call_count + 1
+                )
                 if recovery_active and recovery_marker is not None:
                     recovery_marker["attempt"] = "completed"
             except Exception as exc:
@@ -8463,8 +8469,34 @@ async def thinking_agentic_loop(
                         continue
                     # Refused again (twice for the same request): skip this line of
                     # investigation and move on instead of failing the whole scan.
+                    scoped_retry_refused = bool(
+                        recovery_active
+                        and recovery_marker is not None
+                        and recovery_marker.get("attempt") == "sent"
+                        and recovery_marker.get("step") == tool_call_count + 1
+                    )
                     refusal_skips += 1
                     if refusal_skips > AGENTIC_MAX_REFUSAL_SKIPS:
+                        if scoped_retry_refused and emit_fn:
+                            try:
+                                emit_fn(
+                                    {
+                                        "type": "scanner_phase",
+                                        "phase": "llm_response",
+                                        "status": "error",
+                                        "message": (
+                                            f"Step {tool_call_count + 1}: shorter OpenAI retry "
+                                            "was refused. The scan has reached its refusal limit."
+                                        ),
+                                        "data": {
+                                            "step": tool_call_count + 1,
+                                            "refusal_recovery": "refused",
+                                            "refusal_skips": refusal_skips,
+                                        },
+                                    }
+                                )
+                            except Exception:
+                                pass
                         raise LLMRefusalError(
                             f"LLM provider refused the scan request at step "
                             f"{tool_call_count + 1} and did not recover after "
@@ -8497,13 +8529,22 @@ async def thinking_agentic_loop(
                                     "phase": "llm_response",
                                     "status": "warning",
                                     "message": (
-                                        f"Step {tool_call_count + 1}: provider refused this "
+                                        f"Step {tool_call_count + 1}: shorter OpenAI retry "
+                                        "was refused. Leaving this test unresolved and moving "
+                                        "to a different target."
+                                        if scoped_retry_refused
+                                        else f"Step {tool_call_count + 1}: provider refused this "
                                         "request twice — skipping it and moving to a "
                                         "different target."
                                     ),
                                     "data": {
                                         "step": tool_call_count + 1,
                                         "refusal_skips": refusal_skips,
+                                        **(
+                                            {"refusal_recovery": "refused"}
+                                            if scoped_retry_refused
+                                            else {}
+                                        ),
                                     },
                                 }
                             )
@@ -8550,6 +8591,8 @@ async def thinking_agentic_loop(
                 "configured_max_tokens": budget["configured_max_tokens"],
                 "effective_max_tokens": budget["effective_max_tokens"],
             }
+            if recovered_turn:
+                response_data["refusal_recovery"] = "accepted"
             if not tool_use_blocks:
                 response_data["no_tool_retry"] = no_tool_attempt
                 response_data["no_tool_retry_limit"] = 3
@@ -8558,14 +8601,23 @@ async def thinking_agentic_loop(
                 if tool_use_blocks:
                     action_label = ", ".join(b["name"] for b in tool_use_blocks)
                     response_status = "complete"
-                    response_message = f"Step {tool_call_count + 1}: LLM → {action_label} (stop: {stop_reason})"
+                    response_message = (
+                        f"Step {tool_call_count + 1}: shorter OpenAI retry accepted; "
+                        f"continuing with {action_label}."
+                        if recovered_turn
+                        else f"Step {tool_call_count + 1}: LLM → {action_label} (stop: {stop_reason})"
+                    )
                 else:
                     response_status = "retrying"
                     response_kind = (
                         "empty response" if no_usable_content else "text-only response"
                     )
                     response_message = (
-                        f"Step {tool_call_count + 1}: LLM returned {response_kind} "
+                        f"Step {tool_call_count + 1}: shorter OpenAI retry was accepted "
+                        f"but returned {response_kind} without a tool call; "
+                        f"asking again ({no_tool_attempt}/3)."
+                        if recovered_turn
+                        else f"Step {tool_call_count + 1}: LLM returned {response_kind} "
                         f"without a tool call (native stop: {stop_reason}); "
                         f"retrying {no_tool_attempt}/3"
                     )

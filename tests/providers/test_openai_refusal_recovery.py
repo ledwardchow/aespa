@@ -188,6 +188,7 @@ def test_scoped_retry_preserves_completed_tool_evidence(monkeypatch):
     seen = []
     saved = []
     completed = []
+    events = []
 
     async def fake_call(_config, system, messages, tools=None):
         seen.append((system, messages))
@@ -222,12 +223,19 @@ def test_scoped_retry_preserves_completed_tool_evidence(monkeypatch):
             refusal_recovery_prompt=prompt,
             on_recovery_checkpoint=checkpoint,
             on_checkpoint=completed_checkpoint,
+            emit_fn=events.append,
         )
     )
     assert summary == "complete"
     assert seen[0][0] == seen[1][0] == "original system"
     assert saved == ["web-test-lead-v1"]
     assert completed and all(attempt == "completed" for attempt in completed)
+    assert any("shorter instructions" in event.get("message", "") for event in events)
+    assert any(
+        event.get("data", {}).get("refusal_recovery") == "accepted"
+        and "continuing with done" in event.get("message", "")
+        for event in events
+    )
 
 
 def test_no_scoped_prompt_keeps_identical_retry(monkeypatch):
@@ -261,6 +269,48 @@ def test_no_scoped_prompt_keeps_identical_retry(monkeypatch):
     ]
 
 
+def test_accepted_scoped_retry_without_tool_reports_followup(monkeypatch):
+    config = LLMConfig(
+        provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048
+    )
+    prompt = RefusalRecoveryPrompt(
+        "scoped system", "scoped opening", "web-test-lead-v1"
+    )
+    calls = 0
+    events = []
+
+    async def fake_call(_config, _system, _messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ChatGPTCyberError()
+        if calls == 2:
+            text_block = {"type": "text", "text": "Need a tool next."}
+            return [text_block], "end_turn", [text_block]
+        return _done()
+
+    async def execute(_name, _args, _step):
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="original system",
+            initial_user_message="original opening",
+            tool_executor=execute,
+            refusal_recovery_prompt=prompt,
+            emit_fn=events.append,
+        )
+    )
+    assert summary == "complete"
+    assert any(
+        event.get("data", {}).get("refusal_recovery") == "accepted"
+        and "without a tool call" in event.get("message", "")
+        for event in events
+    )
+
+
 def test_scoped_second_refusal_skips_without_dropping_evidence(monkeypatch):
     config = LLMConfig(
         provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048
@@ -269,6 +319,7 @@ def test_scoped_second_refusal_skips_without_dropping_evidence(monkeypatch):
         "scoped system", "scoped opening", "web-test-lead-v1"
     )
     seen = []
+    events = []
 
     async def fake_call(_config, system, messages, tools=None):
         seen.append((system, messages))
@@ -290,10 +341,16 @@ def test_scoped_second_refusal_skips_without_dropping_evidence(monkeypatch):
             initial_user_message="original opening",
             tool_executor=execute,
             refusal_recovery_prompt=prompt,
+            emit_fn=events.append,
         )
     )
     assert summary == "moved on"
     assert len(seen) == 4
+    assert any(
+        event.get("data", {}).get("refusal_recovery") == "refused"
+        and "unresolved" in event.get("message", "")
+        for event in events
+    )
 
 
 def test_codex_closes_refused_thread_before_scoped_retry(monkeypatch):
