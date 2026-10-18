@@ -39,3 +39,5 @@ export const uploadSavedCrawl = (siteId, file, name) => {
   if (name) fd.append("name", name);
   return req(`/api/sites/${siteId}/saved-crawls/upload`, { method: "POST", body: fd });
 };
+
+export const testLogin = (b) => req("/api/sites/login-test", { method: "POST", body: b });

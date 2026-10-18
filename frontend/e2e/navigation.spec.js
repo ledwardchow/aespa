@@ -707,9 +707,10 @@ test("headless Linux disables browser windows and guided login", async ({ page }
   await page.screenshot({ path: path.join(tmpdir(), "aespa-headless-browser-settings.png") });
 
   await page.goto("/#/sites/new");
-  await page.getByRole("checkbox", { name: "This site requires authentication" }).check();
-  await page.getByRole("button", { name: "Add credential" }).click();
-  const authMode = page.locator(".field", { hasText: "Auth Mode" }).locator("select");
+  await page.getByRole("tab", { name: "Credentials" }).click();
+  await page.getByRole("checkbox", { name: "This site requires login" }).check();
+  await page.getByRole("button", { name: "Add account" }).click();
+  const authMode = page.getByLabel("Login method");
   await expect(authMode.locator('option[value="guided"]')).toBeDisabled();
   await expect(page.getByText(message, { exact: true })).toBeVisible();
   await authMode.scrollIntoViewIfNeeded();
@@ -1372,18 +1373,140 @@ test("site settings edit saved workflow data", async ({ page }) => {
     return route.fulfill({ json: { ...siteWithCredential, workflow_data: [savedWorkflow] } });
   });
   await page.goto("/#/sites/1/edit");
-  await expect(page.getByText("Saved workflow data")).toBeVisible();
+  const tabs = page.getByRole("tablist", { name: "Site settings" });
+  await expect(tabs.getByRole("tab")).toHaveText([
+    "Site",
+    "Credentials1",
+    "Workflows1",
+    "Instructions",
+  ]);
+  await tabs.getByRole("tab", { name: /Credentials/ }).click();
+  await expect(page.getByRole("button", { name: /tester/ })).toBeVisible();
+  await expect(page.getByLabel("Login method")).toHaveValue("auto");
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-credentials.png") });
+  await tabs.getByRole("tab", { name: /Workflows/ }).click();
   await expect(page.getByLabel("Workflow name")).toHaveValue("Checkout");
   await page.getByLabel("Sample data or instructions").fill("Add a test mouse");
-  await page.getByLabel("Starting page URL").scrollIntoViewIfNeeded();
   await page.screenshot({ path: path.join(tmpdir(), "aespa-site-workflow-data.png") });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByLabel("Starting page URL").scrollIntoViewIfNeeded();
-  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-workflow-data-narrow.png") });
+  await tabs.getByRole("tab", { name: /Credentials/ }).click();
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-credentials-narrow.png") });
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect.poll(() => updated).not.toBeNull();
   expect(updated.workflow_data[0].instructions).toBe("Add a test mouse");
   expect(updated.credentials[0].id).toBe(23);
+});
+
+test("new site form opens the tab with a missing value", async ({ page }) => {
+  await installFixtures(page);
+  let created = null;
+  await page.route("**/api/sites", (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    created = route.request().postDataJSON();
+    return route.fulfill({ json: { ...site, id: 7 } });
+  });
+  await page.goto("/#/sites/new");
+  const tabs = page.getByRole("tablist", { name: "Site settings" });
+  await expect(tabs.getByRole("tab")).toHaveText(["Site", "Credentials", "Instructions"]);
+  await page.getByLabel("Name", { exact: true }).fill("Fixture");
+  await page.getByLabel("Base URL", { exact: true }).fill("http://example.test");
+  await tabs.getByRole("tab", { name: "Credentials" }).click();
+  await page.getByRole("checkbox", { name: "This site requires login" }).check();
+  await page.getByRole("button", { name: "Add account" }).click();
+  await page.getByLabel("Username value", { exact: true }).first().fill("first");
+  await page.getByLabel("Password value", { exact: true }).first().fill("secret");
+  await page.getByRole("button", { name: "Add account" }).click();
+  await expect(page.getByLabel("Username value", { exact: true }).first()).toBeHidden();
+  await page.getByLabel("Username value", { exact: true }).last().fill("second");
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-new-site-credentials.png") });
+  await tabs.getByRole("tab", { name: "Site" }).click();
+  await page.getByRole("button", { name: "Create site" }).click();
+  await expect(tabs.getByRole("tab", { name: /Credentials/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.getByLabel("Password value", { exact: true }).last()).toBeVisible();
+  await expect(page.getByLabel("Password value", { exact: true }).last()).toBeFocused();
+  await page.getByLabel("Password value", { exact: true }).last().fill("secret2");
+  await page.getByRole("button", { name: "Create site" }).click();
+  await expect.poll(() => created).not.toBeNull();
+  expect(created.credentials).toHaveLength(2);
+  expect(created.workflow_data).toEqual([]);
+});
+
+test("site credentials test a login and show the result", async ({ page }) => {
+  await installFixtures(page);
+  await page.route("**/api/sites/1", (route) =>
+    route.fulfill({
+      json: {
+        ...site,
+        requires_auth: true,
+        login_url: "http://example.test/login",
+        workflow_data: [],
+        credentials: [
+          {
+            id: 23,
+            username: "tester",
+            password: "saved",
+            auth_mode: "auto",
+            login_fields: [
+              { key: "username", label: "Username", value: "tester", sensitive: false },
+              { key: "password", label: "Password", value: "saved", sensitive: true },
+            ],
+          },
+        ],
+      },
+    }),
+  );
+  const requests = [];
+  await page.route("**/api/sites/login-test", (route) => {
+    const body = route.request().postDataJSON();
+    requests.push(body);
+    const passed = body.credential.login_fields[1].value === "fixed";
+    return route.fulfill({
+      json: passed
+        ? {
+            status: "logged_in",
+            message: "Logged in. The login form is gone.",
+            login_url: "http://example.test/login",
+            final_url: "http://example.test/home",
+          }
+        : {
+            status: "failed",
+            message: "Still on the login page.",
+            login_url: "http://example.test/login",
+            final_url: "http://example.test/login",
+            page_message: "Invalid email or password.",
+          },
+    });
+  });
+  await page.goto("/#/sites/1/edit");
+  const tabs = page.getByRole("tablist", { name: "Site settings" });
+  await expect(tabs.getByRole("tab")).toHaveText(["Site", "Credentials1", "Instructions"]);
+  await tabs.getByRole("tab", { name: /Credentials/ }).click();
+  const account = page.getByRole("button", { name: /tester/ });
+  await expect(account).toContainText("Not tested");
+  await page.getByRole("button", { name: "Test login" }).click();
+  await expect(page.getByRole("status")).toContainText("Login failed");
+  await expect(page.getByRole("status")).toContainText("Invalid email or password.");
+  await expect(account).toContainText("Failed at");
+  await expect(tabs.getByRole("tab", { name: /Credentials/ })).toContainText("1 failed");
+  expect(requests[0]).toMatchObject({
+    base_url: "http://example.test",
+    login_url: "http://example.test/login",
+    site_id: 1,
+    credential: { id: 23, auth_mode: "auto" },
+  });
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-login-test-failed.png") });
+
+  await page.getByLabel("Password value", { exact: true }).fill("fixed");
+  await expect(account).toContainText("Not tested");
+  await expect(page.getByRole("status")).toHaveCount(0);
+  await page.getByRole("button", { name: "Test login" }).click();
+  await expect(page.getByRole("status")).toContainText("Login worked");
+  await expect(account).toContainText("Logged in at");
+  await expect(tabs.getByRole("tab", { name: /Credentials/ })).not.toContainText("failed");
+  await page.screenshot({ path: path.join(tmpdir(), "aespa-site-login-test-passed.png") });
 });
 
 test("SAST summary cards only appear on the Coverage tab", async ({ page }) => {

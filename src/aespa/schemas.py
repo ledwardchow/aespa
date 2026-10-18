@@ -207,6 +207,23 @@ class SiteDetail(BaseModel):
     scope_hosts: list[str] = Field(default_factory=list)
 
 
+class LoginTestIn(BaseModel):
+    base_url: HttpUrl
+    login_url: HttpUrl | None = None
+    site_id: int | None = None
+    credential: CredentialIn
+
+
+class LoginTestOut(BaseModel):
+    status: Literal["logged_in", "failed"]
+    message: str
+    login_url: str
+    final_url: str | None = None
+    page_message: str | None = None
+    screenshot: str | None = None
+    duration_ms: int = 0
+
+
 # ── API Collection schemas ────────────────────────────────────────────────
 
 

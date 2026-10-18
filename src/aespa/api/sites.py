@@ -21,6 +21,8 @@ from aespa.models import SavedCrawl, Site, TestRun
 from aespa.schemas import (
     CredentialIn,
     CredentialOut,
+    LoginTestIn,
+    LoginTestOut,
     SavedCrawlOut,
     SavedCrawlUpdate,
     SiteCreate,
@@ -28,6 +30,7 @@ from aespa.schemas import (
     SiteSummary,
     SiteUpdate,
 )
+from aespa.services import login_test as login_test_svc
 from aespa.services import saved_crawls as saved_crawls_svc
 from aespa.services import sites as sites_service
 from aespa.services.crawl_archives import ArchiveError
@@ -215,6 +218,21 @@ def export_site(site_id: int, session: Session = Depends(get_session)) -> JSONRe
         "Content-Disposition": f'attachment; filename="{safe_name}.aespa-site.json"'
     }
     return JSONResponse(content=bundle, headers=headers)
+
+
+@router.post("/login-test", response_model=LoginTestOut)
+async def check_site_login(payload: LoginTestIn) -> LoginTestOut:
+    """Try one account's login with the values in the site form."""
+    try:
+        result = await login_test_svc.run_login_test(
+            base_url=str(payload.base_url),
+            login_url=str(payload.login_url) if payload.login_url else None,
+            credential=payload.credential,
+            site_id=payload.site_id,
+        )
+    except login_test_svc.LoginTestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return LoginTestOut(**result.__dict__)
 
 
 @router.post("/import", response_model=SiteDetail, status_code=status.HTTP_201_CREATED)
