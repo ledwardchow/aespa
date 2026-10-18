@@ -37,6 +37,7 @@ from aespa.schemas import (
     LLMProfileOut,
     LLMProviderConfigIn,
     LLMProviderConfigOut,
+    OpenAIRefusalRecoveryIn,
     ReportingDebugConfigIn,
     ReportingDebugConfigOut,
     ScannerPolicyIn,
@@ -628,6 +629,14 @@ def upsert_scanner_policy(
     session: Session = Depends(get_session),
 ) -> ScannerPolicyOut:
     return integration_settings.upsert_scanner_policy(session, payload)
+
+
+@router.put("/scanner-policy/openai-refusal-recovery", response_model=ScannerPolicyOut)
+def set_openai_refusal_recovery(
+    payload: OpenAIRefusalRecoveryIn,
+    session: Session = Depends(get_session),
+) -> ScannerPolicyOut:
+    return integration_settings.set_openai_refusal_recovery(session, payload.enabled)
 
 
 @router.get("/retire-list")

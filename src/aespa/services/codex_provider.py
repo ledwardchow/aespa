@@ -75,6 +75,21 @@ class CodexUnavailableError(RuntimeError):
     """Codex is not installed, signed in, or compatible with AESPA."""
 
 
+class CodexCyberPolicyError(CodexUnavailableError):
+    """Codex rejected an agent turn for cybersecurity risk."""
+
+
+def _is_cyber_policy_turn_error(params: dict[str, Any]) -> bool:
+    error = params.get("error")
+    if not isinstance(error, dict):
+        return False
+    if error.get("code") == "cyber_policy":
+        return True
+    return not error.get("code") and str(error.get("message") or "").startswith(
+        "This content was flagged for possible cybersecurity risk."
+    )
+
+
 class CodexTurnTimeoutError(CodexUnavailableError):
     """A Codex turn stopped emitting events while the app-server stayed alive."""
 
@@ -1377,6 +1392,8 @@ async def _completion_with_tools_once(
                     details[:1000],
                 )
                 continue
+            if isinstance(params, dict) and _is_cyber_policy_turn_error(params):
+                raise CodexCyberPolicyError(details)
             raise CodexUnavailableError(details)
 
 

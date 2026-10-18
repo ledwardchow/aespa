@@ -15,6 +15,7 @@ export const csv = (value, transform = (x) => x) =>
     .filter(Boolean);
 export const defaultPolicyForm = () => ({
   execution_monitor_enabled: false,
+  openai_refusal_recovery_enabled: false,
   disable_deterministic_checks: false,
   retire_auto_update: true,
   max_consecutive_text_turns: 0,
@@ -59,6 +60,7 @@ export const policyToForm = (p) => {
   return {
     ...f,
     execution_monitor_enabled: p.execution_monitor_enabled ?? false,
+    openai_refusal_recovery_enabled: p.openai_refusal_recovery_enabled ?? false,
     disable_deterministic_checks: p.disable_deterministic_checks ?? false,
     retire_auto_update: p.retire_auto_update ?? true,
     max_consecutive_text_turns: p.max_consecutive_text_turns ?? f.max_consecutive_text_turns,
@@ -107,6 +109,7 @@ export const policyToForm = (p) => {
 };
 export const policyPayload = (form) => ({
   execution_monitor_enabled: !!form.execution_monitor_enabled,
+  openai_refusal_recovery_enabled: !!form.openai_refusal_recovery_enabled,
   disable_deterministic_checks: !!form.disable_deterministic_checks,
   retire_auto_update: !!form.retire_auto_update,
   max_consecutive_text_turns: Number(form.max_consecutive_text_turns),

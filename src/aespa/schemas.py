@@ -903,6 +903,7 @@ class ScannerPolicyBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     execution_monitor_enabled: bool = False
+    openai_refusal_recovery_enabled: bool = False
     disable_deterministic_checks: bool = False
     max_consecutive_text_turns: int = Field(default=0, ge=0, le=50)
     enforce_full_coverage_obligations: bool = False
@@ -999,7 +1000,11 @@ class ScannerPolicyBase(BaseModel):
 
 
 class ScannerPolicyIn(ScannerPolicyBase):
-    pass
+    openai_refusal_recovery_enabled: bool | None = None
+
+
+class OpenAIRefusalRecoveryIn(BaseModel):
+    enabled: bool
 
 
 class ScannerPolicyOut(ScannerPolicyBase):

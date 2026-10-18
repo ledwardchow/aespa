@@ -5403,6 +5403,17 @@ async def _run_specialist_agent(
             system_prompt_override
             or _specialist_system_prompt_for_run(attack_class, is_api_run=is_api_run)
         )
+        recovery_prompt = None
+        if not is_api_run and getattr(
+            scanner_policy, "openai_refusal_recovery_enabled", False
+        ):
+            from aespa.services.prompts.refusal_recovery import (
+                specialist_recovery_prompt,
+            )
+
+            recovery_prompt = specialist_recovery_prompt(
+                attack_class=attack_class, initial_user=initial_message
+            )
 
         await llm_svc.thinking_agentic_loop(
             llm_cfg,
@@ -5413,6 +5424,7 @@ async def _run_specialist_agent(
                 step_count[0] >= max_steps or run_id in _thinking_stop_requested
             ),
             tools=tools_override or _get_specialist_tools(attack_class),
+            refusal_recovery_prompt=recovery_prompt,
         )
 
         outcome = (
@@ -7217,6 +7229,7 @@ async def _do_thinking_scan(
                 break
 
     # Select and inject WSTG skill reference blocks based on observed attack surface.
+    scoped_crawl_context = crawl_context
     if coverage_mode != "sast_validate":
         _selected_skills = llm_svc.select_wstg_skills(
             pages_snapshot,
@@ -7696,6 +7709,7 @@ async def _do_thinking_scan(
                     llm_cfg=llm_cfg,
                     base_url=base_url,
                     crawl_context=crawl_context,
+                    scoped_crawl_context=scoped_crawl_context,
                     creds_for_llm=creds_for_llm,
                     session_vault=session_vault,
                     pages_snapshot=pages_snapshot,
@@ -9560,6 +9574,7 @@ async def _do_agentic_thinking_loop(
     creds: list | None = None,
     login_url: str = "",
     guidance: str = "",
+    scoped_crawl_context: str | None = None,
     # API-mode overrides — when provided these replace the web-scan defaults
     is_api_run: bool = False,  # run_id is an ApiTestRun id; key findings on api_test_run_id
     system_message_override: str | None = None,
@@ -10101,20 +10116,27 @@ async def _do_agentic_thinking_loop(
             "a probe for that endpoint or page and OWASP category, or record a finding."
         )
 
-    initial_message = "\n\n".join(
-        filter(
-            None,
-            [
-                f"Target: {base_url}",
-                f"Application context:\n{crawl_context}",
-                creds_text,
-                sessions_text,
-                guidance_text,
-                standard_coverage_text,
-                "Begin the assessment.",
-            ],
-        )
+    initial_sections = [
+        f"Target: {base_url}",
+        f"Application context:\n{crawl_context}",
+        creds_text,
+        sessions_text,
+        guidance_text,
+        standard_coverage_text,
+        "Begin the assessment.",
+    ]
+    initial_message = "\n\n".join(filter(None, initial_sections))
+    scoped_sections = list(initial_sections)
+    scoped_sections[1] = (
+        f"Application context:\n{scoped_crawl_context or crawl_context}"
     )
+    scoped_sections[-1] = (
+        "The provider declined the previous planning request. Continue this authorized "
+        "assessment from the inventory above. Choose one useful in-scope route and one "
+        "test class for the next bounded check. Use context_tool to inspect saved scan "
+        "data if needed. Do not mark coverage complete until a tool result supports it."
+    )
+    scoped_initial_message = "\n\n".join(filter(None, scoped_sections))
 
     # ── Tool executor closure ─────────────────────────────────────────────────
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
@@ -12695,7 +12717,7 @@ async def _do_agentic_thinking_loop(
 
     # ── Run the loop ──────────────────────────────────────────────────────────
     async def _on_checkpoint_callback(
-        messages: list[dict], step_count_value: int = 0
+        messages: list[dict], step_count_value: int = 0, *, strict: bool = False
     ) -> None:
         """Persist the full loop state after each completed LLM turn."""
         context_chars = len(json.dumps(messages, default=str))
@@ -12713,7 +12735,13 @@ async def _do_agentic_thinking_loop(
             progressive_findings_count=progressive_findings_count,
             consecutive_context_tools=_consecutive_ctx_tools[0],
             completion_state=completion_policy.to_state(),
+            strict=strict,
         )
+
+    async def _on_recovery_checkpoint_callback(
+        messages: list[dict], step_count_value: int = 0
+    ) -> None:
+        await _on_checkpoint_callback(messages, step_count_value, strict=True)
 
     def _on_context_compaction(stats: dict[str, int]) -> None:
         _context_metrics["context_compactions"] += 1
@@ -12900,12 +12928,27 @@ async def _do_agentic_thinking_loop(
         )
     )
 
+    initial_system_message = (
+        system_message_override
+        if system_message_override is not None
+        else get_thinking_agent_system(enforce_coverage)
+    )
+    recovery_prompt = None
+    if coverage_mode != "sast_validate" and getattr(
+        scanner_policy, "openai_refusal_recovery_enabled", False
+    ):
+        from aespa.services.prompts.refusal_recovery import test_lead_recovery_prompt
+
+        recovery_prompt = test_lead_recovery_prompt(
+            original_system=initial_system_message,
+            scoped_initial_user=scoped_initial_message,
+            is_api_run=is_api_run,
+        )
+
     try:
         await llm_svc.thinking_agentic_loop(
             llm_cfg,
-            system_message=system_message_override
-            if system_message_override is not None
-            else get_thinking_agent_system(enforce_coverage),
+            system_message=initial_system_message,
             initial_user_message=initial_message,
             tool_executor=_tool_executor,
             before_tool_execution=_before_tool_execution,
@@ -12920,6 +12963,8 @@ async def _do_agentic_thinking_loop(
             resume_messages=resume_messages,
             resume_step_count=resume_step_count,
             on_checkpoint=_on_checkpoint_callback,
+            refusal_recovery_prompt=recovery_prompt,
+            on_recovery_checkpoint=_on_recovery_checkpoint_callback,
             tools=tools_override,
             execution_monitor_enabled=exec_mon_enabled,
             max_consecutive_text_turns=max_text_turns,

@@ -156,7 +156,11 @@ export function parseRoute(hash = "#/"): Route {
     return { name: "scan-policy", tab: "global", subTab: "proxy" };
   if (routeHash === "#/scan-policy/systems" || routeHash === "#/scan-policy/sast")
     return { name: "scan-policy", tab: routeHash.slice("#/scan-policy/".length) };
-  if ((m = routeHash.match(/^#\/scan-policy\/global\/(features|debug|proxy|libraries|authentication)$/)))
+  if (
+    (m = routeHash.match(
+      /^#\/scan-policy\/global\/(features|openai-refusals|debug|proxy|libraries|authentication)$/,
+    ))
+  )
     return { name: "scan-policy", tab: "global", subTab: m[1] };
   if (
     (m = routeHash.match(

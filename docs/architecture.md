@@ -300,6 +300,7 @@ Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm
 | Field | Default | Description |
 |---|---|---|
 | `execution_monitor_enabled` | `false` | Enable duplicate-action and stalled-progress supervision by the Mentor |
+| `openai_refusal_recovery_enabled` | `false` | In web and API scans, retry an OpenAI cybersecurity refusal once with a shorter prompt. Set under **Settings → Global → OpenAI Refusals**. |
 | `disable_deterministic_checks` | `false` | Skip automatic TLS, authentication, IDOR, and probe-result checks. Passive JavaScript source analysis still runs in ordinary Test Lead scans. |
 | `max_consecutive_text_turns` | `0` | Stop after this many text-only Test Lead turns; `0` allows unlimited turns |
 | `enforce_full_coverage_obligations` | `false` | Require every coverage obligation to be resolved before the Test Lead can finish |
@@ -912,6 +913,13 @@ The loop terminates when:
 - The Execution Monitor reaches a bounded rejection limit after the Test Lead keeps
   retrying a hard-blocked duplicate or refuses an active Mentor Strategy Shift Contract.
 
+When OpenAI refusal recovery is on, the first Test Lead or web specialist request is unchanged.
+An explicit `cyber_policy` refusal from ChatGPT-plan or Codex starts one retry with a shorter
+prompt for the same assignment. The retry keeps completed tool results, scope checks, and
+the configured tools. Codex starts a new native thread for that retry. If the retry is
+also refused, the loop leaves the step unresolved and uses its existing refusal skip limit.
+Other providers and other refusal types keep their existing behavior.
+
 The Execution Monitor is disabled by default and can be enabled in the Scanner settings.
 When enabled, `execution_monitor.py` fingerprints meaningful tool inputs while removing
 known transport noise. A second consecutive normalized duplicate invokes the run-scoped
@@ -1260,7 +1268,7 @@ Different agent roles receive different tool sets:
 
 ### WSTG skills
 
-The LLM service dynamically selects a subset of OWASP Web Security Testing Guide (WSTG) technique descriptions relevant to the target's attack surface and injects them into the Test Lead's system prompt. This gives the scanner domain-specific testing guidance without overloading the context with irrelevant techniques.
+The LLM service dynamically selects a subset of OWASP Web Security Testing Guide (WSTG) technique descriptions relevant to the target's attack surface and adds them to the Test Lead's first user message. This gives the scanner testing guidance for the discovered routes. The shorter OpenAI retry leaves those broad examples out while keeping the route and input inventory.
 
 Vision support (when `use_vision=true`) attaches base64-encoded Playwright screenshots to prompts, giving the LLM visual context about what a page looks like.
 

@@ -41,6 +41,7 @@ def save_checkpoint(
     progressive_findings_count: int,
     consecutive_context_tools: int,
     completion_state: dict[str, Any] | None = None,
+    strict: bool = False,
 ) -> None:
     """Upsert a checkpoint row for *run_id*.  Called after every LLM turn."""
     try:
@@ -85,6 +86,8 @@ def save_checkpoint(
             s.commit()
     except Exception:
         log.exception("checkpoint.save_checkpoint failed for run_id=%s", run_id)
+        if strict:
+            raise
 
 
 def load_checkpoint(run_id: int) -> dict[str, Any] | None:

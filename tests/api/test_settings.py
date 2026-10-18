@@ -1284,11 +1284,45 @@ def test_upsert_invalid_max_tokens(client: TestClient):
 # ── Scanner policy ───────────────────────────────────────────────────────────
 
 
+def test_openai_refusal_recovery_toggle_preserves_other_policy(client: TestClient):
+    original = client.get("/api/settings/scanner-policy").json()
+    response = client.put(
+        "/api/settings/scanner-policy/openai-refusal-recovery",
+        json={"enabled": True},
+    )
+    assert response.status_code == 200
+    saved = client.get("/api/settings/scanner-policy").json()
+    assert saved["openai_refusal_recovery_enabled"] is True
+    assert saved["scan_mode"] == original["scan_mode"]
+
+    legacy_payload = {
+        key: value
+        for key, value in saved.items()
+        if key not in {"openai_refusal_recovery_enabled", "updated_at"}
+    }
+    response = client.put("/api/settings/scanner-policy", json=legacy_payload)
+    assert response.status_code == 200
+    assert response.json()["openai_refusal_recovery_enabled"] is True
+
+    response = client.put(
+        "/api/settings/scanner-policy/openai-refusal-recovery",
+        json={"enabled": False},
+    )
+    assert response.status_code == 200
+    assert (
+        client.get("/api/settings/scanner-policy").json()[
+            "openai_refusal_recovery_enabled"
+        ]
+        is False
+    )
+
+
 def test_get_scanner_policy_defaults(client: TestClient):
     r = client.get("/api/settings/scanner-policy")
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is False
+    assert data["openai_refusal_recovery_enabled"] is False
     assert data["disable_deterministic_checks"] is False
     assert data["max_consecutive_text_turns"] == 0
     assert data["enforce_full_coverage_obligations"] is False

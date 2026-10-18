@@ -59,6 +59,9 @@ from aespa.services.settings_values import (
 def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
     return ScannerPolicyOut(
         execution_monitor_enabled=cfg.execution_monitor_enabled,
+        openai_refusal_recovery_enabled=getattr(
+            cfg, "openai_refusal_recovery_enabled", False
+        ),
         disable_deterministic_checks=getattr(
             cfg, "disable_deterministic_checks", False
         ),
@@ -109,7 +112,21 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
 def get_scanner_policy(session: Session) -> ScannerPolicyOut:
     cfg = session.get(ScannerPolicy, _SINGLETON_ID)
     if cfg is None:
-        return ScannerPolicyOut(**ScannerPolicyIn().model_dump(), updated_at=_utcnow())
+        return ScannerPolicyOut(
+            **ScannerPolicyIn().model_dump(exclude_none=True), updated_at=_utcnow()
+        )
+    return _policy_from_model(cfg)
+
+
+def set_openai_refusal_recovery(session: Session, enabled: bool) -> ScannerPolicyOut:
+    cfg = session.get(ScannerPolicy, _SINGLETON_ID)
+    if cfg is None:
+        cfg = ScannerPolicy(id=_SINGLETON_ID)
+    cfg.openai_refusal_recovery_enabled = enabled
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
     return _policy_from_model(cfg)
 
 
@@ -165,6 +182,8 @@ def upsert_scanner_policy(
         cfg = ScannerPolicy(id=_SINGLETON_ID)
 
     cfg.execution_monitor_enabled = payload.execution_monitor_enabled
+    if payload.openai_refusal_recovery_enabled is not None:
+        cfg.openai_refusal_recovery_enabled = payload.openai_refusal_recovery_enabled
     cfg.disable_deterministic_checks = payload.disable_deterministic_checks
     cfg.max_consecutive_text_turns = payload.max_consecutive_text_turns
     cfg.enforce_full_coverage_obligations = payload.enforce_full_coverage_obligations

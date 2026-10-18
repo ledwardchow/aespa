@@ -31,6 +31,7 @@ import httpx2
 
 from aespa.models import LLMConfig
 from aespa.services.prompts.login_action import LOGIN_ACTION_PROMPT
+from aespa.services.prompts.refusal_recovery import RefusalRecoveryPrompt
 from aespa.services.prompts.reporting import (
     _ANALYSE_PROMPT,
     _NORMALIZE_TITLES_PROMPT,
@@ -209,6 +210,49 @@ def _is_llm_refusal(exc: BaseException) -> bool:
             pass
     text = " ".join(parts).lower()
     return any(marker in text for marker in _REFUSAL_MARKERS)
+
+
+def _is_explicit_openai_cyber_refusal(provider: str, exc: BaseException) -> bool:
+    if provider == "openai_codex":
+        from aespa.services.codex_provider import CodexCyberPolicyError
+
+        return isinstance(exc, CodexCyberPolicyError)
+    if provider != "openai_chatgpt_plan":
+        return False
+
+    if getattr(exc, "code", None) == "cyber_policy":
+        return True
+    body = getattr(exc, "body", None)
+    response = getattr(exc, "response", None)
+    if body is None and response is not None:
+        try:
+            body = response.json()
+        except Exception:
+            return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error", body)
+    return isinstance(error, dict) and error.get("code") == "cyber_policy"
+
+
+def _scoped_opening_with_journal(original: Any, scoped: str) -> Any:
+    if isinstance(original, str):
+        marker = original.find("[CONTEXT JOURNAL:")
+        return scoped if marker < 0 else scoped + "\n\n" + original[marker:]
+    if isinstance(original, list):
+        retained = []
+        for block in original:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = str(block.get("text") or "")
+                marker = text.find("[CONTEXT JOURNAL:")
+                if marker >= 0:
+                    retained.append({"type": "text", "text": text[marker:]})
+            else:
+                retained.append(copy.deepcopy(block))
+        return [{"type": "text", "text": scoped}, *retained]
+    return scoped
 
 
 _llm_proxy_var: ContextVar[str | None] = ContextVar("_llm_proxy", default=None)
@@ -7896,6 +7940,8 @@ async def thinking_agentic_loop(
     max_context_tokens: int | None = None,
     on_context_compaction=None,
     text_only_repair_message: str | None = None,
+    refusal_recovery_prompt: RefusalRecoveryPrompt | None = None,
+    on_recovery_checkpoint=None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -7988,6 +8034,16 @@ async def thinking_agentic_loop(
             }
     else:
         messages: list[dict] = [{"role": "user", "content": initial_user_message}]
+    recovery_marker = messages[0].get("_openai_refusal_recovery") if messages else None
+    recovery_active = isinstance(recovery_marker, dict)
+    if recovery_active:
+        if (
+            config.provider not in {"openai_chatgpt_plan", "openai_codex"}
+            or refusal_recovery_prompt is None
+            or recovery_marker.get("template_id") != refusal_recovery_prompt.template_id
+        ):
+            raise RuntimeError("Saved OpenAI refusal recovery prompt is unavailable")
+        system_message = refusal_recovery_prompt.system
     tool_call_count = resume_step_count
     final_summary = ""
     consecutive_text_only_turns = 0
@@ -8022,6 +8078,19 @@ async def thinking_agentic_loop(
 
     operation_token = _operation_var.set(_infer_llm_operation())
     try:
+        if (
+            recovery_active
+            and recovery_marker.get("attempt") == "sent"
+            and recovery_marker.get("step") == tool_call_count + 1
+        ):
+            _append_agentic_user_steer(
+                messages,
+                "The prior model request has no saved result. Leave that test unresolved "
+                "and continue with another in-scope coverage item.",
+            )
+            recovery_marker["attempt"] = "unresolved"
+            if on_recovery_checkpoint:
+                await on_recovery_checkpoint(messages, tool_call_count)
         while True:
             if stop_check and stop_check():
                 break
@@ -8061,6 +8130,8 @@ async def thinking_agentic_loop(
                 model=config.model,
                 provider=str(getattr(config.provider, "value", config.provider)),
             )
+            if recovery_active:
+                recovery_marker = messages[0].get("_openai_refusal_recovery")
             if compaction:
                 if on_context_compaction:
                     try:
@@ -8206,6 +8277,8 @@ async def thinking_agentic_loop(
                 # A completed turn means we are past any earlier refusal.
                 consecutive_refusals = 0
                 network_attempt = 0
+                if recovery_active and recovery_marker is not None:
+                    recovery_marker["attempt"] = "completed"
             except Exception as exc:
                 error_message = describe_exception(exc)
                 if (
@@ -8320,6 +8393,50 @@ async def thinking_agentic_loop(
                         pass
                 if _is_refusal:
                     consecutive_refusals += 1
+                    if (
+                        consecutive_refusals == 1
+                        and not recovery_active
+                        and refusal_recovery_prompt is not None
+                        and _is_explicit_openai_cyber_refusal(config.provider, exc)
+                    ):
+                        candidate = copy.deepcopy(messages)
+                        candidate[0]["content"] = _scoped_opening_with_journal(
+                            candidate[0].get("content"),
+                            refusal_recovery_prompt.initial_user,
+                        )
+                        candidate[0]["_openai_refusal_recovery"] = {
+                            "template_id": refusal_recovery_prompt.template_id,
+                            "attempt": "sent",
+                            "step": tool_call_count + 1,
+                        }
+                        if on_recovery_checkpoint:
+                            await on_recovery_checkpoint(candidate, tool_call_count)
+                        if config.provider == "openai_codex":
+                            from aespa.services import codex_provider
+
+                            await codex_provider.close_conversation(messages)
+                        messages = candidate
+                        system_message = refusal_recovery_prompt.system
+                        recovery_active = True
+                        recovery_marker = messages[0]["_openai_refusal_recovery"]
+                        if emit_fn:
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "llm_response",
+                                    "status": "retrying",
+                                    "message": (
+                                        f"Step {tool_call_count + 1}: retrying the OpenAI "
+                                        "cyber refusal with shorter instructions."
+                                    ),
+                                    "data": {
+                                        "step": tool_call_count + 1,
+                                        "provider": config.provider,
+                                        "recovery_template": refusal_recovery_prompt.template_id,
+                                    },
+                                }
+                            )
+                        continue
                     # First refusal of this request: retry once. Provider safety
                     # sampling is non-deterministic, so an identical retry sometimes
                     # succeeds.
@@ -8353,7 +8470,13 @@ async def thinking_agentic_loop(
                             f"{tool_call_count + 1} and did not recover after "
                             f"{refusal_skips - 1} skipped steps: {exc}"
                         ) from exc
-                    _drop_last_agentic_exchange(messages)
+                    if recovery_active and config.provider == "openai_codex":
+                        from aespa.services import codex_provider
+
+                        await codex_provider.close_conversation(messages)
+                        messages = list(messages)
+                    if not recovery_active:
+                        _drop_last_agentic_exchange(messages)
                     _append_agentic_user_steer(
                         messages,
                         (
@@ -8364,6 +8487,8 @@ async def thinking_agentic_loop(
                         ),
                     )
                     consecutive_refusals = 0
+                    if recovery_active and recovery_marker is not None:
+                        recovery_marker["attempt"] = "unresolved"
                     if emit_fn:
                         try:
                             emit_fn(

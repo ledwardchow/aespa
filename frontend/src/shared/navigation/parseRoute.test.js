@@ -53,6 +53,10 @@ test.each([
   ["#/scan-policy", { name: "scan-policy" }],
   ["#/external-integrations", { name: "scan-policy", tab: "global", subTab: "proxy" }],
   ["#/scan-policy/global/features", { name: "scan-policy", tab: "global", subTab: "features" }],
+  [
+    "#/scan-policy/global/openai-refusals",
+    { name: "scan-policy", tab: "global", subTab: "openai-refusals" },
+  ],
   ["#/scan-policy/global/debug", { name: "scan-policy", tab: "global", subTab: "debug" }],
   ["#/scan-policy/global/proxy", { name: "scan-policy", tab: "global", subTab: "proxy" }],
   ["#/scan-policy/global/libraries", { name: "scan-policy", tab: "global", subTab: "libraries" }],

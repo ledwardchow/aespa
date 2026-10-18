@@ -603,6 +603,7 @@ class ScannerPolicy(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     execution_monitor_enabled: bool = Field(default=False)
+    openai_refusal_recovery_enabled: bool = Field(default=False)
     disable_deterministic_checks: bool = Field(default=False)
     max_consecutive_text_turns: int = Field(default=0)
     enforce_full_coverage_obligations: bool = Field(default=False)

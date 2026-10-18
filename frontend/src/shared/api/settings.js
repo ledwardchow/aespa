@@ -97,6 +97,12 @@ export const getScannerPolicy = () => req("/api/settings/scanner-policy");
 export const upsertScannerPolicy = (b) =>
   req("/api/settings/scanner-policy", { method: "PUT", body: b });
 
+export const setOpenAIRefusalRecovery = (enabled) =>
+  req("/api/settings/scanner-policy/openai-refusal-recovery", {
+    method: "PUT",
+    body: { enabled },
+  });
+
 export const getRetireListStatus = () => req("/api/settings/retire-list");
 
 export const refreshRetireList = () => req("/api/settings/retire-list/refresh", { method: "POST" });
