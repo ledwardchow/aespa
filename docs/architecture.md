@@ -586,10 +586,11 @@ contact forms can use generated values without being classified as payments.
 The action guard checks the chosen control and its target, and the browser
 blocks DELETE requests and delete paths. Other ordinary state changes, such as
 submitting a review, are allowed.
-The Site saves the instructions and generated values only after the workflow is
-reached. Site
-configuration lists these saved workflows and lets the user edit or remove
-them. Future crawls load the saved instructions and try those workflows again,
+The Site saves each workflow's name, goal, and starting page when the crawl
+records its result, including when the workflow needs input. It saves sample
+data and instructions only after the workflow is reached and the user chooses
+to save them. Site configuration lists these workflows and lets the user edit
+or remove them. Future crawls load saved instructions and try those workflows again,
 even if the normal page crawl did not rediscover their starting URL. The URL
 must still belong to the site's host, and deletion remains blocked.
 

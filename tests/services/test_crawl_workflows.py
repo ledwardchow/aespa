@@ -1476,6 +1476,89 @@ def test_saved_site_workflow_data_is_reused_by_later_crawls(isolated_db_engine):
     assert proposals[0]["generate_sample_data"] is True
 
 
+def test_crawl_notes_save_workflow_definition_without_attempt_data(isolated_db_engine):
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Shop", base_url="https://shop.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(site_id=site.id, name="Crawl")
+        session.add(run)
+        session.commit()
+        run_id, site_id = run.id, site.id
+
+    workflow = {
+        "name": "Checkout",
+        "goal": "Complete checkout",
+        "reason": "Cart found",
+        "start_url": "https://shop.test/cart",
+    }
+    crawl_workflows._record_note(
+        run_id,
+        workflow,
+        "needs_input",
+        [],
+        "Needs a payment amount",
+        needs_input=True,
+        request="Supply a payment amount",
+        instructions="Use a private account number",
+    )
+    with Session(isolated_db_engine) as session:
+        saved = sites.workflow_data_for_site(session.get(Site, site_id))
+    assert saved == [
+        {
+            "name": "Checkout",
+            "goal": "Complete checkout",
+            "start_url": "https://shop.test/cart",
+            "instructions": "",
+        }
+    ]
+
+    with Session(isolated_db_engine) as session:
+        sites.save_site_workflow_data(
+            session,
+            site_id,
+            {**workflow, "goal": "Use my edited checkout goal"},
+            "Use approved test data",
+        )
+    crawl_workflows._record_note(
+        run_id, workflow, "crawled", ["Finished"], "Reached checkout"
+    )
+    with Session(isolated_db_engine) as session:
+        saved = sites.workflow_data_for_site(session.get(Site, site_id))
+    assert len(saved) == 1
+    assert saved[0]["goal"] == "Use my edited checkout goal"
+    assert saved[0]["instructions"] == "Use approved test data"
+
+
+def test_crawl_workflow_site_limit_does_not_stop_notes(isolated_db_engine):
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Shop", base_url="https://shop.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(site_id=site.id, name="Crawl")
+        session.add(run)
+        session.commit()
+        run_id, site_id = run.id, site.id
+
+    for index in range(21):
+        crawl_workflows._record_note(
+            run_id,
+            {
+                "name": f"Workflow {index}",
+                "goal": f"Reach page {index}",
+                "reason": "Found in crawl",
+                "start_url": f"https://shop.test/page/{index}",
+            },
+            "needs_input",
+            [],
+            "More input needed",
+            needs_input=True,
+        )
+    with Session(isolated_db_engine) as session:
+        assert len(crawl_workflows.list_workflow_notes(session, run_id)) == 21
+        assert len(sites.workflow_data_for_site(session.get(Site, site_id))) == 20
+
+
 def test_saved_payment_and_delete_workflows_do_not_generate_data():
     site = Site(
         name="Shop",
@@ -2069,7 +2152,14 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
     )
     assert _retry_state(run_id, 123)["status"] == "error"
     with Session(isolated_db_engine) as session:
-        assert sites.workflow_data_for_site(session.get(Site, site_id)) == []
+        assert sites.workflow_data_for_site(session.get(Site, site_id)) == [
+            {
+                "name": "Add a delivery address",
+                "goal": "Save an address",
+                "start_url": "https://shop.test/account/addresses",
+                "instructions": "",
+            }
+        ]
         notes = crawl_workflows.list_workflow_notes(session, run_id)
     assert notes[-1]["instructions"] == "Use 1 Example Street"
     assert notes[-1]["needs_input"] is True
@@ -2088,6 +2178,32 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
     assert saved[0]["instructions"] == (
         "Use 1 Example Street\nGenerated test values:\nfull_name: AESPA Test User"
     )
+    with Session(isolated_db_engine) as session:
+        for index in range(19):
+            sites.save_site_workflow_data(
+                session,
+                site_id,
+                {
+                    "name": f"Saved workflow {index}",
+                    "goal": "Reach a page",
+                    "start_url": f"https://shop.test/page/{index}",
+                },
+                "",
+            )
+    other_workflow = {
+        **workflow,
+        "name": "Another address",
+        "start_url": "https://shop.test/account/other",
+    }
+    crawl_workflows._retry_results[(run_id, 123)] = {"saved_to_site": False}
+    asyncio.run(
+        crawl_workflows._run_workflow_retry(run_id, other_workflow, save_to_site=True)
+    )
+    status = _retry_state(run_id, 123)
+    assert status["status"] == "complete"
+    assert status["result_status"] == "crawled"
+    assert status["saved_to_site"] is False
+    assert "up to 20 workflows" in status["save_error"]
     crawl_workflows._retry_results.pop((run_id, 123), None)
 
 

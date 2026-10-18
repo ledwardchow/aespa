@@ -145,7 +145,9 @@ export function WebRunNotificationsTab({
                     {expanded && note.reason ? <p className="subtle">{note.reason}</p> : null}
                     {expanded && canProvideMore ? <p>{note.request || note.detail}</p> : null}
                     {expanded && canProvideMore && note.save_to_site_requested ? (
-                      <p className="subtle">This attempt was not saved to the site.</p>
+                      <p className="subtle">
+                        This attempt's sample data was not saved to the site.
+                      </p>
                     ) : null}
                   </div>
                 </div>
@@ -193,7 +195,7 @@ export function WebRunNotificationsTab({
                           }))
                         }
                       />
-                      Save to site
+                      Save sample data to site if reached
                     </label>
                     <div className="workflow-input-actions">
                       <button

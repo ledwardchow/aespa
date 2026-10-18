@@ -1,5 +1,6 @@
 import * as sitesApi from "../../shared/api/sites.js";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { nav } from "../../shared/navigation/router.js";
 
 import { IconPlus } from "../../shared/ui/Icons.jsx";
@@ -8,6 +9,89 @@ import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageError } from "../../shared/ui/Notice.jsx";
 
 // ── Sites list ────────────────────────────────────────────────────────────────
+
+function SiteExportMenu({ site }) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState(null);
+  const buttonRef = useRef(null);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsideClick = (event) => {
+      if (!buttonRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) {
+        setOpen(false);
+      }
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        buttonRef.current?.focus();
+      }
+    };
+    const closeOnScroll = () => setOpen(false);
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("scroll", closeOnScroll, true);
+    window.addEventListener("resize", closeOnScroll);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("scroll", closeOnScroll, true);
+      window.removeEventListener("resize", closeOnScroll);
+    };
+  }, [open]);
+
+  const toggle = () => {
+    if (!open) {
+      const bounds = buttonRef.current.getBoundingClientRect();
+      setPosition({ top: bounds.bottom + 6, right: window.innerWidth - bounds.right });
+    }
+    setOpen((current) => !current);
+  };
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="btn secondary sm"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        Export ↓
+      </button>
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="sast-actions-popover"
+            role="menu"
+            style={{ position: "fixed", ...position }}
+          >
+            <a
+              href={`/api/sites/${site.id}/export?configuration_only=true`}
+              download
+              role="menuitem"
+              onClick={() => setOpen(false)}
+            >
+              Export settings only
+            </a>
+            <a
+              href={`/api/sites/${site.id}/export`}
+              download
+              role="menuitem"
+              onClick={() => setOpen(false)}
+            >
+              Export settings and runs
+            </a>
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
 
 export function SitesList() {
   const [sites, setSites] = useState(null);
@@ -80,10 +164,6 @@ export function SitesList() {
     } catch (e) {
       setError(e.message);
     }
-  };
-
-  const onExport = (s) => {
-    window.location.href = `/api/sites/${s.id}/export`;
   };
 
   const onImportFile = async (e) => {
@@ -222,9 +302,7 @@ export function SitesList() {
                         <button className="btn secondary sm" onClick={() => nav(`#/sites/${s.id}`)}>
                           Open
                         </button>
-                        <button className="btn secondary sm" onClick={() => onExport(s)}>
-                          Export
-                        </button>
+                        <SiteExportMenu site={s} />
                         <button className="btn danger-outline sm" onClick={() => onDelete(s)}>
                           Delete
                         </button>

@@ -177,10 +177,17 @@ export function WebRunWorkflowsTab({
                         ))}
                       </ol>
                     ) : null}
-                    {progress.saved_to_site ? <p className="subtle">Saved to site</p> : null}
-                    {progress.save_to_site_requested && !progress.saved_to_site ? (
+                    {progress.saved_to_site ? (
+                      <p className="subtle">Sample data saved to site</p>
+                    ) : null}
+                    {progress.save_error ? (
+                      <p className="notice error">{progress.save_error}</p>
+                    ) : null}
+                    {progress.save_to_site_requested &&
+                    !progress.saved_to_site &&
+                    !progress.save_error ? (
                       <p className="subtle">
-                        {busy ? "Will save to site if reached" : "Not saved to site"}
+                        {busy ? "Will save sample data if reached" : "Sample data not saved"}
                       </p>
                     ) : null}
                   </div>

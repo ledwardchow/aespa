@@ -204,18 +204,25 @@ def delete_credential(
 
 
 @router.get("/{site_id}/export")
-def export_site(site_id: int, session: Session = Depends(get_session)) -> JSONResponse:
-    """Download a portable JSON bundle for the site and all its data."""
+def export_site(
+    site_id: int,
+    configuration_only: bool = False,
+    session: Session = Depends(get_session),
+) -> JSONResponse:
+    """Download a portable JSON bundle for the site."""
     try:
-        bundle = sites_service.export_site(session, site_id)
+        bundle = sites_service.export_site(
+            session, site_id, configuration_only=configuration_only
+        )
     except sites_service.SiteNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
         ) from exc
     site_name = bundle["site"]["name"]
     safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in site_name)
+    suffix = "aespa-site-config" if configuration_only else "aespa-site"
     headers = {
-        "Content-Disposition": f'attachment; filename="{safe_name}.aespa-site.json"'
+        "Content-Disposition": f'attachment; filename="{safe_name}.{suffix}.json"'
     }
     return JSONResponse(content=bundle, headers=headers)
 

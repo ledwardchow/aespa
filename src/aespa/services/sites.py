@@ -7,6 +7,7 @@ these helpers directly without going through HTTP.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 
 from sqlmodel import Session, select
@@ -14,6 +15,11 @@ from sqlmodel import Session, select
 from aespa.models import Credential, Site
 from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate, SiteWorkflowInput
 from aespa.services.run_cleanup import detach_credential_dependents
+
+# Workflow definitions are stored as one JSON column. Keep read, edit, and
+# commit together when crawl and API threads update the same site. AESPA's
+# local server runs these writers in one process.
+site_workflow_lock = threading.RLock()
 
 
 def _parse_datetimes(data: dict, *fields: str) -> dict:
@@ -85,13 +91,44 @@ def workflow_data_for_site(site: Site) -> list[dict]:
 def save_site_workflow_data(
     session: Session, site_id: int, workflow: dict, instructions: str
 ) -> None:
-    site = get_site(session, site_id)
+    with site_workflow_lock:
+        site = get_site(session, site_id)
+        session.refresh(site)
+        if not upsert_site_workflow_data(site, workflow, instructions):
+            raise ValueError("A site can save up to 20 workflows.")
+        session.add(site)
+        session.commit()
+
+
+def upsert_site_workflow_data(
+    site: Site,
+    workflow: dict,
+    instructions: str = "",
+    *,
+    preserve_existing_goal: bool = False,
+) -> bool:
+    """Save one workflow definition, retaining saved values when none are supplied.
+
+    The caller owns the transaction. Returns false when the site is full.
+    """
     item = SiteWorkflowInput(
         name=workflow["name"],
         goal=workflow.get("goal") or workflow["name"],
         start_url=workflow.get("start_url") or workflow.get("url"),
         instructions=instructions,
     ).model_dump(mode="json")
+    from urllib.parse import urlsplit
+
+    site_url = urlsplit(site.base_url)
+    start_url = urlsplit(item["start_url"])
+    if (
+        start_url.hostname,
+        start_url.port or (443 if start_url.scheme == "https" else 80),
+    ) != (
+        site_url.hostname,
+        site_url.port or (443 if site_url.scheme == "https" else 80),
+    ):
+        raise ValueError("workflow starting pages must be on the site host")
     items = workflow_data_for_site(site)
     key = (item["name"].casefold(), item["start_url"].rstrip("/").casefold())
     for index, existing in enumerate(items):
@@ -100,16 +137,19 @@ def save_site_workflow_data(
             str(existing.get("start_url") or "").rstrip("/").casefold(),
         )
         if existing_key == key:
+            if preserve_existing_goal:
+                item["goal"] = existing.get("goal") or item["goal"]
+            if not item["instructions"]:
+                item["instructions"] = existing.get("instructions") or ""
             items[index] = item
             break
     else:
         if len(items) >= 20:
-            raise ValueError("A site can save up to 20 workflows.")
+            return False
         items.append(item)
     site.workflow_data_json = json.dumps(items)
     site.updated_at = _utcnow()
-    session.add(site)
-    session.commit()
+    return True
 
 
 def list_sites(session: Session) -> list[Site]:
@@ -171,6 +211,11 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
 
 
 def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
+    with site_workflow_lock:
+        return _update_site_locked(session, site_id, payload)
+
+
+def _update_site_locked(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     site = get_site(session, site_id)
     _ensure_unique_name(session, payload.name, ignore_id=site.id)
 
@@ -288,8 +333,10 @@ def delete_credential(session: Session, site_id: int, credential_id: int) -> Non
 # ── Export / Import ──────────────────────────────────────────────────────────
 
 
-def export_site(session: Session, site_id: int) -> dict:
-    """Return a portable dict containing the site and every related row.
+def export_site(
+    session: Session, site_id: int, *, configuration_only: bool = False
+) -> dict:
+    """Return a portable site bundle, optionally without test runs.
 
     All primary keys are preserved as export-local IDs so that import_site()
     can remap them.  Datetimes are serialised to ISO-8601 strings via
@@ -318,6 +365,15 @@ def export_site(session: Session, site_id: int) -> dict:
         return obj.model_dump(mode="json")
 
     creds = [_row(c) for c in site.credentials]
+    if configuration_only:
+        return {
+            "export_version": 1,
+            "exported_at": _utcnow().isoformat(),
+            "site": _row(site),
+            "credentials": creds,
+            "test_runs": [],
+        }
+
     runs = list(session.exec(select(TestRun).where(TestRun.site_id == site_id)).all())
 
     run_bundles = []

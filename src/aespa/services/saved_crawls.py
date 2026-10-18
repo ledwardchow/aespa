@@ -9,7 +9,7 @@ from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
 from aespa.models import CrawledPage, SavedCrawl, Site, TestRun, TestRunStatus
-from aespa.services import crawl_archives
+from aespa.services import crawl_archives, crawl_workflows, sites
 from aespa.services.crawl_archives import ArchiveError
 
 
@@ -55,16 +55,28 @@ def save_from_run(
     if site is None:
         raise ArchiveError(status=404, message=f"Site {run.site_id} not found")
     archive = crawl_archives.build_archive(session, run)
-    return _store(
-        session,
-        site,
-        archive,
-        name=name,
-        notes=notes,
-        source_run_id=run.id,
-        crawler_mode=run.crawler_mode,
-        page_selection=run.page_selection,
-    )
+    # Backfill notes recorded before automatic site workflow saving existed.
+    # The archive and site definitions are committed together by _store.
+    with sites.site_workflow_lock:
+        session.refresh(site)
+        for note in crawl_workflows.list_workflow_notes(session, run.id):
+            if not all(note.get(field) for field in ("name", "goal", "start_url")):
+                continue
+            try:
+                sites.upsert_site_workflow_data(site, note, preserve_existing_goal=True)
+            except (TypeError, ValueError):
+                continue
+        session.add(site)
+        return _store(
+            session,
+            site,
+            archive,
+            name=name,
+            notes=notes,
+            source_run_id=run.id,
+            crawler_mode=run.crawler_mode,
+            page_selection=run.page_selection,
+        )
 
 
 def save_from_file(

@@ -1841,8 +1841,8 @@
             "type": "string"
           },
           "instructions": {
+            "default": "",
             "maxLength": 4000,
-            "minLength": 1,
             "title": "Instructions",
             "type": "string"
           },
@@ -1863,8 +1863,7 @@
         "required": [
           "name",
           "goal",
-          "start_url",
-          "instructions"
+          "start_url"
         ],
         "title": "SiteWorkflowInput",
         "type": "object"

@@ -114,6 +114,17 @@ def test_site_workflow_data_can_be_edited_without_a_run(client):
         unchanged.json()["workflow_data"][0]["instructions"] == "Use a sample keyboard"
     )
 
+    blank = client.put(
+        f"/api/sites/{site_id}",
+        json={
+            "name": "With workflow",
+            "base_url": "https://juice.local",
+            "workflow_data": [{**workflow, "instructions": ""}],
+        },
+    )
+    assert blank.status_code == 200
+    assert blank.json()["workflow_data"][0]["instructions"] == ""
+
 
 def test_site_export_keeps_saved_workflow_data(session):
     workflow = {
@@ -702,6 +713,58 @@ def test_roundtrip_includes_run_children(session):
         select(AliceChatMessage).where(AliceChatMessage.session_id == new_alice.id)
     ).all()
     assert len(msgs) == 1 and msgs[0].text == "hi"
+
+
+def test_configuration_export_omits_runs_and_imports_site_settings(client, db_session):
+    created = make_site(
+        client,
+        name="Portable site",
+        requires_auth=True,
+        login_url="https://juice.local/login",
+        scan_guidance="Check the account page.",
+        scope_hosts=["juice.local"],
+        workflow_data=[
+            {
+                "name": "Checkout",
+                "goal": "Open checkout",
+                "start_url": "https://juice.local/cart",
+                "instructions": "Use the sample account",
+            }
+        ],
+        credentials=[{"username": "tester", "password": "sample-pass"}],
+    )
+    assert created.status_code == 201
+    site_id = created.json()["id"]
+    db_session.add(TestRun(site_id=site_id, name="private run", status="scanned"))
+    db_session.commit()
+
+    full = client.get(f"/api/sites/{site_id}/export")
+    assert full.status_code == 200
+    assert len(full.json()["test_runs"]) == 1
+
+    response = client.get(f"/api/sites/{site_id}/export?configuration_only=true")
+    assert response.status_code == 200
+    assert (
+        "Portable_site.aespa-site-config.json"
+        in response.headers["content-disposition"]
+    )
+    bundle = response.json()
+    assert bundle["test_runs"] == []
+    assert bundle["site"]["scan_guidance"] == "Check the account page."
+    assert bundle["credentials"][0]["username"] == "tester"
+
+    imported = client.post("/api/sites/import", json=bundle)
+    assert imported.status_code == 201
+    data = imported.json()
+    assert data["name"] == "Portable site (2)"
+    assert data["scan_guidance"] == "Check the account page."
+    assert data["scope_hosts"] == ["juice.local:443"]
+    assert data["workflow_data"][0]["name"] == "Checkout"
+    assert data["credentials"][0]["username"] == "tester"
+    assert (
+        db_session.exec(select(TestRun).where(TestRun.site_id == data["id"])).all()
+        == []
+    )
 
 
 def test_import_remaps_crawled_page_accessible_by_credentials(session):

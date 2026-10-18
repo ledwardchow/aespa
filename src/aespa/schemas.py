@@ -119,7 +119,7 @@ class SiteWorkflowInput(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     goal: str = Field(min_length=1, max_length=220)
     start_url: HttpUrl
-    instructions: str = Field(min_length=1, max_length=4000)
+    instructions: str = Field(default="", max_length=4000)
 
 
 class SiteBase(BaseModel):

@@ -1637,6 +1637,24 @@ def _record_note(
         page_url=url or workflow["start_url"],
         data={"stage": "workflow_note", "note": note},
     )
+    # The crawl log owns the attempt details. The site keeps only the reusable
+    # definition until someone explicitly chooses to save sample values.
+    try:
+        from aespa.services.sites import site_workflow_lock, upsert_site_workflow_data
+
+        with site_workflow_lock:
+            with Session(get_engine()) as session:
+                run = session.get(TestRun, run_id)
+                site = session.get(Site, run.site_id) if run else None
+                if site and upsert_site_workflow_data(
+                    site, note, preserve_existing_goal=True
+                ):
+                    session.add(site)
+                    session.commit()
+    except (KeyError, TypeError, ValueError):
+        log.warning("Could not save crawl workflow for run %s", run_id, exc_info=True)
+    except Exception:
+        log.exception("Could not save crawl workflow for run %s", run_id)
 
 
 async def explore_after_crawl(
@@ -2540,11 +2558,20 @@ async def _run_workflow_retry(
         ):
             from aespa.services.sites import save_site_workflow_data
 
-            with Session(get_engine()) as session:
-                save_site_workflow_data(
-                    session, run.site_id, workflow, effective_instructions
+            try:
+                with Session(get_engine()) as session:
+                    save_site_workflow_data(
+                        session, run.site_id, workflow, effective_instructions
+                    )
+            except ValueError as exc:
+                report({"save_error": str(exc)})
+            except Exception:
+                log.exception(
+                    "Could not save retry data for run %s note %s", run_id, note_id
                 )
-            report({"saved_to_site": True})
+                report({"save_error": "Could not save sample data to the site."})
+            else:
+                report({"saved_to_site": True})
     except asyncio.CancelledError:
         _retry_results[key] = {
             **_retry_results.get(key, {}),

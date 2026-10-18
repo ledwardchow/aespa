@@ -19,8 +19,8 @@ export function SiteWorkflowsTab({ workflows, onChange }) {
   return (
     <div className={styles.panelBody}>
       <p className="subtle">
-        Values saved by earlier crawls. The crawler reuses them to reach pages behind forms. Use
-        test data only. Saved values are sent to the crawler model and the site.
+        Workflows found during crawls are saved here for future runs. You can add sample data or
+        instructions. Use test data only. Saved values are sent to the crawler model and the site.
       </p>
       {workflows.length === 0 && <div className="subtle">No saved workflows.</div>}
       <div className={styles.workflowList}>
@@ -99,10 +99,9 @@ function WorkflowItem({ item, open, onToggle, onShow, onChange, onRemove }) {
           </div>
         </div>
         <div className="field">
-          <label htmlFor={`${id}-instructions`}>Sample data or instructions</label>
+          <label htmlFor={`${id}-instructions`}>Sample data or instructions (optional)</label>
           <textarea
             id={`${id}-instructions`}
-            required
             maxLength={4000}
             rows={4}
             value={item.instructions}

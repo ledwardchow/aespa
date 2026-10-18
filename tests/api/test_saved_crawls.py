@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 
 from fastapi.testclient import TestClient
-from sqlmodel import select
+from sqlmodel import Session, select
 
 from aespa.models import CrawledPage, SavedCrawl, ScanLog, TestRun
+from aespa.services import crawl_archives, sites
 
 
 def _make_site(client: TestClient, **kw):
@@ -185,6 +186,15 @@ def test_workflows_survive_file_export_and_site_save(client: TestClient, db_sess
     ]
     saved = _save(client, source["id"])
     assert saved.status_code == 201
+    site_after_save = client.get(f"/api/sites/{site['id']}").json()
+    assert site_after_save["workflow_data"] == [
+        {
+            "name": "Checkout",
+            "goal": "Reach checkout",
+            "start_url": "https://target.local/orders",
+            "instructions": "",
+        }
+    ]
     saved_export = client.get(
         f"/api/sites/{site['id']}/saved-crawls/{saved.json()['id']}/export"
     )
@@ -220,6 +230,89 @@ def test_workflows_survive_file_export_and_site_save(client: TestClient, db_sess
         summary = client.get(f"/api/test-runs/{target['id']}/recon-summary").json()
         assert summary["crawl_notes_checked"] is True
         assert len(summary["crawl_notes"]) == 2
+
+
+def test_save_crawl_keeps_edited_workflow_at_site_limit(client, db_session):
+    workflows = [
+        {
+            "name": f"Workflow {index}",
+            "goal": f"Edited goal {index}",
+            "start_url": f"https://target.local/page/{index}",
+            "instructions": "Use saved test data" if index == 0 else "",
+        }
+        for index in range(20)
+    ]
+    site = _make_site(client, workflow_data=workflows)
+    source = _seed_crawled_run(client, site["id"])
+    for name, goal, start_url in [
+        ("Workflow 0", "Old crawl goal", "https://target.local/page/0"),
+        ("New workflow", "New goal", "https://target.local/new"),
+    ]:
+        db_session.add(
+            ScanLog(
+                test_run_id=source["id"],
+                run_kind="web",
+                phase="crawl_note",
+                data_json=json.dumps(
+                    {"note": {"name": name, "goal": goal, "start_url": start_url}}
+                ),
+            )
+        )
+    db_session.commit()
+
+    assert _save(client, source["id"]).status_code == 201
+    saved = client.get(f"/api/sites/{site['id']}").json()["workflow_data"]
+    assert len(saved) == 20
+    assert saved[0] == workflows[0]
+    assert all(item["name"] != "New workflow" for item in saved)
+
+
+def test_save_crawl_refreshes_site_after_another_workflow_write(
+    client, db_session, monkeypatch
+):
+    site = _make_site(client)
+    source = _seed_crawled_run(client, site["id"])
+    db_session.add(
+        ScanLog(
+            test_run_id=source["id"],
+            run_kind="web",
+            phase="crawl_note",
+            data_json=json.dumps(
+                {
+                    "note": {
+                        "name": "Checkout",
+                        "goal": "Reach checkout",
+                        "start_url": "https://target.local/orders",
+                    }
+                }
+            ),
+        )
+    )
+    db_session.commit()
+    build_archive = crawl_archives.build_archive
+
+    def write_during_archive(session, run):
+        with Session(session.bind) as other:
+            sites.save_site_workflow_data(
+                other,
+                site["id"],
+                {
+                    "name": "Profile",
+                    "goal": "Reach profile",
+                    "start_url": "https://target.local/profile",
+                },
+                "Use test profile",
+            )
+        return build_archive(session, run)
+
+    monkeypatch.setattr(crawl_archives, "build_archive", write_during_archive)
+    assert _save(client, source["id"]).status_code == 201
+    saved = client.get(f"/api/sites/{site['id']}").json()["workflow_data"]
+    assert {item["name"] for item in saved} == {"Profile", "Checkout"}
+    assert (
+        next(item for item in saved if item["name"] == "Profile")["instructions"]
+        == "Use test profile"
+    )
 
 
 def test_saved_crawl_survives_source_run_deletion(client: TestClient):
