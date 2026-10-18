@@ -380,7 +380,7 @@ def test_console_ready_line_uses_configured_ipv6_host_and_port(monkeypatch) -> N
     assert list(handler.buffers[AGENT]) == ["Ready - listening on http://[::1]:8123"]
 
 
-def test_console_shows_key_without_writing_it_to_log_database(tmp_path, monkeypatch):
+def test_console_keeps_key_in_settings_and_out_of_startup_log(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "aespa.console._python_executor_runtime_status", lambda: "ready"
     )
@@ -391,13 +391,85 @@ def test_console_shows_key_without_writing_it_to_log_database(tmp_path, monkeypa
     )
     handler.log_store.set_enabled(True)
     handler.start_screen()
-    assert "Authentication key: management-secret" in handler.buffers[AGENT]
+    assert "management-secret" not in "\n".join(handler.buffers[AGENT])
+    assert "Press C to copy authentication key" in handler.buffers[AGENT]
     assert "Press ~ to open AESPA in your browser" in handler.buffers[AGENT]
     assert "management-secret" in "\n".join(handler._server_settings_body_lines(120))
     with sqlite3.connect(tmp_path / "logs.db") as connection:
         assert (
             connection.execute("SELECT COUNT(*) FROM console_logs").fetchone()[0] == 0
         )
+
+
+def test_startup_c_copies_authentication_key_on_posix_and_windows(monkeypatch):
+    copied = []
+    monkeypatch.setattr(
+        "aespa.console._python_executor_runtime_status", lambda: "ready"
+    )
+    monkeypatch.setattr(
+        "aespa.console._copy_to_clipboard", lambda key: copied.append(key) or True
+    )
+    output = io.StringIO()
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=output,
+        authentication_key="management-secret",
+    )
+    console.handler.start_screen()
+
+    console._process_posix_keys(b"c")
+    copied_frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "Authentication key copied." in copied_frame
+    console._handle_windows_key("C", 0x43, 0)
+
+    assert copied == ["management-secret", "management-secret"]
+    assert "management-secret" not in output.getvalue()
+    console._process_posix_keys(b"2")
+    assert console.handler.mode == ERRORS
+
+
+@pytest.mark.parametrize("mode", [LOGO, ERRORS, LLM, HTTP, TESTING, SETTINGS])
+def test_c_copies_key_from_each_console_view(monkeypatch, mode):
+    copied = []
+    monkeypatch.setattr(
+        "aespa.console._copy_to_clipboard", lambda key: copied.append(key) or True
+    )
+    output = io.StringIO()
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=output,
+        terminal_size=(120, 30),
+        authentication_key="management-secret",
+    )
+    console.handler.start_screen()
+    console.handler.switch(mode)
+    console._process_posix_keys(b"C")
+
+    frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert copied == ["management-secret"]
+    assert "[C] Copy key" in frame
+    assert "Authentication key copied." in frame
+    assert "management-secret" not in frame
+
+
+def test_c_remains_text_while_editing_settings(monkeypatch):
+    copied = []
+    monkeypatch.setattr(
+        "aespa.console._copy_to_clipboard", lambda key: copied.append(key) or True
+    )
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=io.StringIO(),
+        authentication_key="management-secret",
+    )
+    console.handler.start_screen()
+    console.handler.switch(SETTINGS)
+    console.handler.settings_section = "storage"
+    console.handler.settings_editing = True
+    console._process_posix_keys(b"c")
+
+    assert console.handler.data_folder_input == "c"
+    assert copied == []
 
 
 @pytest.mark.parametrize("shortcut", ["~", "`"])
@@ -436,7 +508,9 @@ def test_tilde_opens_fresh_login_link_at_current_port(monkeypatch, shortcut):
     assert console.handler.data_folder_input == shortcut * 2
 
 
-def test_console_settings_has_authentication_key_view(tmp_path, monkeypatch):
+def test_console_server_settings_shows_and_copies_authentication_key(
+    tmp_path, monkeypatch
+):
     copied = []
     monkeypatch.setattr(
         "aespa.console._python_executor_runtime_status", lambda: "ready"
@@ -457,10 +531,10 @@ def test_console_settings_has_authentication_key_view(tmp_path, monkeypatch):
     console.handler.start_screen()
     console._process_posix_keys(b"6")
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
-    assert "Authentication key" in frame
+    assert "Server Settings/Authentication" in frame
     assert "management-secret" not in frame
 
-    console._process_posix_keys(b"\x1b[B" * 4 + b"\r")
+    console._process_posix_keys(b"\r")
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
     assert "management-secret" in frame
     assert "Press C to copy the key" in frame
@@ -469,11 +543,13 @@ def test_console_settings_has_authentication_key_view(tmp_path, monkeypatch):
     assert copied[0][0] == ["pbcopy"]
     assert copied[0][1]["input"] == "management-secret"
     assert "Authentication key copied." in output.getvalue()
-    console._process_posix_keys(b"\r")
-    assert not console.handler.settings_editing
-    console.input_stream = io.StringIO("\x1b")
-    console._read_stream_keys()
     assert console.handler.settings_section == "root"
+    console._process_posix_keys(b"1")
+    assert console.handler.mode == AGENT
+    console._process_posix_keys(b"6\rC")
+    assert console.handler.settings_section == "root"
+    console._process_posix_keys(b"1")
+    assert console.handler.mode == AGENT
     with sqlite3.connect(tmp_path / "logs.db") as connection:
         assert (
             connection.execute("SELECT COUNT(*) FROM console_logs").fetchone()[0] == 0
@@ -505,13 +581,64 @@ def test_console_reports_clipboard_failure_without_exposing_key(tmp_path, monkey
     assert "management-secret" not in console.handler.settings_status
 
 
+def test_server_settings_rotates_key_after_confirmation(monkeypatch):
+    rotated = []
+    copied = []
+    monkeypatch.setattr(
+        "aespa.console._copy_to_clipboard", lambda key: copied.append(key) or True
+    )
+    output = io.StringIO()
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=output,
+        authentication_key="old-management-key",
+        on_rotate_key=lambda: rotated.append(True) or "new-management-key",
+    )
+    console.handler.start_screen()
+    console._process_posix_keys(b"6\rR")
+    assert console.handler.rotation_pending
+    assert not rotated
+    assert "[R] Rotate key  [Esc] Cancel" in output.getvalue()
+
+    console._process_posix_keys(b"\x1b")
+    console._flush_pending_escape()
+    assert not console.handler.rotation_pending
+    assert not rotated
+    console._process_posix_keys(b"rR")
+    assert rotated == [True]
+    assert console.handler.authentication_key == "new-management-key"
+    assert "Authentication key rotated." in output.getvalue()
+    console._process_posix_keys(b"c")
+    assert copied == ["new-management-key"]
+    assert console.handler.settings_section == "root"
+
+
+def test_server_settings_keeps_old_key_when_rotation_fails():
+    def fail_rotation():
+        raise ValueError("The authentication key comes from AESPA_AUTH_KEY_FILE.")
+
+    output = io.StringIO()
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=output,
+        authentication_key="old-management-key",
+        on_rotate_key=fail_rotation,
+    )
+    console.handler.start_screen()
+    console._process_posix_keys(b"6\rRR")
+
+    assert console.handler.authentication_key == "old-management-key"
+    assert "Could not rotate the key:" in output.getvalue()
+    assert "AESPA_AUTH_KEY_FILE" in output.getvalue()
+
+
 def test_posix_escape_returns_to_settings_after_input_timeout(monkeypatch):
     console = InteractiveConsole(
         input_stream=SimpleNamespace(isatty=lambda: True, fileno=lambda: 0),
         output_stream=io.StringIO(),
     )
     console.handler.switch(SETTINGS)
-    console.handler.settings_section = "authentication"
+    console.handler.settings_section = "server"
     reads = iter([([0], [], []), ([], [], [])])
 
     def ready(*args):
@@ -940,12 +1067,17 @@ def test_settings_menu_hides_server_details_until_opened() -> None:
     console._process_posix_keys(b"6")
 
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
-    assert "Server Settings" in frame
+    assert "Server Settings/Authentication" in frame
+    assert frame.count("Authentication") == 1
     assert "Database Operations" in frame
     assert "Console Log Database" in frame
     assert "Data Folder" in frame
     assert "Listening address" not in frame
     assert "Port                " not in frame
+
+    console._process_posix_keys(b"\x1b[B" * 4)
+    assert console.handler.settings_selected == 3
+    console._process_posix_keys(b"\x1b[A" * 3)
 
     console._process_posix_keys(b"\r")
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]

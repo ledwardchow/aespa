@@ -64,7 +64,7 @@ export function AuthenticationGate({ children }: { children: ReactNode }) {
         ) : (
           <form onSubmit={submit}>
             <h2>Sign in</h2>
-            <p>The authentication key is shown in the AESPA console on startup.</p>
+            <p>Press C in the AESPA console to copy the authentication key.</p>
             {auth.message && !error ? <p role="status">{auth.message}</p> : null}
             <div className="field">
               <label htmlFor="authentication-key">Authentication key</label>

@@ -58,6 +58,73 @@ def test_sessions_survive_restart_and_are_instance_and_port_bound(tmp_path):
     assert other_port.get("/api/auth/session").json()["authenticated"] is False
 
 
+def test_rotating_key_replaces_live_credentials_and_persists(tmp_path):
+    app = app_for(tmp_path / "data")
+    client = TestClient(app)
+    old_key = app.state.auth.key
+    login(client, app)
+    old_cookie_name = app.state.auth.cookie_name
+    old_cookie = client.cookies.get(old_cookie_name)
+    other_port = app_for(tmp_path / "data", port=9000)
+    old_ticket = urlsplit(app.state.auth.login_url("http://testserver")).fragment.split(
+        "=", 1
+    )[1]
+
+    new_key = app.state.auth.rotate_key()
+
+    assert new_key != old_key
+    assert app.state.auth.key == new_key
+    assert other_port.state.auth.key == new_key
+    assert client.get("/api/auth/session").json()["authenticated"] is False
+    assert (
+        client.post("/api/auth/exchange", json={"token": old_ticket}).status_code == 401
+    )
+    assert client.post("/api/auth/login", json={"key": old_key}).status_code == 401
+    assert client.post("/api/auth/login", json={"key": new_key}).status_code == 200
+    assert (
+        TestClient(app, cookies={old_cookie_name: old_cookie})
+        .get("/api/auth/key")
+        .status_code
+        == 401
+    )
+
+    local_auth._AUTH.clear()
+    restarted = app_for(tmp_path / "data")
+    assert restarted.state.auth.key == new_key
+    assert (
+        TestClient(restarted).post("/api/auth/login", json={"key": new_key}).status_code
+        == 200
+    )
+
+
+def test_managed_key_file_cannot_be_rotated_from_console(tmp_path):
+    key_file = tmp_path / "key"
+    key_file.write_text("a" * 40)
+    app = app_for(tmp_path / "data", auth_key_file=key_file)
+
+    with pytest.raises(ValueError, match="AESPA_AUTH_KEY_FILE"):
+        app.state.auth.rotate_key()
+
+    assert key_file.read_text() == "a" * 40
+    assert app.state.auth.key == "a" * 40
+
+
+def test_failed_key_rotation_keeps_current_key(tmp_path, monkeypatch):
+    app = app_for(tmp_path / "data")
+    old_key = app.state.auth.key
+
+    def fail_replace(_source, _destination):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(local_auth.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="disk unavailable"):
+        app.state.auth.rotate_key()
+
+    assert app.state.auth.key == old_key
+    local_auth._AUTH.clear()
+    assert app_for(tmp_path / "data").state.auth.key == old_key
+
+
 def test_csrf_origin_host_and_logout(tmp_path):
     app = app_for(tmp_path)
     client = TestClient(app)

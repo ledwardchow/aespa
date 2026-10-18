@@ -202,6 +202,7 @@ class InteractiveConsoleHandler(logging.Handler):
         host: str = "127.0.0.1",
         env_path: Path | None = None,
         on_port_change: Callable[[int], None] | None = None,
+        on_rotate_key: Callable[[], str] | None = None,
         allow_port_change: bool = True,
         terminal_size: tuple[int, int] | None = None,
         log_db_path: Path | None = None,
@@ -233,6 +234,7 @@ class InteractiveConsoleHandler(logging.Handler):
 
         self.env_path = env_path or settings_env_path()
         self.on_port_change = on_port_change
+        self.on_rotate_key = on_rotate_key
         self.allow_port_change = allow_port_change
         self.fixed_terminal_size = terminal_size
         self.log_store = ConsoleLogStore(
@@ -242,6 +244,8 @@ class InteractiveConsoleHandler(logging.Handler):
         self.settings_replace_on_digit = False
         self.settings_value = str(port)
         self.settings_status = ""
+        self.rotation_pending = False
+        self.authentication_copy_status = ""
         self.settings_section = "root"
         self.settings_selected = 0
         self.active_data_dir = Path(get_settings().data_dir).expanduser().resolve()
@@ -292,6 +296,8 @@ class InteractiveConsoleHandler(logging.Handler):
                 self._startup_fade_phase = None
                 self._startup_fade_frame = 0
             self._finishing_logo_animation = False
+            if mode != previous_mode:
+                self.authentication_copy_status = ""
             if previous_mode == LOGO and mode == AGENT and not self._agent_message_seen:
                 cycle_frames = round(
                     (_LOGO_LOOP_DURATION + _LOGO_PAUSE_DURATION)
@@ -336,36 +342,38 @@ class InteractiveConsoleHandler(logging.Handler):
                 self.buffers[AGENT].append(self.settings_status)
                 self._redraw_locked()
 
+    def copy_authentication_key(self) -> bool:
+        if not self.authentication_key or (
+            self.mode == SETTINGS and (self.settings_editing or self.rotation_pending)
+        ):
+            return False
+        with self._output_lock:
+            copied = _copy_to_clipboard(self.authentication_key)
+            status = (
+                "Authentication key copied."
+                if copied
+                else "Could not copy the key. Open Settings to copy it."
+            )
+            if self.mode == SETTINGS:
+                self.settings_status = status
+                if copied and self.settings_section == "server":
+                    self.settings_section = "root"
+            else:
+                self.authentication_copy_status = status
+            self._redraw_locked()
+        return True
+
     def handle_settings_key(self, key: str) -> bool:
         """Handle one key when the Settings view is active."""
         if self.mode != SETTINGS:
             return False
         with self._output_lock:
-            if (
-                self.settings_section in ("authentication", "server")
-                and not self.settings_editing
-                and key.lower() == "c"
-                and self.authentication_key
-            ):
-                self.settings_status = (
-                    "Authentication key copied."
-                    if _copy_to_clipboard(self.authentication_key)
-                    else "Could not copy the key. Select it in the terminal to copy it."
-                )
-                self._redraw_locked()
-                return True
             if self.settings_section == "database":
                 return self._handle_database_key(key)
             if self.settings_section == "logging":
                 return self._handle_log_database_key(key)
             if self.settings_section == "storage":
                 return self._handle_data_folder_key(key)
-            if self.settings_section == "authentication":
-                if key == "\x1b":
-                    self.settings_section = "root"
-                    self.settings_status = ""
-                    self._redraw_locked()
-                return True
             if self.settings_section == "root":
                 if key not in ("\r", "\n"):
                     return False
@@ -374,12 +382,35 @@ class InteractiveConsoleHandler(logging.Handler):
                     "database",
                     "logging",
                     "storage",
-                    "authentication",
                 )[self.settings_selected]
                 self.settings_status = ""
                 self._redraw_locked()
                 return True
             if not self.settings_editing:
+                if self.rotation_pending:
+                    if key.lower() == "r":
+                        self.rotation_pending = False
+                        try:
+                            if self.on_rotate_key is None:
+                                raise ValueError("Key rotation is unavailable.")
+                            self.authentication_key = self.on_rotate_key()
+                            self.settings_status = "Authentication key rotated. Browsers need to sign in again on their next request."
+                        except (OSError, ValueError) as exc:
+                            self.settings_status = f"Could not rotate the key: {exc}"
+                    elif key == "\x1b":
+                        self.rotation_pending = False
+                        self.settings_status = "Key rotation cancelled."
+                    self._redraw_locked()
+                    return True
+                if (
+                    key.lower() == "r"
+                    and self.on_rotate_key
+                    and self.authentication_key
+                ):
+                    self.rotation_pending = True
+                    self.settings_status = "Press R again to rotate the key and require a new browser sign-in, or Esc to cancel."
+                    self._redraw_locked()
+                    return True
                 if key == "\x1b":
                     self.settings_section = "root"
                     self.settings_status = ""
@@ -623,7 +654,7 @@ class InteractiveConsoleHandler(logging.Handler):
             if self.settings_section == "database":
                 self.database_selected = min(max(self.database_selected + delta, 0), 2)
             elif self.settings_section == "root":
-                self.settings_selected = min(max(self.settings_selected + delta, 0), 4)
+                self.settings_selected = min(max(self.settings_selected + delta, 0), 3)
             self._redraw_locked()
 
     def toggle_selected_llm(self) -> None:
@@ -680,9 +711,7 @@ class InteractiveConsoleHandler(logging.Handler):
                     f"Ready - listening on {_listening_url(self.host, self.runtime_port)}"
                 )
                 if self.authentication_key is not None:
-                    self.buffers[AGENT].append(
-                        f"Authentication key: {self.authentication_key}"
-                    )
+                    self.buffers[AGENT].append("Press C to copy authentication key")
                     self.buffers[AGENT].append("Press ~ to open AESPA in your browser")
                 python_executor_status = _python_executor_runtime_status()
                 if python_executor_status == "docker_not_installed":
@@ -834,7 +863,7 @@ class InteractiveConsoleHandler(logging.Handler):
             )
         screen += (
             f"\x1b[{height};1H\x1b[2K"
-            f"{_legend(self.mode, self.settings_editing, self.settings_section)[:width]}"
+            f"{_legend(self.mode, self.settings_editing, self.settings_section, copy_key=bool(self.authentication_key), copy_status=self.authentication_copy_status, rotation_pending=self.rotation_pending)[:width]}"
         )
         if self._startup_fade_phase == "console":
             screen = _fade_terminal_frame(
@@ -844,7 +873,7 @@ class InteractiveConsoleHandler(logging.Handler):
         self.stream.flush()
 
     def _redraw_logo_locked(self, width: int, height: int) -> None:
-        """Render the hidden logo-only view without tabs, chrome, or legend."""
+        """Render the logo-only view with its copy shortcut at the bottom."""
         large = width >= 100 and height >= len(_AESPA_LOGO_LARGE)
         compact = not large and (width < 69 or height < len(_AESPA_LOGO))
         logo_lines = _aespa_logo_lines(
@@ -861,6 +890,11 @@ class InteractiveConsoleHandler(logging.Handler):
             if row > height:
                 break
             screen += f"\x1b[{row};1H{_truncate_terminal_line(line, width)}"
+        if self.authentication_key:
+            screen += (
+                f"\x1b[{height};1H\x1b[2K"
+                f"{_legend(LOGO, copy_key=True, copy_status=self.authentication_copy_status)[:width]}"
+            )
         self.stream.write(screen)
         self.stream.flush()
 
@@ -887,7 +921,10 @@ class InteractiveConsoleHandler(logging.Handler):
                 column = max(1, ((width - visible_width) // 2) + 1)
                 screen += f"\x1b[{record_row};{column}H{rendered_line}"
                 record_row += 1
-        screen += f"\x1b[{height};1H\x1b[2K{_legend(AGENT, False, 'root')[:width]}"
+        screen += (
+            f"\x1b[{height};1H\x1b[2K"
+            f"{_legend(AGENT, copy_key=bool(self.authentication_key), copy_status=self.authentication_copy_status)[:width]}"
+        )
         if self._startup_fade_phase == "console":
             screen = _fade_terminal_frame(
                 screen, self._startup_fade_frame / _STARTUP_FADE_FRAMES
@@ -954,34 +991,15 @@ class InteractiveConsoleHandler(logging.Handler):
             return self._log_database_settings_body_lines(width)
         if self.settings_section == "storage":
             return self._data_folder_body_lines(width)
-        if self.settings_section == "authentication":
-            lines = [
-                "Authentication key",
-                "",
-                self.authentication_key or "Authentication is not enabled.",
-                "",
-            ]
-            if self.authentication_key:
-                lines.extend(
-                    [
-                        "Enter this key on the AESPA sign-in page.",
-                        "Press C to copy the key.",
-                        "Press ~ or ` to open AESPA in your browser.",
-                    ]
-                )
-            lines.append("Press Esc to return to Settings.")
-            if self.settings_status:
-                lines.extend(["", self.settings_status])
-            return [
-                wrapped for line in lines for wrapped in _wrap_console_line(line, width)
-            ]
-        return [
-            f"{'▶' if self.settings_selected == 0 else ' '} Server Settings",
+        lines = [
+            f"{'▶' if self.settings_selected == 0 else ' '} Server Settings/Authentication",
             f"{'▶' if self.settings_selected == 1 else ' '} Database Operations",
             f"{'▶' if self.settings_selected == 2 else ' '} Console Log Database",
             f"{'▶' if self.settings_selected == 3 else ' '} Data Folder",
-            f"{'▶' if self.settings_selected == 4 else ' '} Authentication key",
         ]
+        if self.settings_status:
+            lines.extend(["", self.settings_status])
+        return lines
 
     def _data_folder_body_lines(self, width: int) -> list[str]:
         lines = [
@@ -1019,7 +1037,7 @@ class InteractiveConsoleHandler(logging.Handler):
             else "The desktop app selects an available local port automatically."
         )
         lines = [
-            "Server Settings",
+            "Server Settings/Authentication",
             "",
             f"  Listening address   http://{self.host}:{self.runtime_port}",
             f"  Port                {value}{cursor}",
@@ -1032,6 +1050,8 @@ class InteractiveConsoleHandler(logging.Handler):
                 "  Press C to copy the key",
                 "  Press ~ to open AESPA in your browser",
             ]
+            if self.on_rotate_key:
+                lines.insert(7, "  Press R to rotate the key")
         if self.allow_port_change:
             lines.append(
                 f"The setting is saved in {self.env_path} for future launches."
@@ -1391,30 +1411,48 @@ def _scrollbar(body_height: int, page: int, page_count: int) -> list[str]:
 
 
 def _legend(
-    mode: str = AGENT, editing: bool = False, settings_section: str = "root"
+    mode: str = AGENT,
+    editing: bool = False,
+    settings_section: str = "root",
+    *,
+    copy_key: bool = False,
+    copy_status: str = "",
+    rotation_pending: bool = False,
 ) -> str:
-    if mode == SETTINGS:
+    if mode == LOGO:
+        legend = ""
+    elif mode == SETTINGS:
+        if rotation_pending:
+            return "[R] Rotate key  [Esc] Cancel"
         if settings_section == "logging":
-            return "[~ or `] Open browser  [Enter] Enable/Disable  [Esc] Back  [Ctrl+C] Quit"
-        if settings_section == "database":
+            legend = "[~ or `] Open browser  [Enter] Enable/Disable  [Esc] Back  [Ctrl+C] Quit"
+        elif settings_section == "database":
             if editing:
                 return "[Enter] Confirm  [Backspace] Delete  [Esc] Cancel"
-            return "[~ or `] Open browser  [↑/↓] Select  [Enter] Open  [Esc] Back"
-        if settings_section == "storage":
+            legend = "[~ or `] Open browser  [↑/↓] Select  [Enter] Open  [Esc] Back"
+        elif settings_section == "storage":
             if editing:
                 return "[Enter] Save  [Backspace] Delete  [Esc] Cancel"
-            return "[~ or `] Open browser  [Enter] Choose folder  [Esc] Back  [Ctrl+C] Quit"
-        if settings_section == "root":
-            return "[~ or `] Open browser  [1-6] Views  [↑/↓] Select  [Enter] Open  [Ctrl+C] Quit"
-        if settings_section == "authentication":
-            return "[~ or `] Open browser  [Esc] Back  [Ctrl+C] Quit"
-        if editing:
+            legend = "[~ or `] Open browser  [Enter] Choose folder  [Esc] Back  [Ctrl+C] Quit"
+        elif settings_section == "root":
+            legend = "[~ or `] Open browser  [1-6] Views  [↑/↓] Select  [Enter] Open  [Ctrl+C] Quit"
+        elif editing:
             return "[0-9] Port  [Backspace] Delete  [Enter] Save  [Esc] Cancel"
-        return "[~ or `] Open browser  [Enter] Change port  [Esc] Back  [Ctrl+C] Quit"
-    return (
-        "[1-6] Views  [~ or `] Open browser  [↑/↓] Select  [Enter] Expand  "
-        "[Wheel/PgUp/PgDn] Scroll  [Ctrl+C] Quit"
-    )
+        else:
+            legend = (
+                "[~ or `] Open browser  [Enter] Change port  [Esc] Back  [Ctrl+C] Quit"
+            )
+    else:
+        legend = (
+            "[1-6] Views  [~ or `] Open browser  [↑/↓] Select  [Enter] Expand  "
+            "[Wheel/PgUp/PgDn] Scroll  [Ctrl+C] Quit"
+        )
+    if not copy_key or editing:
+        return legend
+    prefix = "[C] Copy key"
+    if copy_status:
+        prefix += f"  {copy_status}"
+    return f"{prefix}  {legend}".rstrip()
 
 
 def _copy_to_clipboard(value: str) -> bool:
@@ -1932,6 +1970,7 @@ class InteractiveConsole:
         host: str = "127.0.0.1",
         env_path: Path | None = None,
         on_port_change: Callable[[int], None] | None = None,
+        on_rotate_key: Callable[[], str] | None = None,
         on_quit: Callable[[], None] | None = None,
         allow_port_change: bool = True,
         replace_logging_handlers: bool = True,
@@ -1947,6 +1986,7 @@ class InteractiveConsole:
             host=host,
             env_path=env_path,
             on_port_change=on_port_change,
+            on_rotate_key=on_rotate_key,
             allow_port_change=allow_port_change,
             terminal_size=terminal_size,
             log_db_path=log_db_path,
@@ -2207,6 +2247,8 @@ class InteractiveConsole:
             if key in ("~", "`"):
                 self.handler.open_browser()
                 continue
+            if key.lower() == "c" and self.handler.copy_authentication_key():
+                continue
             if self.handler.handle_settings_key(key):
                 continue
             if key in _MODE_KEYS:
@@ -2335,6 +2377,8 @@ class InteractiveConsole:
         elif character not in ("", "\x00"):
             if character in ("~", "`") and not self.handler.settings_editing:
                 self.handler.open_browser()
+                return
+            if character.lower() == "c" and self.handler.copy_authentication_key():
                 return
             if self.handler.handle_settings_key(character):
                 return

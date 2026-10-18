@@ -51,25 +51,66 @@ class AuthManager:
         if os.name != "nt":
             state_file.chmod(0o600)
         state = json.loads(state_file.read_text(encoding="utf-8"))
-        self.key = (
+        key = (
             settings.auth_key_file.read_text(encoding="utf-8").strip()
             if settings.auth_key_file
             else state["key"]
         )
-        if len(self.key) < 32:
+        if len(key) < 32:
             raise ValueError(
                 "The authentication key must contain at least 32 characters."
             )
-        self.secret = hmac.new(
-            state["secret"].encode(), self.key.encode(), hashlib.sha256
-        ).hexdigest()
-        self.identity = hashlib.sha256(
-            f"{self.secret}:{settings.port}".encode()
-        ).hexdigest()[:24]
-        self.cookie_name = f"aespa_session_{self.identity}"
         self._tickets: dict[str, float] = {}
         self._failures: OrderedDict[str, deque[float]] = OrderedDict()
         self._lock = threading.Lock()
+        self._set_key(key, state["secret"])
+
+    def _set_key(self, key: str, state_secret: str) -> None:
+        self.key = key
+        self.secret = hmac.new(
+            state_secret.encode(), key.encode(), hashlib.sha256
+        ).hexdigest()
+        self.identity = hashlib.sha256(
+            f"{self.secret}:{self.settings.port}".encode()
+        ).hexdigest()[:24]
+        self.cookie_name = f"aespa_session_{self.identity}"
+        self._tickets.clear()
+        self._failures.clear()
+
+    def rotate_key(self) -> str:
+        if self.settings.auth_key_file:
+            raise ValueError(
+                "The authentication key comes from AESPA_AUTH_KEY_FILE. Change that file to rotate it."
+            )
+        state_file = self.settings.data_dir / "auth.json"
+        with _AUTH_LOCK:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            state_secret = state["secret"]
+            if not isinstance(state_secret, str):
+                raise ValueError("The saved authentication secret is invalid.")
+            new_key = secrets.token_urlsafe(32)
+            state["key"] = new_key
+            fd, temporary = tempfile.mkstemp(dir=state_file.parent, prefix=".auth-")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump(state, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, state_file)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            managers = {id(manager): manager for manager in _AUTH.values()}
+            managers[id(self)] = self
+            for manager in managers.values():
+                if (
+                    manager.settings.auth_key_file is None
+                    and manager.settings.data_dir.resolve()
+                    == self.settings.data_dir.resolve()
+                ):
+                    with manager._lock:
+                        manager._set_key(new_key, state_secret)
+            return new_key
 
     def login_url(self, base_url: str) -> str:
         token = secrets.token_urlsafe(32)

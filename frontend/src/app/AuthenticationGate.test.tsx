@@ -19,7 +19,7 @@ test("keeps management content hidden until authenticated", () => {
   );
   expect(screen.queryByText("Private settings")).toBeNull();
   expect(screen.getByLabelText("Authentication key")).toBeTruthy();
-  expect(screen.getByText(/shown in the AESPA console/)).toBeTruthy();
+  expect(screen.getByText(/Press C in the AESPA console/)).toBeTruthy();
 });
 
 test("allows another attempt after an incorrect key", async () => {

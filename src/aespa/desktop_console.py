@@ -40,6 +40,7 @@ class DesktopConsoleServer:
             port=self.port,
             env_path=settings_env_path(),
             allow_port_change=False,
+            on_rotate_key=self.auth.rotate_key,
             replace_logging_handlers=False,
             log_db_path=get_settings().data_dir / "logs.db",
             authentication_key=self.auth.key,

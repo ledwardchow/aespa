@@ -371,6 +371,9 @@ def main() -> None:
             host=settings.host,
             env_path=settings_env_path(),
             on_port_change=change_port,
+            on_rotate_key=lambda: get_auth(
+                settings.model_copy(update={"port": port})
+            ).rotate_key(),
             on_quit=request_quit,
             log_db_path=Path(settings.data_dir) / "logs.db",
             authentication_key=auth.key,
@@ -400,6 +403,7 @@ def main() -> None:
             if available_port != port:
                 print(f"[aespa] Port {port} is in use; using port {available_port}.")
                 port = available_port
+            auth = get_auth(settings.model_copy(update={"port": port}))
             server = uvicorn.Server(
                 uvicorn.Config(
                     create_app(settings.model_copy(update={"port": port})),
