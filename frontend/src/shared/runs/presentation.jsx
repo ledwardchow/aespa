@@ -81,6 +81,11 @@ export function runWorkflowStatus(run, opts = {}) {
       key: "ok",
       label: "Dynamic Scan completed",
     };
+  if (run.status === "complete" && run.phase === "crawled")
+    return {
+      key: "ok",
+      label: "Crawled",
+    };
   if (run.status === "complete")
     return {
       key: "ok",

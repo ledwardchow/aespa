@@ -29,6 +29,15 @@ test("the run badge says stopped", () => {
   assert.equal(runWorkflowStatus({ status: "stopped" }).label, "stopped");
 });
 
+test("the run badge distinguishes a finished crawl from a finished scan", () => {
+  assert.equal(runWorkflowStatus({ status: "complete", phase: "crawled" }).label, "Crawled");
+  assert.equal(runWorkflowStatus({ status: "complete", phase: "finished" }).label, "completed");
+  assert.equal(
+    runWorkflowStatus({ status: "complete", phase: "crawled", thinking_status: "complete" }).label,
+    "Dynamic Scan completed",
+  );
+});
+
 test("crawler activity follows its own agent state", () => {
   assert.equal(isCrawlerAgentActive({ status: "active" }), true);
   assert.equal(isCrawlerAgentActive({ status: "complete" }), false);

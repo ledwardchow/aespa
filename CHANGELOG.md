@@ -30,13 +30,15 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Testing business-logic flaws in forms**: During a web scan, AESPA can now change a form value that the page does not let a shopper edit — a hidden field, a disabled option, or a value the page never shows at all — and then submit the real form. This lets it test for flaws where the server trusts a value from the browser, such as a checkout that charges a total sent by the page, a saved payment method that belongs to another account, or a coupon reused by changing the order email. It drives the page's own form so the request stays valid, instead of replaying a captured request that the site would reject.
 
-- **Workflows on grouped pages**: Workflows found on one example page can use different items from the same group. AESPA checks the chosen item before trying the action, saves it for retries, and keeps it reserved while other workflows run. Named DAST workflow tests use the same item selection. Delete workflows remain blocked during crawling.
+- **Workflows on grouped pages**: Workflows found on one example page can use different items from the same group. AESPA checks the chosen item before trying the action, saves it for retries, and keeps it reserved while other workflows run. Retries work when the example item was discovered but was not one of the pages crawled. Shipping workflows skip orders that are already shipped. Named DAST workflow tests use the same item selection. Delete workflows remain blocked during crawling.
 
 - **ChatGPT Plan Usage tables**: The Readings and Measured intervals tables now show 10 rows at a time, with Previous and Next buttons when there are more.
 
 - **Finding review after web scans**: AESPA reviews batches of findings concurrently, up to the saved DAST LLM request limit. Failed requests and missing verdicts leave the affected findings unvalidated.
 
 ### Fixes
+
+- **Crawl-only run status**: The Sites run list shows "Crawled" when a run has finished crawling but has not completed a scan.
 
 - **Workflow input notice**: Choosing to start a scan with unfinished workflows now hides their Needs input count. A later workflow attempt still shows a new notice.
 

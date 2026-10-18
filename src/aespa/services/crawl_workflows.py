@@ -57,6 +57,12 @@ _ITEM_ACTIONS = (
         re.compile(r"\b(?:add|create|new)\b", re.I),
     ),
 )
+_SHIP_WORKFLOW = re.compile(
+    r"\b(?:mark\b.{0,45}\bship(?:ped)?|ship\b.{0,20}\border)\b", re.I
+)
+_SHIP_CONTROL = re.compile(
+    r"\b(?:mark\s+as\s+shipped|ship(?:\s+this)?\s+order)\b", re.I
+)
 _PAYMENT_WORKFLOW = re.compile(
     r"\b(?:pay|payment|paying|checkout|purchase|charge|"
     r"(?:place|submit)\W+(?:an?\W+)?order|"
@@ -1753,12 +1759,38 @@ async def explore_after_crawl(
     # Claim a useful item for ordinary workflows before recording blocked deletion.
     proposals.sort(key=lambda workflow: bool(workflow.get("destructive")))
 
+    start_pages: dict[str, CrawledPage | None] = {}
+    group_pages: dict[str, CrawledPage | None] = {}
     for workflow in proposals:
         example_url = workflow.get("example_url") or workflow["start_url"]
-        if known_pages.get(_norm(example_url)) is None and not (
+        start_page = known_pages.get(_norm(example_url))
+        if start_page is None and _same_domain(example_url, base_netloc):
+            route_pattern = workflow_targets.workflow_group_for_example(
+                run_id, example_url
+            )
+            if route_pattern and route_pattern not in group_pages:
+                with Session(get_engine()) as session:
+                    group_urls = session.exec(
+                        select(DiscoveredTarget.url)
+                        .where(DiscoveredTarget.test_run_id == run_id)
+                        .where(DiscoveredTarget.route_pattern == route_pattern)
+                        .order_by(DiscoveredTarget.url)
+                    )
+                    group_pages[route_pattern] = next(
+                        (
+                            known_pages[_norm(url)]
+                            for url in group_urls
+                            if _norm(url) in known_pages
+                        ),
+                        None,
+                    )
+            if route_pattern:
+                start_page = group_pages[route_pattern]
+        if start_page is None and not (
             workflow.get("saved_site_data") and _same_domain(example_url, base_netloc)
         ):
             raise ValueError("Workflow start page is not in the saved crawl")
+        start_pages[_norm(example_url)] = start_page
 
     historical_usernames = _historical_credential_usernames(run_id)
     # Each workflow gets its own browser context and signs in separately, so
@@ -1786,7 +1818,7 @@ async def explore_after_crawl(
             report(detail, stage="finished", result_status=status)
 
         example_url = workflow.get("example_url") or workflow["start_url"]
-        start_page = known_pages.get(_norm(example_url))
+        start_page = start_pages[_norm(example_url)]
         destructive = bool(workflow["destructive"]) or bool(
             _DELETE_ACTION.search(
                 f"{workflow.get('name') or ''} {workflow.get('goal') or ''}"
@@ -1984,16 +2016,26 @@ async def explore_after_crawl(
                     and response is not None
                     and response.status < 400
                 )
-                if opened and workflow.get("target_url") != example_url:
-                    action = _item_action_pattern(workflow)
-                    if action is not None:
+                shipping_workflow = _SHIP_WORKFLOW.search(
+                    f"{workflow.get('name') or ''} {workflow.get('goal') or ''}"
+                )
+                action = _item_action_pattern(workflow)
+                if opened and (
+                    shipping_workflow or workflow.get("target_url") != example_url
+                ):
+                    if shipping_workflow or action is not None:
                         initial_observation = await _observe(page)
                         controls = " ".join(
                             str(control.get("name") or "")
                             for control in initial_observation.get("controls", [])
                         )
-                        opened = bool(
-                            action.search(controls) or initial_observation.get("fields")
+                        opened = (
+                            bool(_SHIP_CONTROL.search(controls))
+                            if shipping_workflow
+                            else bool(
+                                action.search(controls)
+                                or initial_observation.get("fields")
+                            )
                         )
                 if opened:
                     break

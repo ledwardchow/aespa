@@ -143,6 +143,248 @@ def test_grouped_workflow_rejects_unconfirmed_and_unknown_item(isolated_db_engin
     )
 
 
+def test_retry_accepts_discovered_group_example_and_uses_group_page_account(
+    isolated_db_engine, monkeypatch
+):
+    import playwright.async_api
+
+    example_url = "https://shop.test/admin/orders/317"
+    crawled_url = "https://shop.test/admin/orders/318"
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Orders", base_url="https://shop.test")
+        session.add(site)
+        session.flush()
+        first = Credential(site_id=site.id, username="first", password="saved")
+        second = Credential(site_id=site.id, username="second", password="saved")
+        session.add_all([first, second])
+        session.flush()
+        run = TestRun(
+            site_id=site.id,
+            name="Orders crawl",
+            route_groups_json=json.dumps(
+                [{"route_pattern": "/admin/orders/{value}", "links_seen": 2}]
+            ),
+        )
+        session.add(run)
+        session.flush()
+        session.add(
+            CrawledPage(
+                test_run_id=run.id,
+                url=crawled_url,
+                accessible_by=json.dumps([second.id]),
+                req_auth=True,
+            )
+        )
+        for url in (example_url, crawled_url):
+            session.add(
+                DiscoveredTarget(
+                    test_run_id=run.id,
+                    url=url,
+                    route_pattern="/admin/orders/{value}",
+                )
+            )
+        session.commit()
+        run_id = run.id
+        session.refresh(first)
+        session.refresh(second)
+        session.expunge(first)
+        session.expunge(second)
+        creds = [first, second]
+        second_id = second.id
+
+    claim_actors = []
+
+    def reserve(_run_id, _owner, _example, *, actor_key, **_kwargs):
+        claim_actors.append(actor_key)
+        return {
+            "target_url": example_url,
+            "route_pattern": "/admin/orders/{value}",
+            "example_url": example_url,
+        }
+
+    class Browser:
+        async def new_context(self, **_kwargs):
+            raise RuntimeError("browser reached")
+
+        async def close(self):
+            pass
+
+    class Playwright:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+    async def launch(*_args, **_kwargs):
+        return Browser()
+
+    monkeypatch.setattr(playwright.async_api, "async_playwright", Playwright)
+    monkeypatch.setattr(crawl_workflows, "launch_playwright_browser", launch)
+    monkeypatch.setattr(workflow_targets, "reserve_workflow_target", reserve)
+    workflow = {
+        "name": "Mark an order as shipped",
+        "goal": "Mark an order as shipped",
+        "start_url": example_url,
+        "example_url": example_url,
+        "destructive": False,
+    }
+    with pytest.raises(RuntimeError, match="browser reached"):
+        asyncio.run(
+            crawl_workflows.explore_after_crawl(
+                run_id,
+                llm_cfg=None,
+                site=SimpleNamespace(base_url="https://shop.test", login_url=""),
+                creds=creds,
+                shared=None,
+                max_pages=10,
+                browser_engine="chromium",
+                browser_visible=False,
+                pw_proxy={},
+                global_http_header={},
+                selected_workflows=[workflow],
+            )
+        )
+    assert claim_actors == [crawl_workflows.actor_key(second_id)]
+
+
+def test_shipping_workflow_skips_shipped_example_for_processing_order(
+    isolated_db_engine, monkeypatch
+):
+    import playwright.async_api
+
+    from aespa.services import crawler
+
+    shipped_url = "https://shop.test/admin/orders/1"
+    processing_url = "https://shop.test/admin/orders/2"
+    pattern = "/admin/orders/{value}"
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Orders", base_url="https://shop.test")
+        session.add(site)
+        session.flush()
+        run = TestRun(
+            site_id=site.id,
+            name="Orders crawl",
+            route_groups_json=json.dumps([{"route_pattern": pattern, "links_seen": 2}]),
+        )
+        session.add(run)
+        session.flush()
+        session.add(CrawledPage(test_run_id=run.id, url=shipped_url))
+        for url in (shipped_url, processing_url):
+            session.add(
+                DiscoveredTarget(test_run_id=run.id, url=url, route_pattern=pattern)
+            )
+        session.commit()
+        run_id = run.id
+
+    visits = []
+    decisions = []
+    notes = []
+
+    class Page:
+        url = "about:blank"
+
+        async def goto(self, url, **_kwargs):
+            self.url = url
+            visits.append(url)
+            return SimpleNamespace(status=200)
+
+    class Context:
+        async def route(self, *_args):
+            pass
+
+        async def new_page(self):
+            return Page()
+
+        async def close(self):
+            pass
+
+    class Browser:
+        async def new_context(self, **_kwargs):
+            return Context()
+
+        async def close(self):
+            pass
+
+    class Playwright:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+    async def launch(*_args, **_kwargs):
+        return Browser()
+
+    async def observe(page):
+        return {
+            "url": page.url,
+            "title": "Order",
+            "text": "Shipped" if page.url == shipped_url else "Processing",
+            "controls": [
+                {
+                    "name": (
+                        "Update tracking"
+                        if page.url == shipped_url
+                        else "Mark as shipped"
+                    )
+                }
+            ],
+            "fields": [{"name": "tracking"}],
+        }
+
+    async def decide(_llm_cfg, _workflow, observation, *_args):
+        decisions.append(observation["url"])
+        return {"action": "stop", "reason": "End test"}
+
+    async def no_wait(*_args, **_kwargs):
+        pass
+
+    monkeypatch.setattr(playwright.async_api, "async_playwright", Playwright)
+    monkeypatch.setattr(crawl_workflows, "launch_playwright_browser", launch)
+    monkeypatch.setattr(crawl_workflows, "playwright_user_agent", lambda _b: "test")
+    monkeypatch.setattr(crawl_workflows, "protect_playwright_context", lambda *_a: None)
+    monkeypatch.setattr(
+        crawl_workflows.traffic_svc, "setup_playwright_logging", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(crawler, "_wait_for_content_settle", no_wait)
+    monkeypatch.setattr(crawl_workflows, "_observe", observe)
+    monkeypatch.setattr(crawl_workflows, "_decide_with_corrections", decide)
+    monkeypatch.setattr(
+        crawl_workflows,
+        "_record_note",
+        lambda _run_id, workflow, status, *_args, **_kwargs: notes.append(
+            (workflow["target_url"], status)
+        ),
+    )
+    workflow = {
+        "name": "Mark an order as shipped",
+        "goal": "Update an order's shipping status by selecting a carrier and tracking number",
+        "start_url": shipped_url,
+        "example_url": shipped_url,
+        "destructive": False,
+    }
+    asyncio.run(
+        crawl_workflows.explore_after_crawl(
+            run_id,
+            llm_cfg=None,
+            site=SimpleNamespace(base_url="https://shop.test", login_url=""),
+            creds=[],
+            shared=None,
+            max_pages=10,
+            browser_engine="chromium",
+            browser_visible=False,
+            pw_proxy={},
+            global_http_header={},
+            selected_workflows=[workflow],
+        )
+    )
+    assert visits == [shipped_url, processing_url]
+    assert decisions == [processing_url]
+    assert workflow["excluded_target_urls"] == [shipped_url]
+    assert notes == [(processing_url, "not_reached")]
+
+
 def test_parallel_workflows_claim_different_items(tmp_path, monkeypatch):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'workflow-targets.db'}",
