@@ -158,7 +158,7 @@ test("deletes a saved comparison result", async () => {
     await screen.findByRole("button", { name: /GT-1.*SQL injection/ });
     await userEvent.setup().click(screen.getByRole("button", { name: "Delete result" }));
     expect(benchmarkApi.deleteBenchmarkResult).toHaveBeenCalledWith(4);
-    expect(window.location.hash).toBe("#/benchmark-lab");
+    expect(window.location.hash).toBe("#/benchmark-lab?tab=dast&view=results");
   } finally {
     confirm.mockRestore();
   }
@@ -277,7 +277,7 @@ test.each(["site", "api", "sast"])(
       expect(await screen.findByText(/GT-1 - SQL injection/)).toBeTruthy();
     }
     expect(screen.getByRole("link", { name: "Back to results" }).getAttribute("href")).toBe(
-      "#/benchmark-lab",
+      kind === "site" ? "#/benchmark-lab?tab=dast&view=results" : "#/benchmark-lab",
     );
     expect(screen.queryByRole("tab")).toBeNull();
   },

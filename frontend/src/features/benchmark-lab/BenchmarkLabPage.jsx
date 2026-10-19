@@ -85,6 +85,10 @@ export function BenchmarkLabPage({ initialResultId }) {
   const [loaded, setLoaded] = useState(false);
   const [groupBy, setGroupBy] = useState("none");
   const selectedResult = results.find((item) => item.id === selectedResultId);
+  const resultBackHref =
+    selectedResult?.run_kind === "site"
+      ? "#/benchmark-lab?tab=dast&view=results"
+      : "#/benchmark-lab";
   const tab = initialResultId && selectedResult ? selectedResult.run_kind : routeTab;
   const siteTab = initialResultId && selectedResult ? "analyses" : routeSiteTab;
 
@@ -206,7 +210,7 @@ export function BenchmarkLabPage({ initialResultId }) {
       setResults((current) => current.filter((result) => result.id !== selectedResult.id));
       setSelectedResultId(null);
       setEdit(null);
-      if (initialResultId != null) nav("#/benchmark-lab");
+      if (initialResultId != null) nav(resultBackHref);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -519,7 +523,7 @@ export function BenchmarkLabPage({ initialResultId }) {
               <a className="btn ghost" href="#/benchmark-lab/scoring-guide">
                 How scoring and matching work
               </a>
-              <a className="btn secondary" href="#/benchmark-lab">
+              <a className="btn secondary" href={resultBackHref}>
                 Back to results
               </a>
             </>
