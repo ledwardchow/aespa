@@ -98,6 +98,44 @@ def test_runs_without_budget_are_never_paused(engine):
     asyncio.run(_one_llm_call(run_id))
 
 
+def test_web_scan_starts_wrapup_with_one_dollar_left(engine):
+    run_id = _run(engine, llm_budget_usd=5.0)
+    _spend(run_id, 3.99)
+    assert not llm.run_budget_wrapup_due(run_id)
+    _spend(run_id, 4.0)
+    assert llm.run_budget_wrapup_due(run_id)
+
+
+def test_wrapup_llm_calls_can_finish_over_budget(engine):
+    run_id = _run(engine, llm_budget_usd=5.0)
+    with Session(engine) as session:
+        first_run = session.get(TestRun, run_id)
+        other_run = TestRun(
+            site_id=first_run.site_id, name="Other run", llm_budget_usd=5.0
+        )
+        session.add(other_run)
+        session.commit()
+        session.refresh(other_run)
+        other_run_id = other_run.id
+    _spend(run_id, 5.5)
+    _spend(other_run_id, 5.5)
+    with pytest.raises(llm.LLMBudgetPauseError):
+        asyncio.run(_one_llm_call(run_id))
+
+    llm.set_run_context(run_id, emit_fn=None)
+    llm.set_budget_wrapup_allowed(True)
+    try:
+        asyncio.run(_one_llm_call(run_id))
+        with pytest.raises(llm.LLMBudgetPauseError):
+            asyncio.run(_one_llm_call(other_run_id))
+    finally:
+        llm.set_budget_wrapup_allowed(False)
+        llm.clear_run_context()
+
+    with pytest.raises(llm.LLMBudgetPauseError):
+        asyncio.run(_one_llm_call(run_id))
+
+
 def test_raising_budget_lets_calls_continue(client, engine):
     run_id = _run(engine, llm_budget_usd=5.0)
     _spend(run_id, 6.0)
@@ -132,6 +170,12 @@ def test_scan_pauses_with_budget_reason(monkeypatch, engine):
     assert run_pause_svc.get_pause("web", run_id).reason == "budget"
     assert any(
         evt.get("type") == "scan_paused" and evt.get("reason") == "budget"
+        for evt in events
+    )
+    assert any(
+        evt.get("type") == "agent_status"
+        and evt.get("agent_id") == "scanner"
+        and evt.get("status") == "paused"
         for evt in events
     )
 

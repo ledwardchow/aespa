@@ -259,6 +259,7 @@ _llm_proxy_var: ContextVar[str | None] = ContextVar("_llm_proxy", default=None)
 _llm_ca_bundle_var: ContextVar[str | None] = ContextVar("_llm_ca_bundle", default=None)
 _run_id_var: ContextVar[int | None] = ContextVar("_run_id", default=None)
 _run_kind_var: ContextVar[str] = ContextVar("_run_kind", default="web")
+_budget_wrapup_var: ContextVar[int | None] = ContextVar("_budget_wrapup", default=None)
 _emit_fn_var: ContextVar[Any | None] = ContextVar("_emit_fn", default=None)
 _provider_var: ContextVar[str | None] = ContextVar("_provider", default=None)
 _base_url_var: ContextVar[str | None] = ContextVar("_base_url", default=None)
@@ -399,6 +400,8 @@ def run_llm_spend_usd(run_id: int, run_kind: str = "web") -> float:
 
 
 def check_run_budget(run_id: int, run_kind: str = "web") -> None:
+    if run_kind == "web" and _budget_wrapup_var.get() == run_id:
+        return
     budget = _read_run_budget(run_id, run_kind)
     if budget is None:
         return
@@ -408,6 +411,17 @@ def check_run_budget(run_id: int, run_kind: str = "web") -> None:
             f"LLM budget reached: ${spend:.2f} spent of ${budget:.2f}.",
             snapshot={"spend_usd": spend, "budget_usd": budget},
         )
+
+
+def run_budget_wrapup_due(run_id: int, reserve_usd: float = 1.0) -> bool:
+    budget = _read_run_budget(run_id, "web")
+    return budget is not None and run_llm_spend_usd(run_id) >= max(
+        0.0, budget - reserve_usd
+    )
+
+
+def set_budget_wrapup_allowed(allowed: bool) -> None:
+    _budget_wrapup_var.set(_run_id_var.get() if allowed else None)
 
 
 @asynccontextmanager
@@ -8034,8 +8048,16 @@ async def thinking_agentic_loop(
             }
     else:
         messages: list[dict] = [{"role": "user", "content": initial_user_message}]
+    baseline_system_message = system_message
     recovery_marker = messages[0].get("_openai_refusal_recovery") if messages else None
-    recovery_active = isinstance(recovery_marker, dict)
+    # Only an in-flight ("sent") marker keeps recovery active on resume. A
+    # "completed" or "unresolved" marker means an earlier scoped retry already
+    # resolved, so the loop resumes under the full prompt and stays free to
+    # re-arm for a later refusal instead of being latched into recovery mode.
+    recovery_active = (
+        isinstance(recovery_marker, dict)
+        and recovery_marker.get("attempt") == "sent"
+    )
     if recovery_active:
         if (
             config.provider not in {"openai_chatgpt_plan", "openai_codex"}
@@ -8285,6 +8307,12 @@ async def thinking_agentic_loop(
                 )
                 if recovery_active and recovery_marker is not None:
                     recovery_marker["attempt"] = "completed"
+                    # The scoped retry was accepted, so drop back out of
+                    # recovery: restore the full prompt and clear the latch so a
+                    # later, independent cyber refusal earns its own scoped
+                    # retry instead of falling through to retry-once-then-skip.
+                    recovery_active = False
+                    system_message = baseline_system_message
             except Exception as exc:
                 error_message = describe_exception(exc)
                 if (

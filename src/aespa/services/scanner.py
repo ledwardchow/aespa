@@ -6594,7 +6594,6 @@ async def _thinking_scan_task(run_id: int) -> None:
     except llm_svc.LLMQuotaPauseError as exc:
         log.warning("Thinking scan paused for run_id=%s: %s", run_id, exc)
         _thinking_scan_status[run_id] = "paused"
-        _emit_thinking_status(run_id)
         from aespa.services import run_pause as run_pause_svc
 
         kind = run_pause_svc.pause_kind(exc.reason)
@@ -6618,6 +6617,7 @@ async def _thinking_scan_task(run_id: int) -> None:
                 _run.error_message = str(exc)[:2000]
                 _s.add(_run)
                 _s.commit()
+        _emit_thinking_status(run_id)
         events_svc.emit(
             run_id,
             {
@@ -6625,6 +6625,18 @@ async def _thinking_scan_task(run_id: int) -> None:
                 "reason": exc.reason,
                 "message": str(exc),
                 "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
+            },
+        )
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "paused",
+                "current_task": "Scan paused",
+                "outcome": str(exc),
+                "_persist": True,
             },
         )
     except Exception as exc:
@@ -6669,6 +6681,7 @@ async def _thinking_scan_task(run_id: int) -> None:
                 _s.add(_run)
                 _s.commit()
     finally:
+        llm_svc.set_budget_wrapup_allowed(False)
         _specialist_pending.pop(run_id, None)
         for handoff_id, context in list(_deferred_specialist_contexts.items()):
             if context.get("run_id") == run_id:
@@ -7358,6 +7371,24 @@ async def _do_thinking_scan(
     history: list[dict] = []
     all_results: list[dict] = []
     progressive_findings_count = 0
+    budget_wrapup = False
+
+    def budget_stop_check() -> bool:
+        nonlocal budget_wrapup
+        if not budget_wrapup and llm_svc.run_budget_wrapup_due(run_id):
+            budget_wrapup = True
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "budget_wrapup",
+                    "status": "warning",
+                    "message": "About $1 remains in the LLM budget. Stopping new tests and analysing saved results.",
+                    "_persist": True,
+                },
+            )
+        return budget_wrapup
+
     session_svc.ensure_anonymous_session(run_id, source="dynamic_scan")
     session_vault: dict[str, dict] = session_svc.load_session_vault(run_id)
     if "configured_primary" not in session_vault and creds:
@@ -7704,58 +7735,65 @@ async def _do_thinking_scan(
         ) as hx:
             # ── Continuous session path (Anthropic native tool use) ────────────
             if llm_cfg.provider in llm_svc.AGENTIC_LOOP_PROVIDERS:
-                progressive_findings_count = await _do_agentic_thinking_loop(
-                    run_id=run_id,
-                    llm_cfg=llm_cfg,
-                    base_url=base_url,
-                    crawl_context=crawl_context,
-                    scoped_crawl_context=scoped_crawl_context,
-                    creds_for_llm=creds_for_llm,
-                    session_vault=session_vault,
-                    pages_snapshot=pages_snapshot,
-                    findings_snapshot=findings_snapshot,
-                    first_page_id=first_page_id,
-                    scanner_policy=scanner_policy,
-                    hx=hx,
-                    browser_ctx=browser_ctx,
-                    pw_page=pw_page,
-                    primary_browser_cookies=_primary_browser_cookies,
-                    history=history,
-                    all_results=all_results,
-                    resume_from=_resume_checkpoint,
-                    specialist_config=specialist_cfg,
-                    site_id=site_id,
-                    creds=creds,
-                    login_url=login_url or "",
-                    guidance=guidance,
-                    system_message_override=(
-                        get_sast_validate_system(is_api_run=False)
-                        if coverage_mode == "sast_validate"
-                        else (
-                            get_thinking_agent_system(False)
-                            + "\n\nTEAM MODE\n"
-                            + team_assignment["mission"]
-                            if team_assignment
+                try:
+                    progressive_findings_count = await _do_agentic_thinking_loop(
+                        run_id=run_id,
+                        llm_cfg=llm_cfg,
+                        base_url=base_url,
+                        crawl_context=crawl_context,
+                        scoped_crawl_context=scoped_crawl_context,
+                        creds_for_llm=creds_for_llm,
+                        session_vault=session_vault,
+                        pages_snapshot=pages_snapshot,
+                        findings_snapshot=findings_snapshot,
+                        first_page_id=first_page_id,
+                        scanner_policy=scanner_policy,
+                        hx=hx,
+                        browser_ctx=browser_ctx,
+                        pw_page=pw_page,
+                        primary_browser_cookies=_primary_browser_cookies,
+                        history=history,
+                        all_results=all_results,
+                        resume_from=_resume_checkpoint,
+                        specialist_config=specialist_cfg,
+                        site_id=site_id,
+                        creds=creds,
+                        login_url=login_url or "",
+                        guidance=guidance,
+                        system_message_override=(
+                            get_sast_validate_system(is_api_run=False)
+                            if coverage_mode == "sast_validate"
+                            else (
+                                get_thinking_agent_system(False)
+                                + "\n\nTEAM MODE\n"
+                                + team_assignment["mission"]
+                                if team_assignment
+                                else None
+                            )
+                        ),
+                        tools_override=(
+                            get_sast_validate_tools(is_api_run=False)
+                            if coverage_mode == "sast_validate"
                             else None
-                        )
-                    ),
-                    tools_override=(
-                        get_sast_validate_tools(is_api_run=False)
-                        if coverage_mode == "sast_validate"
-                        else None
-                    ),
-                    post_probe_fn=(
-                        None if coverage_mode == "sast_validate" else _web_post_probe_fn
-                    ),
-                    post_finding_fn=(
-                        None
-                        if coverage_mode == "sast_validate"
-                        else _web_post_finding_fn
-                    ),
-                    coverage_mode=coverage_mode,
-                    display_agent_id=test_lead_agent_id,
-                    display_role=test_lead_role,
-                )
+                        ),
+                        post_probe_fn=(
+                            None
+                            if coverage_mode == "sast_validate"
+                            else _web_post_probe_fn
+                        ),
+                        post_finding_fn=(
+                            None
+                            if coverage_mode == "sast_validate"
+                            else _web_post_finding_fn
+                        ),
+                        coverage_mode=coverage_mode,
+                        display_agent_id=test_lead_agent_id,
+                        display_role=test_lead_role,
+                        stop_check=budget_stop_check,
+                    )
+                except llm_svc.LLMBudgetPauseError:
+                    budget_stop_check()
+                    budget_wrapup = True
             # ── Step-by-step path (fallback for non-agentic providers) ──────
             step = 0
             while True:
@@ -7763,6 +7801,8 @@ async def _do_thinking_scan(
                     break  # agentic loop already ran above
                 step += 1
                 if run_id in _thinking_stop_requested:
+                    break
+                if budget_stop_check():
                     break
 
                 events_svc.emit(
@@ -7815,6 +7855,9 @@ async def _do_thinking_scan(
                         ],
                         emit_fn=lambda evt: events_svc.emit(run_id, evt),
                     )
+                except llm_svc.LLMBudgetPauseError:
+                    budget_wrapup = True
+                    break
                 except Exception as exc:
                     log.warning("thinking_next_action error at step %d: %s", step, exc)
                     break
@@ -9067,6 +9110,8 @@ async def _do_thinking_scan(
 
                 await sleep_between_probes(scanner_policy)
 
+    # Wrap-up requests may use the reserved dollar and finish over budget.
+    llm_svc.set_budget_wrapup_allowed(budget_wrapup)
     # ── Analyse results ───────────────────────────────────────────────────────
     if all_results and coverage_mode != "sast_validate":
         _thinking_scan_status[run_id] = "analysing"
@@ -9339,7 +9384,7 @@ async def _do_thinking_scan(
             and getattr(scanner_policy, "enforce_full_coverage_obligations", False)
         )
     )
-    if _enforce_full_coverage and not stopped:
+    if _enforce_full_coverage and not stopped and not budget_wrapup:
         try:
             events_svc.emit(
                 run_id,
@@ -9396,7 +9441,11 @@ async def _do_thinking_scan(
             has_unresolved_obligations = True
         if web_completion(run_id)["unresolved_units"]:
             has_unresolved_obligations = True
-    if team_assignment is not None and not team_assignment.get("final", False):
+    if (
+        team_assignment is not None
+        and not team_assignment.get("final", False)
+        and not budget_wrapup
+    ):
         if stopped:
             llm_svc.clear_run_context()
             raise asyncio.CancelledError
@@ -9421,7 +9470,6 @@ async def _do_thinking_scan(
             )
             standard_target_unmet = True
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
-    _emit_thinking_status(run_id)
     log.info(
         "=== Thinking scan %s: run_id=%s ===",
         "stopped" if stopped else "complete",
@@ -9442,6 +9490,19 @@ async def _do_thinking_scan(
                 "status": "complete",
                 "current_task": "Scan stopped",
                 "outcome": f"Stopped with {_finding_count} finding(s) recorded",
+                "_persist": True,
+            },
+        )
+    elif budget_wrapup:
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": test_lead_agent_id,
+                "role": test_lead_role,
+                "status": "complete",
+                "current_task": "Budget reached; scan wrap-up complete",
+                "outcome": f"Finished with {_finding_count} finding(s) recorded",
                 "_persist": True,
             },
         )
@@ -9482,6 +9543,10 @@ async def _do_thinking_scan(
                 _run.status = "stopped"
                 _run.outcome = "stopped"
                 _run.terminal_reason = "user_stop"
+            elif budget_wrapup:
+                _run.status = "incomplete"
+                _run.outcome = "incomplete"
+                _run.terminal_reason = "budget_reached"
             elif has_unresolved_obligations:
                 _run.status = "incomplete"
                 _run.outcome = "incomplete"
@@ -9519,7 +9584,9 @@ async def _do_thinking_scan(
             _run.completed_at = datetime.now(timezone.utc)
             _s.add(_run)
             _s.commit()
+    _emit_thinking_status(run_id)
     llm_svc.clear_run_context()
+    llm_svc.set_budget_wrapup_allowed(False)
 
 
 # ── Agentic loop helper ───────────────────────────────────────────────────────
@@ -9587,6 +9654,7 @@ async def _do_agentic_thinking_loop(
     coverage_mode: str = "track",
     display_agent_id: str = "scanner",
     display_role: str = "Test Lead",
+    stop_check=None,
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -12953,7 +13021,9 @@ async def _do_agentic_thinking_loop(
             tool_executor=_tool_executor,
             before_tool_execution=_before_tool_execution,
             emit_fn=lambda evt: events_svc.emit(run_id, evt),
-            stop_check=lambda: run_id in _thinking_stop_requested,
+            stop_check=lambda: (
+                run_id in _thinking_stop_requested or (stop_check and stop_check())
+            ),
             done_check=_agentic_done_check,
             after_tool_result=_after_tool_execution,
             after_tool_rejection=lambda _name, _input, result, _step: (

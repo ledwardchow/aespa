@@ -238,6 +238,113 @@ def test_scoped_retry_preserves_completed_tool_evidence(monkeypatch):
     )
 
 
+def test_recovery_rearms_after_a_successful_scoped_retry(monkeypatch):
+    config = LLMConfig(
+        provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048
+    )
+    prompt = RefusalRecoveryPrompt(
+        "scoped system", "scoped opening", "web-test-lead-v1"
+    )
+    seen = []
+    events = []
+
+    async def fake_call(_config, system, messages, tools=None):
+        seen.append((system, messages[0]["content"]))
+        # 1: ordinary tool call. 2: first cyber refusal -> scoped retry.
+        # 3: scoped retry accepted (continues the loop). 4: a second,
+        # independent cyber refusal -> must earn its own scoped retry.
+        # 5: second scoped retry accepted -> finish.
+        if len(seen) in (2, 4):
+            raise ChatGPTCyberError()
+        if len(seen) in (1, 3):
+            return _tool("http_request", f"probe-{len(seen)}")
+        return _done()
+
+    async def execute(_name, _args, _step):
+        return "baseline result"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="original system",
+            initial_user_message="original opening",
+            tool_executor=execute,
+            refusal_recovery_prompt=prompt,
+            emit_fn=events.append,
+        )
+    )
+
+    assert summary == "complete"
+    # The second refusal (call 4) is issued under the full prompt again, proving
+    # the loop dropped back out of recovery after the first scoped retry.
+    assert [system for system, _ in seen] == [
+        "original system",
+        "original system",
+        "scoped system",
+        "original system",
+        "scoped system",
+    ]
+    scoped_retries = [
+        e for e in events if "shorter instructions" in e.get("message", "")
+    ]
+    accepted = [
+        e for e in events if e.get("data", {}).get("refusal_recovery") == "accepted"
+    ]
+    assert len(scoped_retries) == 2
+    assert len(accepted) == 2
+    # The scoped path handled both refusals; none fell through to retry-and-skip.
+    assert not any(
+        "retrying once before skipping" in e.get("message", "") for e in events
+    )
+    assert not any(
+        e.get("data", {}).get("refusal_recovery") == "refused" for e in events
+    )
+
+
+def test_completed_marker_on_resume_does_not_relatch_recovery(monkeypatch):
+    config = LLMConfig(
+        provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048
+    )
+    prompt = RefusalRecoveryPrompt(
+        "scoped system", "scoped opening", "web-test-lead-v1"
+    )
+    seen = []
+
+    async def fake_call(_config, system, messages, tools=None):
+        seen.append(system)
+        return _done()
+
+    # A resume whose saved conversation already carries a completed scoped
+    # retry must not keep forcing the scoped system prompt.
+    resume_messages = [
+        {
+            "role": "user",
+            "content": "scoped opening",
+            "_openai_refusal_recovery": {
+                "template_id": "web-test-lead-v1",
+                "attempt": "completed",
+                "step": 1,
+            },
+        }
+    ]
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="original system",
+            initial_user_message="original opening",
+            tool_executor=lambda *_: None,
+            refusal_recovery_prompt=prompt,
+            resume_messages=resume_messages,
+        )
+    )
+
+    assert summary == "complete"
+    assert seen == ["original system"]
+
+
 def test_no_scoped_prompt_keeps_identical_retry(monkeypatch):
     config = LLMConfig(
         provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048

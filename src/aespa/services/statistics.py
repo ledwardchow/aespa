@@ -1,9 +1,10 @@
-"""Independent monthly LLM usage statistics and price estimates."""
+"""Independent LLM usage statistics and price estimates."""
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -12,7 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, select
 
 from aespa.db import get_engine
-from aespa.models import LLMPriceCatalog, LLMPriceFeed, LLMUsageMonth
+from aespa.models import LLMPriceCatalog, LLMPriceFeed, LLMUsageDay, LLMUsageMonth
 
 PRICE_FEED_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/"
@@ -112,6 +113,15 @@ def local_month(value: datetime | None = None) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone().strftime("%Y-%m")
+
+
+def local_day(value: datetime | None = None) -> str:
+    """Return the operating system's local calendar date for ``value``."""
+
+    value = value or datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone().date().isoformat()
 
 
 def _utcnow() -> datetime:
@@ -517,13 +527,19 @@ def record_usage(
     factory_credits: float = 0,
     requests: int = 1,
     month: str | None = None,
+    day: str | None = None,
 ) -> dict[str, Any]:
-    """Atomically add one provider usage delta to the local monthly ledger."""
+    """Atomically add one provider usage delta to the monthly and daily ledgers."""
 
     provider = str(provider or "unknown")
     model = str(model or "unknown")
     base_url = str(base_url).strip() if base_url else None
-    month = month or local_month()
+    day = day or (None if month else local_day())
+    if day is not None:
+        date.fromisoformat(day)
+        if month is not None and day[:7] != month:
+            raise ValueError("Usage day and month must match")
+    month = month or day[:7]
     now = _utcnow()
     with Session(get_engine()) as session:
         rates = _rates_for(session, provider, model, service_tier)
@@ -569,6 +585,39 @@ def record_usage(
             set_=increments,
         )
         session.exec(stmt)
+        if day is not None:
+            day_values = {
+                key: values[key]
+                for key in (
+                    "provider",
+                    "model",
+                    "service_tier",
+                    "requests",
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_tokens",
+                    "cache_write_tokens",
+                    "ai_credits",
+                    "factory_credits",
+                    "created_at",
+                    "updated_at",
+                )
+            }
+            day_values["day"] = day
+            day_stmt = sqlite_insert(LLMUsageDay).values(**day_values)
+            day_table = LLMUsageDay.__table__.c
+            day_excluded = day_stmt.excluded
+            day_stmt = day_stmt.on_conflict_do_update(
+                index_elements=["day", "provider", "model", "service_tier"],
+                set_={
+                    **{
+                        key: day_table[key] + getattr(day_excluded, key)
+                        for key in _USAGE_COUNTERS
+                    },
+                    "updated_at": day_excluded.updated_at,
+                },
+            )
+            session.exec(day_stmt)
         session.commit()
     return rates
 
@@ -644,6 +693,170 @@ def get_statistics(session: Session, month: str | None = None) -> dict[str, Any]
             "fetched_at": feed.fetched_at.isoformat() if feed else None,
         },
     }
+
+
+_USAGE_COUNTERS = (
+    "requests",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "ai_credits",
+    "factory_credits",
+)
+
+
+def get_statistics_view(
+    session: Session,
+    *,
+    view: str = "monthly",
+    month: str | None = None,
+    anchor: date | None = None,
+    start: date | None = None,
+    end: date | None = None,
+) -> dict[str, Any]:
+    """Return usage for a calendar selection, with monthly prices on every row."""
+
+    if view == "monthly":
+        result = get_statistics(session, month)
+        selected_months = {result["month"]}
+    else:
+        today = date.fromisoformat(local_day())
+        if view == "daily":
+            start = end = anchor or today
+        elif view == "weekly":
+            anchor = anchor or today
+            start = anchor - timedelta(days=anchor.weekday())
+            end = start + timedelta(days=6)
+        elif view == "custom":
+            if start is None or end is None or start > end:
+                raise ValueError("Choose a start date on or before the end date")
+        elif view != "all_time":
+            raise ValueError("Unknown statistics view")
+
+        result = get_statistics(session, month)
+        if view == "all_time":
+            rows = list(session.exec(select(LLMUsageMonth)))
+            selected_months = {row.month for row in rows}
+        else:
+            daily_rows = list(
+                session.exec(
+                    select(LLMUsageDay).where(
+                        LLMUsageDay.day >= start.isoformat(),
+                        LLMUsageDay.day <= end.isoformat(),
+                    )
+                )
+            )
+            monthly_rows = {
+                (
+                    row.month,
+                    row.provider,
+                    row.model,
+                    getattr(row, "service_tier", ""),
+                ): row
+                for row in session.exec(select(LLMUsageMonth))
+            }
+            first_month = start.strftime("%Y-%m")
+            last_month = end.strftime("%Y-%m")
+            selected_months = {
+                row.month
+                for row in monthly_rows.values()
+                if first_month <= row.month <= last_month
+            }
+            grouped = {}
+            for daily in daily_rows:
+                key = (daily.day[:7], daily.provider, daily.model, daily.service_tier)
+                if key not in grouped:
+                    monthly = monthly_rows.get(key)
+                    if monthly is None:
+                        continue
+                    grouped[key] = SimpleNamespace(**monthly.model_dump())
+                    for field in _USAGE_COUNTERS:
+                        setattr(grouped[key], field, 0)
+                    grouped[key].service_tier = daily.service_tier
+                for field in _USAGE_COUNTERS:
+                    setattr(
+                        grouped[key],
+                        field,
+                        getattr(grouped[key], field) + getattr(daily, field),
+                    )
+            rows = list(grouped.values())
+        rows.sort(
+            key=lambda row: (
+                row.month,
+                row.provider,
+                row.model,
+                getattr(row, "service_tier", ""),
+            )
+        )
+        result["rows"] = [_row_dict(row) for row in rows]
+        result["totals"] = _usage_totals(rows)
+    result["view"] = view
+    result["start"] = start.isoformat() if start else None
+    result["end"] = end.isoformat() if end else None
+    result["legacy_months"] = _legacy_months(session, selected_months)
+    return result
+
+
+def _usage_totals(rows: list[LLMUsageMonth]) -> dict[str, Any]:
+    totals = {
+        field: sum(getattr(row, field) for row in rows) for field in _USAGE_COUNTERS
+    }
+    costs = [_cost(row) for row in rows]
+    totals["estimated_token_cost_usd"] = (
+        sum(cost[0] for cost in costs) if costs else None
+    )
+    totals["estimated_credit_cost_usd"] = (
+        sum(cost[1] for cost in costs) if costs else None
+    )
+    totals["estimated_total_cost_usd"] = (
+        sum(cost[2] for cost in costs) if costs else None
+    )
+    return totals
+
+
+def _legacy_months(session: Session, selected_months: set[str]) -> list[str]:
+    if not selected_months:
+        return []
+    monthly = list(
+        session.exec(
+            select(LLMUsageMonth).where(LLMUsageMonth.month.in_(selected_months))
+        )
+    )
+    daily = list(
+        session.exec(
+            select(LLMUsageDay).where(
+                LLMUsageDay.day >= f"{min(selected_months)}-01",
+                LLMUsageDay.day <= f"{max(selected_months)}-31",
+            )
+        )
+    )
+    by_key = {}
+    for row in daily:
+        key = (row.day[:7], row.provider, row.model, row.service_tier)
+        counters = by_key.setdefault(key, {field: 0 for field in _USAGE_COUNTERS})
+        for field in _USAGE_COUNTERS:
+            counters[field] += getattr(row, field)
+    return sorted(
+        {
+            row.month
+            for row in monthly
+            if any(
+                getattr(row, field)
+                > by_key.get(
+                    (
+                        row.month,
+                        row.provider,
+                        row.model,
+                        getattr(row, "service_tier", ""),
+                    ),
+                    {},
+                ).get(field, 0)
+                + 1e-9
+                for field in _USAGE_COUNTERS
+            )
+        }
+    )
 
 
 def refresh_prices(session: Session) -> dict[str, Any]:
@@ -777,5 +990,6 @@ def set_prices(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def reset_statistics(session: Session) -> None:
+    session.exec(LLMUsageDay.__table__.delete())
     session.exec(LLMUsageMonth.__table__.delete())
     session.commit()

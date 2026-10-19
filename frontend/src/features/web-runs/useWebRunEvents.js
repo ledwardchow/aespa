@@ -3,7 +3,7 @@ import { useRef } from "react";
 
 import { truncUrl } from "../../shared/lib/urls.js";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
-import { runStatusFromThinkingStatus } from "./runState.js";
+import { runStatusFromThinkingStatus, settleAgentsAfterScan } from "./runState.js";
 import { useEventStream } from "../../shared/hooks/useEventStream.js";
 import {
   routeScannerEventToActiveTeamTester,
@@ -264,6 +264,16 @@ export function useWebRunEvents(options) {
         );
         if (evt.status && !isDynamicScanActive(evt.status)) {
           setThinkingStopReq(false);
+          setAgents((previous) => settleAgentsAfterScan(previous, evt.status));
+          webRunsApi
+            .getValidateStatus(runId)
+            .then((validation) => {
+              setValidateStatus(validation);
+              if (validation.status !== "running") {
+                setAgents((previous) => settleAgentsAfterScan(previous, evt.status, false));
+              }
+            })
+            .catch(() => {});
           if (setCheckpointStatus) {
             webRunsApi
               .getCheckpointStatus(runId)

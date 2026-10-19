@@ -107,6 +107,12 @@
 }
 
 /* Activity feed */
+.activity-log {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 .activity-feed {
   flex: 1;
   overflow-y: auto;
@@ -352,6 +358,46 @@
   border-bottom: 1px solid var(--border);
   background: var(--bg, #141519);
   flex-shrink: 0;
+  position: relative;
+  z-index: 2;
+}
+.activity-log-display-anchor {
+  position: relative;
+}
+.activity-log-display-options {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: max-content;
+  min-width: 190px;
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
+  font-size: 12px;
+  z-index: 3;
+}
+.activity-log-filter-title {
+  margin: 10px 0 5px;
+  color: var(--muted);
+}
+.activity-log-filter-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.activity-log-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.activity-log-empty {
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
 }
 .activity-toolbar {
   display: flex;

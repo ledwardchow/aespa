@@ -4,7 +4,14 @@ from datetime import datetime, timezone
 import pytest
 from sqlmodel import Session, func, select
 
-from aespa.models import LLMConfig, LLMPriceCatalog, LLMUsageMonth, Site, TestRun
+from aespa.models import (
+    LLMConfig,
+    LLMPriceCatalog,
+    LLMUsageDay,
+    LLMUsageMonth,
+    Site,
+    TestRun,
+)
 from aespa.services import llm, statistics
 
 
@@ -273,6 +280,89 @@ def test_statistics_api_includes_lifetime_cost(client):
     assert lifetime["months"] == 2
     assert lifetime["factory_credits"] == 1_500_000
     assert lifetime["estimated_total_cost_usd"] == 10.5
+
+
+def test_date_views_use_daily_usage_and_monthly_prices(client, isolated_db_engine):
+    statistics.record_usage(
+        "openai", "dated-model", input_tokens=100, day="2026-10-18", service_tier="fast"
+    )
+    statistics.record_usage(
+        "openai", "dated-model", input_tokens=200, day="2026-10-19", service_tier="fast"
+    )
+    statistics.record_usage("openai", "dated-model", input_tokens=300, day="2026-10-26")
+    with Session(isolated_db_engine) as session:
+        statistics.set_prices(
+            session,
+            {
+                "month": "2026-10",
+                "provider": "openai",
+                "model": "dated-model",
+                "input_price_usd_per_million": 2,
+            },
+        )
+        statistics.set_prices(
+            session,
+            {
+                "month": "2026-10",
+                "provider": "openai",
+                "model": "dated-model",
+                "service_tier": "fast",
+                "input_price_usd_per_million": 4,
+            },
+        )
+        assert len(list(session.exec(select(LLMUsageDay)))) == 3
+    response = client.get("/api/statistics/llm?view=daily&date=2026-10-19")
+    assert response.status_code == 200, response.json()
+    daily = response.json()
+    assert daily["totals"]["input_tokens"] == 200
+    assert daily["rows"][0]["month"] == "2026-10"
+    assert daily["rows"][0]["service_tier"] == "fast"
+    assert daily["totals"]["estimated_total_cost_usd"] == pytest.approx(0.0008)
+    weekly = client.get("/api/statistics/llm?view=weekly&date=2026-10-19").json()
+    assert weekly["start"] == "2026-10-19"
+    assert weekly["end"] == "2026-10-25"
+    assert weekly["totals"]["input_tokens"] == 200
+    custom = client.get(
+        "/api/statistics/llm?view=custom&start=2026-10-18&end=2026-10-19"
+    ).json()
+    assert custom["totals"]["input_tokens"] == 300
+    all_time = client.get("/api/statistics/llm?view=all_time").json()
+    assert all_time["totals"]["input_tokens"] == 600
+    assert all_time["totals"]["estimated_total_cost_usd"] == pytest.approx(0.0018)
+
+
+def test_date_view_reports_older_monthly_usage_without_guessing_dates(
+    client, isolated_db_engine
+):
+    statistics.record_usage("openai", "older", input_tokens=500, month="2026-08")
+    with Session(isolated_db_engine) as session:
+        assert session.exec(select(func.count()).select_from(LLMUsageDay)).one() == 0
+    response = client.get(
+        "/api/statistics/llm?view=custom&start=2026-08-01&end=2026-08-31"
+    ).json()
+    assert response["rows"] == []
+    assert response["legacy_months"] == ["2026-08"]
+    assert (
+        client.get("/api/statistics/llm?month=2026-08").json()["totals"]["input_tokens"]
+        == 500
+    )
+
+
+def test_invalid_custom_date_range_and_reset_daily_ledger(client, isolated_db_engine):
+    assert (
+        client.get("/api/statistics/llm?view=custom&start=2026-10-19").status_code
+        == 422
+    )
+    assert (
+        client.get(
+            "/api/statistics/llm?view=custom&start=2026-10-20&end=2026-10-19"
+        ).status_code
+        == 422
+    )
+    statistics.record_usage("openai", "reset", day="2026-10-19")
+    assert client.delete("/api/statistics/llm").status_code == 200
+    with Session(isolated_db_engine) as session:
+        assert session.exec(select(func.count()).select_from(LLMUsageDay)).one() == 0
 
 
 def test_missing_prices_count_as_zero_in_monthly_and_lifetime_costs(

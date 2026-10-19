@@ -49,3 +49,14 @@ export const runStatusFromThinkingStatus = (thinkingStatus, currentStatus) => {
   }
   return currentStatus;
 };
+
+export const settleAgentsAfterScan = (agents, scanStatus, validationRunning) =>
+  agents.map((agent) =>
+    agent.status === "active" &&
+    agent.id !== "crawler" &&
+    agent.id !== "alice" &&
+    (validationRunning === false ||
+      (!agent.id?.startsWith("validator-") && agent.role !== "Validator"))
+      ? { ...agent, status: scanStatus === "paused" ? "paused" : "idle" }
+      : agent,
+  );

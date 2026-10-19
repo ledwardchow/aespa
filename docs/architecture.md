@@ -40,7 +40,7 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
    - [Recon summary](#recon-summary)
 9. [LLM Integration](#9-llm-integration)
    - [Agent tool sets](#agent-tool-sets) · [WSTG skills](#wstg-skills) · [Prompt caching](#prompt-caching)
-   - [Upstream proxy](#upstream-proxy) · [Rate Limiting & Pacing](#rate-limiting--pacing) · [Monthly usage statistics](#independent-monthly-statistics)
+   - [Upstream proxy](#upstream-proxy) · [Rate Limiting & Pacing](#rate-limiting--pacing) · [Usage statistics](#independent-usage-statistics)
 10. [Burp Suite Integration](#10-burp-suite-integration)
 11. [Findings & Validation](#11-findings--validation)
     - [Deduplication](#deduplication) · [Validation](#validation)
@@ -94,7 +94,7 @@ src/aespa/
 │   ├── sast_runs.py       # /api/sast-runs/* and dynamic-run lead import routes
 │   ├── systems.py         # Systems, campaign control, review, and activity
 │   ├── extensions.py      # Extension discovery and settings
-│   ├── statistics.py      # Monthly LLM usage and prices
+│   ├── statistics.py      # Daily and monthly LLM usage and prices
 │   └── reporting_debug.py # /api/reporting-debug/* — reporting-prompt editing & replay
 └── services/
     ├── active_jobs.py     # Active job summaries for the UI
@@ -1242,9 +1242,11 @@ When both the provider token and username are blank, the GitHub Copilot SDK read
 
 Copilot usage events arrive through the SDK's background JSON-RPC callback, so each callback is bound explicitly to the AESPA run that created the session. AESPA records AI credits, model-call counts, token/cache details, and legacy premium requests when GitHub supplies them. The latest available Copilot allowance percentage and reset date are also included in the run telemetry. AESPA waits briefly for the ephemeral usage event before returning or closing a model turn so final-call usage is not lost.
 
-### Independent monthly statistics
+### Independent usage statistics
 
-In addition to the run-level `token_usage_json`, `services/statistics.py` records every provider usage event in an independent monthly ledger. Rows are grouped by the local calendar month, canonical transport provider, and exact model string, while also retaining the endpoint base URL captured at call time. This means deleting a scan or changing a model setting cannot remove historical usage. An OpenRouter endpoint configured through the OpenAI-compatible adapter is labelled as OpenRouter. Input is normalized to mean uncached input; provider adapters subtract cached subsets only for APIs whose input counter includes them. The Statistics page can download the LiteLLM model price map, edit monthly prices, and estimate token and native-credit costs. Statistics reset deletes usage rows but keeps downloaded and manual price data.
+In addition to the run-level `token_usage_json`, `services/statistics.py` records every provider usage event in independent monthly and daily ledgers. Monthly rows keep the editable price history and endpoint base URL. Daily rows keep the local date, provider, model, service tier, and usage counters. Deleting a scan or changing a model setting does not remove these usage rows. An OpenRouter endpoint configured through the OpenAI-compatible adapter is labelled as OpenRouter. Input is normalized to mean uncached input; provider adapters subtract cached subsets only for APIs whose input counter includes them.
+
+`GET /api/statistics/llm` defaults to a monthly view and still accepts `month=YYYY-MM`. `view=all_time` returns every monthly row. `view=daily` and `view=weekly` use `date=YYYY-MM-DD` as an anchor; weeks run Monday through Sunday. `view=custom` accepts inclusive `start` and `end` dates. Date-range rows use daily counters and the corresponding monthly price, so changing a monthly price updates their estimates. `legacy_months` lists months with usage recorded before the daily ledger; that older usage remains in monthly and all-time totals but cannot be assigned to a date. Statistics reset deletes both usage ledgers while keeping downloaded and manual price data.
 
 Factory Droid uses the installed CLI's encrypted login state; AESPA never reads or stores its credential. The settings endpoint opens a short SDK session and uses `initialize_session().available_models` as the account-specific model catalog, including custom models. Each active AESPA message list owns an isolated persistent Droid session. All sessions use the same empty `aespa-droid-workspace` temporary directory so Factory groups them under one UI project instead of creating a project per loop. The child receives only an environment allowlist needed for CLI authentication, networking, and locale; built-in skills and non-AESPA tools are denied.
 
@@ -1417,10 +1419,10 @@ The API is a **FastAPI** application with both synchronous and asynchronous rout
 | `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
 | `/api/sast-runs/{id}/leads` | `sast_runs.py` | List the *original* `ScanLead` rows for a SAST run (imported copies excluded) |
 | `/api/sast-runs/{id}/agent-log` | `sast_runs.py` | SAST agent activity log |
-| `/api/statistics/llm` | `statistics.py` | Monthly, provider/model-grouped LLM token and native-credit usage |
+| `/api/statistics/llm` | `statistics.py` | Monthly, all-time, and date-range LLM token and native-credit usage |
 | `/api/statistics/llm/prices/refresh` | `statistics.py` | Download the latest LiteLLM price map |
 | `/api/statistics/llm/prices` | `statistics.py` | Save a monthly or future price override |
-| `/api/statistics/llm` (`DELETE`) | `statistics.py` | Reset all usage months while retaining price data |
+| `/api/statistics/llm` (`DELETE`) | `statistics.py` | Reset all usage while retaining price data |
 | `/api/systems/` | `systems.py` | CRUD for systems, code components, ZIP snapshots, targets, explicit target component links, and code-to-target routing associations |
 | `/api/systems/{id}/campaigns/` | `systems.py` | Create/list/get/delete campaigns; `start`/`stop`/`resume`/`retry`/`continue` lifecycle actions |
 | `/api/systems/{id}/campaigns/{id}/status` | `systems.py` | Campaign progress (status, warnings, source/target member states) |

@@ -9,7 +9,29 @@ import {
   resolveRunPrimaryAction,
   RUN_PRIMARY_ACTION,
   runStatusFromThinkingStatus,
+  settleAgentsAfterScan,
 } from "./runState.js";
+
+test("a terminal scan update clears active scan agents", () => {
+  const agents = [
+    { id: "scanner", status: "active" },
+    { id: "specialist-1", status: "active" },
+    { id: "crawler", status: "active" },
+    { id: "validator-1", status: "active" },
+  ];
+  assert.deepEqual(
+    settleAgentsAfterScan(agents, "paused").map((agent) => agent.status),
+    ["paused", "paused", "active", "active"],
+  );
+  assert.deepEqual(
+    settleAgentsAfterScan(agents, "complete").map((agent) => agent.status),
+    ["idle", "idle", "active", "active"],
+  );
+  assert.deepEqual(
+    settleAgentsAfterScan(agents, "paused", false).map((agent) => agent.status),
+    ["paused", "paused", "active", "paused"],
+  );
+});
 
 test("only resumes when the selected scan mode matches the saved mode", () => {
   assert.equal(canResumeSelectedScanMode(true, "deep", "deep"), true);

@@ -485,6 +485,32 @@ class LLMUsageMonth(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_utcnow)
 
 
+class LLMUsageDay(SQLModel, table=True):
+    """Daily usage counters. Monthly rows retain the editable price history."""
+
+    __tablename__ = "llm_usage_day"
+    __table_args__ = (
+        UniqueConstraint(
+            "day", "provider", "model", "service_tier", name="uq_llm_usage_day_key"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    day: str = Field(index=True)
+    provider: str = Field(index=True)
+    model: str = Field(index=True)
+    service_tier: str = Field(default="")
+    requests: int = Field(default=0)
+    input_tokens: int = Field(default=0)
+    output_tokens: int = Field(default=0)
+    cache_read_tokens: int = Field(default=0)
+    cache_write_tokens: int = Field(default=0)
+    ai_credits: float = Field(default=0.0)
+    factory_credits: float = Field(default=0.0)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
 class LLMPriceCatalog(SQLModel, table=True):
     """Latest reusable price data for future monthly usage rows."""
 
