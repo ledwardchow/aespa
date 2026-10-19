@@ -176,6 +176,12 @@
   font-size: 16px;
   font-weight: 600;
 }
+.benchmark-saved-list {
+  margin-top: 24px;
+}
+.benchmark-saved-list h2 {
+  margin-top: 0;
+}
 .benchmark-result-heading {
   display: flex;
   align-items: center;

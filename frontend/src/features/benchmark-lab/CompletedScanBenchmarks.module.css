@@ -50,3 +50,130 @@
   width: 52px;
   padding: 12px 16px;
 }
+.filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(140px, 190px));
+  gap: 12px;
+  margin: 18px 0;
+}
+.filters label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.filters input,
+.filters select {
+  min-width: 0;
+  width: 100%;
+}
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  border: 0;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: default;
+}
+.section form.controls.setup {
+  position: fixed;
+  z-index: 21;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(420px, 100vw);
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: 1fr;
+  align-content: start;
+  margin: 0;
+  padding: 24px;
+  border-radius: 0;
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.3);
+}
+.setupHeading {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.setupHeading h3 {
+  margin: 0;
+}
+.selectionBar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-top: 14px;
+  z-index: 1;
+}
+.mobileSelectAll {
+  display: none;
+}
+@media (max-width: 900px) {
+  .filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 600px) {
+  .filters {
+    grid-template-columns: 1fr;
+  }
+  .mobileSelectAll {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+  }
+  .dastTable {
+    min-width: 0;
+    display: block;
+  }
+  .dastTable thead {
+    display: none;
+  }
+  .dastTable tbody {
+    display: grid;
+    gap: 10px;
+  }
+  .dastTable tr {
+    display: grid;
+    grid-template-columns: 38px minmax(0, 1fr);
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .dastTable td,
+  .dastTable td:first-child {
+    width: auto;
+    min-width: 0;
+    padding: 5px;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+  .dastTable td:first-child {
+    grid-row: span 2;
+  }
+  .dastTable td:nth-child(2) {
+    font-weight: 600;
+  }
+  .dastTable td:nth-child(n + 3) {
+    grid-column: 2;
+    display: grid;
+    grid-template-columns: 90px minmax(0, 1fr);
+    gap: 8px;
+  }
+  .dastTable td:nth-child(n + 3)::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+  }
+}

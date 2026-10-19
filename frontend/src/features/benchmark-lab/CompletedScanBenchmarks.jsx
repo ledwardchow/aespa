@@ -38,6 +38,12 @@ export function CompletedScanBenchmarks({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [outcome, setOutcome] = useState(null);
+  const [query, setQuery] = useState("");
+  const [applicationId, setApplicationId] = useState("");
+  const [statusFilter, setStatusFilter] = useState("pending");
+  const [sort, setSort] = useState("newest");
+  const [setupOpen, setSetupOpen] = useState(false);
+  const dast = category === "site";
   const label = category === "site" ? "Sites" : category === "api" ? "API" : "SAST";
   const runs = (
     category === "sast"
@@ -66,6 +72,24 @@ export function CompletedScanBenchmarks({
   const pending = runs.filter((run) => !run.result && !run.evaluation);
   const selectedRuns = pending.filter((run) => selectedIds.has(run.id));
   const applications = category === "sast" ? [] : targets[category === "site" ? "sites" : "apis"];
+  const visibleRuns = dast
+    ? runs
+        .filter((run) =>
+          `${run.name} ${run.targetName} ${scanModelLabel(category, run.result?.scan_models || run.scan_models)}`
+            .toLowerCase()
+            .includes(query.trim().toLowerCase()),
+        )
+        .filter((run) => !applicationId || String(run.targetId) === applicationId)
+        .filter((run) =>
+          statusFilter === "all" ? true : statusFilter === "pending" ? !run.result : !!run.result,
+        )
+        .sort((left, right) => {
+          const order =
+            new Date(right.completed_at || 0) - new Date(left.completed_at || 0) ||
+            right.id - left.id;
+          return sort === "oldest" ? -order : order;
+        })
+    : runs;
   const toggle = (ids, checked) => {
     setSelectedIds((current) => {
       const next = new Set(current);
@@ -111,6 +135,7 @@ export function CompletedScanBenchmarks({
       setOutcome(result);
       toggle([...result.completed, ...result.skipped], false);
       await onChange();
+      setSetupOpen(false);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -119,58 +144,127 @@ export function CompletedScanBenchmarks({
   };
   return (
     <section className={styles.section} aria-label={`${label} finished scans`}>
-      <h2>{label} finished scans</h2>
+      <h2>{dast ? "DAST scans" : `${label} finished scans`}</h2>
       <p className="subtle">
-        {runs.length} finished scans · {pending.length} unbenchmarked. The selected ground truth
-        applies to the selected scans.
+        {runs.length} finished scans · {pending.length} need a benchmark.
+        {!dast && " The selected ground truth applies to the selected scans."}
       </p>
-      <form className={`card ${styles.controls}`} onSubmit={apply}>
-        <label>
-          Ground truth for bulk benchmarks
-          <select
-            className="select"
-            aria-label="Ground truth for bulk benchmarks"
-            value={datasetId}
-            disabled={busy}
-            onChange={(event) => setDatasetId(event.target.value)}
-          >
-            <option value="">Select a saved file…</option>
-            {datasets.map((dataset) => (
-              <option key={dataset.id} value={dataset.id}>
-                {dataset.label ? `${dataset.label} (${dataset.name})` : dataset.name} (
-                {dataset.item_count} findings)
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Or upload a ground truth file
-          <input
-            type="file"
-            aria-label="Bulk ground truth file"
-            accept=".json,.md,.markdown"
-            disabled={busy}
-            onChange={(event) => {
-              upload(event.target.files?.[0]);
-              event.target.value = "";
-            }}
-          />
-        </label>
-        <p className="subtle">
-          {defaultModel
-            ? `Benchmark model: ${defaultModel.name}`
-            : "Choose a default benchmark model in Settings first."}
-        </p>
+      {dast && (
+        <div className={styles.filters}>
+          <label>
+            Search scans
+            <input
+              className="input"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Scan, application, or model"
+            />
+          </label>
+          <label>
+            Application
+            <select
+              className="select"
+              value={applicationId}
+              onChange={(event) => setApplicationId(event.target.value)}
+            >
+              <option value="">All applications</option>
+              {applications.map((application) => (
+                <option key={application.id} value={application.id}>
+                  {application.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Benchmark status
+            <select
+              className="select"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+            >
+              <option value="pending">Needs benchmark</option>
+              <option value="done">Benchmarked</option>
+              <option value="all">All scans</option>
+            </select>
+          </label>
+          <label>
+            Sort
+            <select
+              className="select"
+              value={sort}
+              onChange={(event) => setSort(event.target.value)}
+            >
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+            </select>
+          </label>
+        </div>
+      )}
+      {dast && setupOpen && (
         <button
-          className="btn primary"
-          disabled={busy || !defaultModel || !datasetId || !selectedRuns.length}
-        >
-          {busy ? "Working…" : `Benchmark ${selectedRuns.length} selected scans`}
-        </button>
-        {!!selectedRuns.length && !datasetId && (
-          <p className="subtle">Pick a ground truth file above to turn this on.</p>
-        )}
-      </form>
+          className={styles.backdrop}
+          type="button"
+          aria-label="Close benchmark setup"
+          onClick={() => setSetupOpen(false)}
+        />
+      )}
+      {(!dast || setupOpen) && (
+        <form className={`card ${styles.controls} ${dast ? styles.setup : ""}`} onSubmit={apply}>
+          {dast && (
+            <div className={styles.setupHeading}>
+              <h3>Benchmark {selectedRuns.length} selected scans</h3>
+              <button type="button" className="btn ghost sm" onClick={() => setSetupOpen(false)}>
+                Close setup
+              </button>
+            </div>
+          )}
+          <label>
+            Ground truth for bulk benchmarks
+            <select
+              className="select"
+              aria-label="Ground truth for bulk benchmarks"
+              value={datasetId}
+              disabled={busy}
+              onChange={(event) => setDatasetId(event.target.value)}
+            >
+              <option value="">Select a saved file…</option>
+              {datasets.map((dataset) => (
+                <option key={dataset.id} value={dataset.id}>
+                  {dataset.label ? `${dataset.label} (${dataset.name})` : dataset.name} (
+                  {dataset.item_count} findings)
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Or upload a ground truth file
+            <input
+              type="file"
+              aria-label="Bulk ground truth file"
+              accept=".json,.md,.markdown"
+              disabled={busy}
+              onChange={(event) => {
+                upload(event.target.files?.[0]);
+                event.target.value = "";
+              }}
+            />
+          </label>
+          <p className="subtle">
+            {defaultModel
+              ? `Benchmark model: ${defaultModel.name}`
+              : "Choose a default benchmark model in Settings first."}
+          </p>
+          <button
+            className="btn primary"
+            disabled={busy || !defaultModel || !datasetId || !selectedRuns.length}
+          >
+            {busy ? "Working…" : `Benchmark ${selectedRuns.length} selected scans`}
+          </button>
+          {!!selectedRuns.length && !datasetId && (
+            <p className="subtle">Pick a ground truth file above to turn this on.</p>
+          )}
+        </form>
+      )}
       {error && (
         <div className="alert error" role="alert">
           {error}
@@ -187,7 +281,7 @@ export function CompletedScanBenchmarks({
           ))}
         </div>
       )}
-      {applications.length > 0 && (
+      {!dast && applications.length > 0 && (
         <fieldset className={styles.applications}>
           <legend>Select by application</legend>
           {applications.map((application) => (
@@ -206,14 +300,30 @@ export function CompletedScanBenchmarks({
       )}
       {!runs.length ? (
         <p className="subtle">No finished scans in this category.</p>
+      ) : !visibleRuns.length ? (
+        <p className="subtle">No scans match these filters.</p>
       ) : (
         <div className="table-wrap">
-          <table className={styles.table}>
+          {dast && (
+            <label className={styles.mobileSelectAll}>
+              <ScanSelection
+                ids={visibleRuns.filter((run) => !run.result).map((run) => run.id)}
+                selectedIds={selectedIds}
+                onToggle={toggle}
+                disabled={busy}
+                label="Select all visible scans"
+              />{" "}
+              Select all visible scans
+            </label>
+          )}
+          <table className={`${styles.table} ${dast ? styles.dastTable : ""}`}>
             <thead>
               <tr>
                 <th scope="col">
                   <ScanSelection
-                    ids={pending.map((run) => run.id)}
+                    ids={(dast ? visibleRuns : pending)
+                      .filter((run) => !run.result && !run.evaluation)
+                      .map((run) => run.id)}
                     selectedIds={selectedIds}
                     onToggle={toggle}
                     disabled={busy}
@@ -229,9 +339,9 @@ export function CompletedScanBenchmarks({
               </tr>
             </thead>
             <tbody>
-              {runs.map((run) => (
+              {visibleRuns.map((run) => (
                 <tr key={run.id}>
-                  <td>
+                  <td data-label="Select">
                     <ScanSelection
                       ids={run.result || run.evaluation ? [] : [run.id]}
                       selectedIds={selectedIds}
@@ -240,7 +350,7 @@ export function CompletedScanBenchmarks({
                       label={`Select ${run.name}`}
                     />
                   </td>
-                  <td>
+                  <td data-label="Scan">
                     <a
                       href={runHref({
                         runKind: category === "site" ? "web" : category,
@@ -250,11 +360,17 @@ export function CompletedScanBenchmarks({
                       {run.name}
                     </a>
                   </td>
-                  <td>{scanType(category, run.scan_models || run.result?.scan_models)}</td>
-                  <td>{scanModelLabel(category, run.result?.scan_models || run.scan_models)}</td>
-                  <td>{run.targetName}</td>
-                  <td>{run.completed_at ? fmtDate(run.completed_at) : "—"}</td>
-                  <td>
+                  <td data-label="Type">
+                    {scanType(category, run.scan_models || run.result?.scan_models)}
+                  </td>
+                  <td data-label="Scan model">
+                    {scanModelLabel(category, run.result?.scan_models || run.scan_models)}
+                  </td>
+                  <td data-label="Application">{run.targetName}</td>
+                  <td data-label="Finished">
+                    {run.completed_at ? fmtDate(run.completed_at) : "—"}
+                  </td>
+                  <td data-label="Benchmark">
                     {run.result ? (
                       <button
                         type="button"
@@ -275,6 +391,29 @@ export function CompletedScanBenchmarks({
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+      {dast && selectedRuns.length > 0 && (
+        <div className={styles.selectionBar}>
+          <span>{selectedRuns.length} scans selected</span>
+          <button
+            className="btn ghost sm"
+            type="button"
+            onClick={() => {
+              setSelectedIds(new Set());
+              setSetupOpen(false);
+            }}
+          >
+            Clear selection
+          </button>
+          <button
+            className="btn primary"
+            type="button"
+            disabled={!selectedRuns.length || busy}
+            onClick={() => setSetupOpen(true)}
+          >
+            Benchmark selected
+          </button>
         </div>
       )}
     </section>

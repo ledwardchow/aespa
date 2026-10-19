@@ -22,6 +22,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **DAST benchmarks**: The DAST page opens on scans that need a benchmark, with search and filters for application, status, and date. Selecting scans opens the benchmark setup. Saved results have their own list, and result review shows missing and partial findings first with search and a focused detail panel.
+
 - **SAST activity log**: The Log tab now shows the newest events first. Display options let you change the order and filter by event type. New scans show which agent or system process wrote each event; older events without saved agent details are marked as unknown.
 
 - **Usage time views**: The Usage page now shows all-time, monthly, weekly, daily, and custom date ranges. Choose a start and end date for a custom range. Usage tables are grouped by provider, with an estimated cost for each provider. Fast mode calls appear beside standard calls for the same provider. New usage is recorded by day so shorter ranges can show exact totals. A one-time backfill tool can recover some older daily usage from saved call records, monthly records confined to one day, and SAST runs completed on the day they started. Usage that cannot be dated stays in the monthly and all-time views, and the page flags it when a shorter range overlaps that month.

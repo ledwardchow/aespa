@@ -13,7 +13,15 @@ for (const width of [1440, 600]) {
       if (message.type() === "error") errors.push(message.text());
     });
     const results = [
-      { id: 5, run_kind: "site", run_id: 2, summary: { full: 0, partial: 0, missing: 0 } },
+      {
+        id: 5,
+        run_kind: "site",
+        run_id: 2,
+        target_id: 1,
+        run_name: "Already benchmarked scan",
+        summary: { full: 0, partial: 0, missing: 0 },
+        ground_truth: { name: "Fixture truth" },
+      },
     ];
     const runs = [
       {
@@ -69,6 +77,7 @@ for (const width of [1440, 600]) {
             id: 5 + runId,
             run_kind: body.run_kind,
             run_id: runId,
+            run_name: runs.find((run) => run.id === runId)?.name || `Scan ${runId}`,
             summary: { full: 0, partial: 0, missing: 0 },
           });
         }
@@ -85,22 +94,29 @@ for (const width of [1440, 600]) {
     const region = page.getByRole("region", { name: "Sites finished scans" });
     await expect(region.getByRole("link", { name: "Unbenchmarked scan" })).toBeVisible();
     await expect(region.getByRole("link", { name: "Stopped scan" })).toBeVisible();
-    await expect(region.getByRole("columnheader", { name: "Scan model" })).toBeVisible();
+    if (width >= 700)
+      await expect(region.getByRole("columnheader", { name: "Scan model" })).toBeVisible();
     await expect(region.getByText("DAST with SAST Leads", { exact: true })).toBeVisible();
     await expect(region.getByText("Test Lead (dast-model)", { exact: true })).toBeVisible();
-    await region.getByRole("checkbox", { name: "Select all scans from Shop" }).check();
+    await expect(region.getByRole("link", { name: "Already benchmarked scan" })).toHaveCount(0);
+    await region.getByLabel("Application").selectOption("1");
+    await region
+      .getByRole("checkbox", {
+        name: width < 700 ? "Select all visible scans" : "Select all unbenchmarked scans",
+      })
+      .check();
     await expect(region.getByRole("checkbox", { name: "Select Unbenchmarked scan" })).toBeChecked();
     await expect(region.getByRole("checkbox", { name: "Select Stopped scan" })).toBeChecked();
+    await expect(region.getByRole("checkbox", { name: "Select Forum scan" })).toHaveCount(0);
+    await region.getByLabel("Application").selectOption("");
+    await expect(region.getByRole("checkbox", { name: "Select Forum scan" })).not.toBeChecked();
+    await region.getByLabel("Benchmark status").selectOption("all");
     await expect(
       region.getByRole("checkbox", { name: "Select Already benchmarked scan" }),
     ).toBeDisabled();
-    await expect(region.getByRole("checkbox", { name: "Select Forum scan" })).not.toBeChecked();
-    expect(
-      await region
-        .getByRole("checkbox", { name: "Select all unbenchmarked scans" })
-        .evaluate((element) => element.indeterminate),
-    ).toBe(true);
+    await region.getByLabel("Benchmark status").selectOption("pending");
     await page.screenshot({ path: path.join(tmpdir(), `aespa-benchmark-selection-${width}.png`) });
+    await region.getByRole("button", { name: "Benchmark selected" }).click();
     const action = region.getByRole("button", { name: "Benchmark 2 selected scans" });
     await expect(action).toBeDisabled();
     await region.getByLabel("Ground truth for bulk benchmarks").selectOption("7");
@@ -108,6 +124,10 @@ for (const width of [1440, 600]) {
     await expect(region.getByRole("status")).toContainText("Benchmarked 2 scans");
     expect(batches).toEqual([{ run_kind: "site", run_ids: [1, 3], dataset_id: 7 }]);
     await page.screenshot({ path: path.join(tmpdir(), `aespa-benchmark-outcome-${width}.png`) });
+    await page.getByRole("tab", { name: /Saved results/ }).click();
+    await expect(page.getByRole("region", { name: "Saved DAST results" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Open Already benchmarked scan" })).toBeVisible();
+    await expect(region).toHaveCount(0);
     await page.getByRole("tab", { name: "APIs", exact: true }).click();
     await expect(
       page
