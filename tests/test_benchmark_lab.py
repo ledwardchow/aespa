@@ -25,6 +25,74 @@ from aespa.models import (
 BASE = "/extension/aespa.benchmarking"
 
 
+def test_benchmark_limits_model_evidence_but_saves_full_finding(
+    client, db_engine, monkeypatch
+):
+    evidence = "E" * 1_300_000
+    with Session(db_engine) as session:
+        model = LLMConfig(name="Evaluator", model="test-model")
+        site = Site(name="Site", base_url="https://example.test")
+        session.add_all([model, site])
+        session.commit()
+        run = TestRun(site_id=site.id, name="Large evidence", status="complete")
+        run.llm_config_id = model.id
+        session.add(run)
+        session.commit()
+        finding = ScanFinding(
+            test_run_id=run.id,
+            owasp_category="A03",
+            severity="high",
+            title="SQL injection in search",
+            affected_url="https://example.test/search?q=test",
+            description="Search accepts SQL syntax",
+            evidence=evidence,
+        )
+        session.add(finding)
+        session.commit()
+        model_id, run_id, finding_id = model.id, run.id, finding.id
+
+    async def answer(_config, prompt, **_kwargs):
+        supplied = json.loads(prompt)["scan_findings"]
+        assert len(prompt) < 500_000
+        assert supplied[0]["id"] == finding_id
+        assert supplied[0]["evidence"] == evidence[:2000]
+        return json.dumps(
+            {
+                "decisions": [
+                    {
+                        "ground_truth_external_id": "GT-1",
+                        "disposition": "full",
+                        "finding_ids": [finding_id],
+                        "reason": "Same search issue",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("aespa.services.llm.plain_completion", answer)
+    dataset = client.post(
+        f"{BASE}/datasets",
+        json={
+            "name": "Search truth",
+            "ground_truth": {
+                "items": [{"external_id": "GT-1", "title": "SQL injection in search"}]
+            },
+        },
+    ).json()
+    response = client.post(
+        f"{BASE}/results",
+        json={
+            "run_kind": "site",
+            "run_id": run_id,
+            "dataset_id": dataset["id"],
+            "evaluation_model_id": model_id,
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["rows"][0]["finding_ids"] == [finding_id]
+    assert response.json()["findings"][0]["evidence"] == evidence
+
+
 @pytest.mark.parametrize("kind", ["site", "api"])
 @pytest.mark.parametrize("has_start_time", [True, False])
 def test_saved_ground_truth_compares_dast_and_keeps_result_snapshot(

@@ -873,7 +873,7 @@ class InteractiveConsoleHandler(logging.Handler):
         self.stream.flush()
 
     def _redraw_logo_locked(self, width: int, height: int) -> None:
-        """Render the logo-only view with its copy shortcut at the bottom."""
+        """Render the logo-only view."""
         large = width >= 100 and height >= len(_AESPA_LOGO_LARGE)
         compact = not large and (width < 69 or height < len(_AESPA_LOGO))
         logo_lines = _aespa_logo_lines(
@@ -890,11 +890,6 @@ class InteractiveConsoleHandler(logging.Handler):
             if row > height:
                 break
             screen += f"\x1b[{row};1H{_truncate_terminal_line(line, width)}"
-        if self.authentication_key:
-            screen += (
-                f"\x1b[{height};1H\x1b[2K"
-                f"{_legend(LOGO, copy_key=True, copy_status=self.authentication_copy_status)[:width]}"
-            )
         self.stream.write(screen)
         self.stream.flush()
 

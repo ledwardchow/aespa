@@ -184,6 +184,29 @@ def test_agent_is_initial_view_and_number_keys_switch_all_views() -> None:
     assert console.handler.mode == AGENT
 
 
+def test_startup_splash_hides_copy_key_legend() -> None:
+    output = io.StringIO()
+    console = InteractiveConsole(
+        input_stream=io.StringIO(),
+        output_stream=output,
+        terminal_size=(120, 30),
+        authentication_key="management-secret",
+    )
+
+    console.handler.start_screen()
+    splash = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "[C] Copy key" not in splash
+
+    for _ in range(math.ceil(console.handler._startup_duration() / 0.05) + 4):
+        console.handler.advance_logo_animation()
+    console_view = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "[C] Copy key" in console_view
+
+    console._process_posix_keys(b"0")
+    logo_view = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "[C] Copy key" not in logo_view
+
+
 def test_startup_logo_pulses_once_then_opens_agent_view(monkeypatch) -> None:
     output = io.StringIO()
     handler = InteractiveConsoleHandler(output, terminal_size=(100, 35))
@@ -419,11 +442,15 @@ def test_startup_c_copies_authentication_key_on_posix_and_windows(monkeypatch):
 
     console._process_posix_keys(b"c")
     copied_frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
-    assert "Authentication key copied." in copied_frame
+    assert "Authentication key copied." not in copied_frame
     console._handle_windows_key("C", 0x43, 0)
 
     assert copied == ["management-secret", "management-secret"]
     assert "management-secret" not in output.getvalue()
+    for _ in range(math.ceil(console.handler._startup_duration() / 0.05) + 4):
+        console.handler.advance_logo_animation()
+    console_frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
+    assert "Authentication key copied." in console_frame
     console._process_posix_keys(b"2")
     assert console.handler.mode == ERRORS
 
@@ -447,8 +474,12 @@ def test_c_copies_key_from_each_console_view(monkeypatch, mode):
 
     frame = output.getvalue().split("\x1b[2J\x1b[H")[-1]
     assert copied == ["management-secret"]
-    assert "[C] Copy key" in frame
-    assert "Authentication key copied." in frame
+    if mode == LOGO:
+        assert "[C] Copy key" not in frame
+        assert "Authentication key copied." not in frame
+    else:
+        assert "[C] Copy key" in frame
+        assert "Authentication key copied." in frame
     assert "management-secret" not in frame
 
 

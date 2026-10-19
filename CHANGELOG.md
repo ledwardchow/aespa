@@ -10,7 +10,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Site settings export**: The Export button lets you download a site's settings and saved accounts without its test runs or results, or download everything. Importing a settings-only file creates a site ready for new runs, including when saved workflows have blank instructions.
 
-- **Local authentication**: AESPA now requires an authentication key for its interface and management API. The startup screen tells you to press C to copy the key. C works in every console view, and the bottom legend confirms when the key has been copied. Server Settings/Authentication shows the key and lets you copy or rotate it. Rotation asks for confirmation and saves the new key. Browser sessions need the new key on their next request. Keys supplied through `AESPA_AUTH_KEY_FILE` must be changed in that file. The legend also lists the tilde/backtick browser shortcut. Browsers remember sign-in for 30 days, and the Authentication Key tab under Settings > Global shows or copies the key in the same layout as other Global settings. Desktop apps sign in automatically. The API extension keeps its existing tokens and can use an optional separate port outside Docker. Docker keeps the integration API on its normal port and publishes the management port on localhost by default.
+- **Local authentication**: AESPA now requires an authentication key for its interface and management API. After the startup splash, the console tells you to press C to copy the key. C works in every console view. The bottom legend confirms when the key has been copied, except on the logo screen. Server Settings/Authentication shows the key and lets you copy or rotate it. Rotation asks for confirmation and saves the new key. Browser sessions need the new key on their next request. Keys supplied through `AESPA_AUTH_KEY_FILE` must be changed in that file. The legend also lists the tilde/backtick browser shortcut. Browsers remember sign-in for 30 days, and the Authentication Key tab under Settings > Global shows or copies the key in the same layout as other Global settings. Desktop apps sign in automatically. The API extension keeps its existing tokens and can use an optional separate port outside Docker. Docker keeps the integration API on its normal port and publishes the management port on localhost by default.
 
 - **API for other tools**: A new API extension, off by default, lets CI pipelines and other apps create Sites, run web scans and SAST scans from a ZIP file or a source such as a GitHub repository, choose a scan profile, follow progress, and get results as findings, a pass/fail summary, or SARIF. Apps can receive signed callbacks and resume paused web and SAST scans. Tokens have separate SAST, web, and Sites permissions, can see only their own scans or all scans, and can be edited, turned off, given a new value, or shown again on the extension's settings page. Remote integrations can use the separate integration port outside Docker, or expose only the extension's API through a reverse proxy or tunnel.
 
@@ -55,6 +55,10 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Finding review after web scans**: AESPA reviews batches of findings concurrently, up to the saved DAST LLM request limit. Failed requests and missing verdicts leave the affected findings unvalidated.
 
 ### Fixes
+
+- **Benchmark comparisons with large findings**: Limit finding text sent to the evaluation model so large saved evidence does not exceed its prompt limit. Saved benchmark results still include the full findings.
+
+- **Benchmark uploads with locked results**: Publishing continues when the results site protects locked entries, and the result message shows how many were skipped. Failed uploads now say how many results AESPA confirmed.
 
 - **SAST activity log height**: The log fills the available space on the Activity tab instead of stopping after 520 pixels.
 

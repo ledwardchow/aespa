@@ -89,7 +89,7 @@ export function BenchmarkPublishing({ mode = "publish", datasets = [], results =
         body: { dataset_ids: chosen },
       });
       setMessage(
-        `${report.received} results sent. ${report.skipped_stale} older updates skipped.${report.skipped_site_edits ? ` ${report.skipped_site_edits} site-edited results protected.` : ""}`,
+        `${report.received} results sent. ${report.skipped_stale} older updates skipped.${report.skipped_site_edits ? ` ${report.skipped_site_edits} site-edited results protected.` : ""}${report.skipped_locked ? ` ${report.skipped_locked} locked ${report.skipped_locked === 1 ? "result" : "results"} skipped.` : ""}`,
       );
     } catch (err) {
       setError(err.message);

@@ -349,6 +349,23 @@ async def assist_scan_result(
     findings: list[dict],
     rows: list[dict],
 ) -> None:
+    finding_count = max(len(findings), 1)
+    detail_limit = min(4000, 300_000 // finding_count)
+    label_limit = min(500, max(50, 200_000 // (finding_count * 4)))
+    model_findings = [
+        {
+            "id": finding["id"],
+            **{
+                key: str(finding.get(key) or "")[:label_limit]
+                for key in ("reference", "title", "category", "location")
+            },
+            "description": str(finding.get("description") or "")[: detail_limit // 2],
+            "evidence": str(finding.get("evidence") or "")[
+                : detail_limit - detail_limit // 2
+            ],
+        }
+        for finding in findings
+    ]
     prompt = dumps(
         {
             "instruction": (
@@ -360,7 +377,7 @@ async def assist_scan_result(
                 "ground truth items. Do not infer findings from the ground truth."
             ),
             "ground_truth": items,
-            "scan_findings": findings,
+            "scan_findings": model_findings,
         }
     )
     network = get_upstream_proxy_config(core)

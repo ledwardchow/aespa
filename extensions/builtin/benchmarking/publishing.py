@@ -454,7 +454,7 @@ def register_publishing(router: APIRouter, store) -> None:
                 raise HTTPException(422, "A result is too large to publish")
         if batch:
             batches.append(batch)
-        stored = skipped = protected = sent = 0
+        stored = skipped = protected = locked = sent = 0
         with Session(get_engine()) as core:
             network = get_upstream_proxy_config(core)
         client_options = {
@@ -507,25 +507,30 @@ def register_publishing(router: APIRouter, store) -> None:
                         )
                         or not isinstance(report.get("skipped_site_edits", 0), int)
                         or report.get("skipped_site_edits", 0) < 0
+                        or not isinstance(report.get("skipped_locked", 0), int)
+                        or report.get("skipped_locked", 0) < 0
                         or report["stored"]
                         + report["skipped_stale"]
                         + report.get("skipped_site_edits", 0)
+                        + report.get("skipped_locked", 0)
                         != len(batch)
                     ):
                         raise ValueError("Invalid upload receipt")
                 except (httpx.HTTPError, ValueError, TypeError) as exc:
                     raise HTTPException(
                         502,
-                        f"The upload could not be confirmed. {sent} results sent. You can retry safely.",
+                        f"The upload could not be confirmed. {sent} results confirmed. You can retry safely.",
                     ) from exc
                 sent += len(batch)
                 stored += report["stored"]
                 skipped += report["skipped_stale"]
                 protected += report.get("skipped_site_edits", 0)
+                locked += report.get("skipped_locked", 0)
         return {
             "received": sent,
             "stored": stored,
             "skipped_stale": skipped,
             "skipped_site_edits": protected,
+            "skipped_locked": locked,
             "site_url": url,
         }

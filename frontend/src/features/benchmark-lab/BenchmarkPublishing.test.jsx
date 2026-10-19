@@ -102,6 +102,19 @@ test("publishing reports results protected by site edits", async () => {
   expect(await screen.findByText(/1 site-edited results protected/)).toBeTruthy();
 });
 
+test("publishing reports locked results skipped by the site", async () => {
+  const user = userEvent.setup();
+  req.mockImplementation(async (url) =>
+    url.endsWith("/publish")
+      ? { received: 1, stored: 0, skipped_stale: 0, skipped_locked: 1 }
+      : { site_url: "https://benchmarks.aespa.app", token_saved: true, upload_token_saved: true },
+  );
+  render(<BenchmarkPublishing datasets={DATASETS} results={RESULTS} />);
+  await user.click(await screen.findByRole("button", { name: "Select all" }));
+  await user.click(await screen.findByRole("button", { name: "Publish results" }));
+  expect(await screen.findByText(/1 locked result skipped/)).toBeTruthy();
+});
+
 test("settings save one generated token and clear its field after saving", async () => {
   const user = userEvent.setup();
   render(<BenchmarkPublishing mode="settings" />);

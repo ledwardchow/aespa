@@ -666,6 +666,47 @@ def test_publish_reports_site_edited_results(portable, monkeypatch):
         assert report.json()["skipped_stale"] == 0
 
 
+def test_publish_reports_locked_results(portable, monkeypatch):
+    models, _, stores = portable
+    seed(models, stores[0])
+    from fastapi import APIRouter
+
+    publishing = modules()
+    app = FastAPI()
+    router = APIRouter()
+    publishing.register_publishing(router, stores[0])
+    app.include_router(router)
+
+    async def fake_post(self, url, **kwargs):
+        return httpx.Response(
+            200,
+            json={
+                "received": 1,
+                "stored": 0,
+                "skipped_stale": 0,
+                "skipped_site_edits": 0,
+                "skipped_locked": 1,
+            },
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    token = publishing.connection_token(
+        "https://benchmarks.aespa.app", "service-secret", UPLOAD_TOKEN
+    )
+    with TestClient(app) as client:
+        assert (
+            client.put(
+                "/publishing",
+                json={"site_url": "https://benchmarks.aespa.app", "token": token},
+            ).status_code
+            == 200
+        )
+        report = client.post("/publish")
+        assert report.status_code == 200
+        assert report.json()["skipped_locked"] == 1
+        assert report.json()["received"] == 1
+
+
 @pytest.mark.parametrize(
     "value",
     [
