@@ -90,6 +90,10 @@ class LLMRefusalError(RuntimeError):
     """The provider refused to process an agentic scan request."""
 
 
+class LLMContentFilteredError(LLMRefusalError):
+    """A completed provider response ended with a content-filter stop reason."""
+
+
 class LLMQuotaPauseError(RuntimeError):
     """A subscription allowance is exhausted and the owning run should pause."""
 
@@ -2096,6 +2100,21 @@ def _traffic_request_payload(
     }
 
 
+def _refused_agentic_prompt(
+    system_message: str, messages: list[dict], tools: list[dict] | None
+) -> str:
+    """Save the complete canonical request only when a provider refuses it."""
+    request = {
+        "system": system_message,
+        "messages": [
+            {"role": message.get("role"), "content": message.get("content")}
+            for message in _repair_tool_use_inputs(messages)
+        ],
+        "tools": tools if tools is not None else THINKING_AGENT_TOOLS,
+    }
+    return json.dumps(request, ensure_ascii=False, indent=2, default=str)
+
+
 def _log_llm_traffic(
     direction: str,
     config: LLMConfig,
@@ -3542,6 +3561,9 @@ async def _make_chatgpt_plan_client(config: LLMConfig) -> Any:
 
 
 async def _add_daybreak_access(config: LLMConfig, kwargs: dict[str, Any]) -> None:
+    if config.model == "gpt-6-sol":
+        return
+
     from aespa.services import chatgpt_plan
 
     program = await chatgpt_plan.daybreak_program(
@@ -5750,12 +5772,6 @@ def _agentic_tool_use_block(block: Any) -> dict[str, Any] | None:
         "name": item.get("name") or "",
         "input": tool_input,
     }
-
-
-# Upper bound on how many refused requests a single agentic scan will skip
-# before it gives up and fails. Without a cap, a context the provider refuses
-# deterministically could loop forever (refuse -> skip -> refuse -> skip -> …).
-AGENTIC_MAX_REFUSAL_SKIPS = 10
 
 
 def _append_agentic_user_steer(messages: list[dict], text: str) -> None:
@@ -8055,8 +8071,7 @@ async def thinking_agentic_loop(
     # resolved, so the loop resumes under the full prompt and stays free to
     # re-arm for a later refusal instead of being latched into recovery mode.
     recovery_active = (
-        isinstance(recovery_marker, dict)
-        and recovery_marker.get("attempt") == "sent"
+        isinstance(recovery_marker, dict) and recovery_marker.get("attempt") == "sent"
     )
     if recovery_active:
         if (
@@ -8069,8 +8084,8 @@ async def thinking_agentic_loop(
     tool_call_count = resume_step_count
     final_summary = ""
     consecutive_text_only_turns = 0
-    # Refusals that recover on a successful turn reset these. consecutive_refusals
-    # drives the retry-once-then-skip behaviour; refusal_skips bounds total skips.
+    # Consecutive refusals drive retry-once-then-skip. Keep the skip count for
+    # activity events; it does not stop the scan.
     consecutive_refusals = 0
     refusal_skips = 0
     # Temporary network or credential-refresh failures retry the same request
@@ -8296,6 +8311,11 @@ async def thinking_agentic_loop(
                         except Exception:
                             pass
                 content_blocks, stop_reason, raw_content = _llm_fut.result()
+                if str(stop_reason or "").lower() == "content_filtered":
+                    raise LLMContentFilteredError(
+                        "LLM provider refused the scan request "
+                        "(native stop reason: content_filtered)"
+                    )
                 # A completed turn means we are past any earlier refusal.
                 consecutive_refusals = 0
                 network_attempt = 0
@@ -8304,6 +8324,11 @@ async def thinking_agentic_loop(
                     and recovery_marker is not None
                     and recovery_marker.get("attempt") == "sent"
                     and recovery_marker.get("step") == tool_call_count + 1
+                )
+                recovered_stage = (
+                    recovery_marker.get("stage", "rewritten")
+                    if recovered_turn
+                    else None
                 )
                 if recovery_active and recovery_marker is not None:
                     recovery_marker["attempt"] = "completed"
@@ -8420,6 +8445,15 @@ async def thinking_agentic_loop(
                                     "step": tool_call_count + 1,
                                     "error": error_message,
                                     "error_type": type(exc).__name__,
+                                    **(
+                                        {
+                                            "prompt": _refused_agentic_prompt(
+                                                system_message, messages, tools
+                                            )
+                                        }
+                                        if _is_refusal
+                                        else {}
+                                    ),
                                 },
                             }
                         )
@@ -8441,6 +8475,7 @@ async def thinking_agentic_loop(
                         candidate[0]["_openai_refusal_recovery"] = {
                             "template_id": refusal_recovery_prompt.template_id,
                             "attempt": "sent",
+                            "stage": "rewritten",
                             "step": tool_call_count + 1,
                         }
                         if on_recovery_checkpoint:
@@ -8471,10 +8506,64 @@ async def thinking_agentic_loop(
                                 }
                             )
                         continue
-                    # First refusal of this request: retry once. Provider safety
-                    # sampling is non-deterministic, so an identical retry sometimes
-                    # succeeds.
-                    if consecutive_refusals < 2:
+                    if (
+                        consecutive_refusals == 2
+                        and recovery_active
+                        and recovery_marker is not None
+                        and recovery_marker.get("attempt") == "sent"
+                        and recovery_marker.get("stage", "rewritten") == "rewritten"
+                        and refusal_recovery_prompt is not None
+                        and _is_explicit_openai_cyber_refusal(config.provider, exc)
+                    ):
+                        candidate = [
+                            {
+                                "role": "user",
+                                "content": initial_user_message,
+                                "_openai_refusal_recovery": {
+                                    "template_id": refusal_recovery_prompt.template_id,
+                                    "attempt": "sent",
+                                    "stage": "fresh",
+                                    "step": tool_call_count + 1,
+                                },
+                            },
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Resume this authorized assessment from saved scan data. "
+                                    "Use context_tool to check current coverage or evidence "
+                                    "for the assigned target, then choose a different "
+                                    "in-scope test. Do not repeat the last attempted test."
+                                ),
+                            },
+                        ]
+                        if on_recovery_checkpoint:
+                            await on_recovery_checkpoint(candidate, tool_call_count)
+                        if config.provider == "openai_codex":
+                            from aespa.services import codex_provider
+
+                            await codex_provider.close_conversation(messages)
+                        messages = candidate
+                        recovery_marker = candidate[0]["_openai_refusal_recovery"]
+                        if emit_fn:
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "llm_response",
+                                    "status": "retrying",
+                                    "message": (
+                                        f"Step {tool_call_count + 1}: shorter OpenAI retry "
+                                        "was refused; retrying with fresh context."
+                                    ),
+                                    "data": {
+                                        "step": tool_call_count + 1,
+                                        "provider": config.provider,
+                                        "refusal_recovery": "fresh_context",
+                                    },
+                                }
+                            )
+                        continue
+                    retry_limit = 2 if isinstance(exc, LLMContentFilteredError) else 1
+                    if consecutive_refusals <= retry_limit:
                         if emit_fn:
                             try:
                                 emit_fn(
@@ -8484,7 +8573,9 @@ async def thinking_agentic_loop(
                                         "status": "warning",
                                         "message": (
                                             f"Step {tool_call_count + 1}: provider refused "
-                                            "this request; retrying once before skipping it."
+                                            "this request; retrying "
+                                            f"({consecutive_refusals}/{retry_limit}) "
+                                            "before skipping it."
                                         ),
                                         "data": {
                                             "step": tool_call_count + 1,
@@ -8495,41 +8586,15 @@ async def thinking_agentic_loop(
                             except Exception:
                                 pass
                         continue
-                    # Refused again (twice for the same request): skip this line of
-                    # investigation and move on instead of failing the whole scan.
-                    scoped_retry_refused = bool(
+                    # The request was refused after its retries. Move to another test.
+                    fresh_retry_refused = bool(
                         recovery_active
                         and recovery_marker is not None
                         and recovery_marker.get("attempt") == "sent"
+                        and recovery_marker.get("stage") == "fresh"
                         and recovery_marker.get("step") == tool_call_count + 1
                     )
                     refusal_skips += 1
-                    if refusal_skips > AGENTIC_MAX_REFUSAL_SKIPS:
-                        if scoped_retry_refused and emit_fn:
-                            try:
-                                emit_fn(
-                                    {
-                                        "type": "scanner_phase",
-                                        "phase": "llm_response",
-                                        "status": "error",
-                                        "message": (
-                                            f"Step {tool_call_count + 1}: shorter OpenAI retry "
-                                            "was refused. The scan has reached its refusal limit."
-                                        ),
-                                        "data": {
-                                            "step": tool_call_count + 1,
-                                            "refusal_recovery": "refused",
-                                            "refusal_skips": refusal_skips,
-                                        },
-                                    }
-                                )
-                            except Exception:
-                                pass
-                        raise LLMRefusalError(
-                            f"LLM provider refused the scan request at step "
-                            f"{tool_call_count + 1} and did not recover after "
-                            f"{refusal_skips - 1} skipped steps: {exc}"
-                        ) from exc
                     if recovery_active and config.provider == "openai_codex":
                         from aespa.services import codex_provider
 
@@ -8537,11 +8602,22 @@ async def thinking_agentic_loop(
                         messages = list(messages)
                     if not recovery_active:
                         _drop_last_agentic_exchange(messages)
+                    refused_attempts = consecutive_refusals
+                    refused_count = (
+                        "twice"
+                        if refused_attempts == 2
+                        else f"{refused_attempts} times"
+                    )
                     _append_agentic_user_steer(
                         messages,
                         (
-                            "The model provider's safety filter refused the previous "
-                            "request twice. Do NOT repeat that endpoint, payload, or line "
+                            "Choose a different in-scope test. Do not repeat the last "
+                            "attempted endpoint, payload, or line of investigation."
+                            if recovery_active
+                            and recovery_marker is not None
+                            and recovery_marker.get("stage") == "fresh"
+                            else "The model provider's safety filter refused the previous "
+                            f"request {refused_count}. Do NOT repeat that endpoint, payload, or line "
                             "of investigation. Abandon it and continue the assessment on a "
                             "completely different attack surface or vulnerability class."
                         ),
@@ -8557,12 +8633,12 @@ async def thinking_agentic_loop(
                                     "phase": "llm_response",
                                     "status": "warning",
                                     "message": (
-                                        f"Step {tool_call_count + 1}: shorter OpenAI retry "
-                                        "was refused. Leaving this test unresolved and moving "
-                                        "to a different target."
-                                        if scoped_retry_refused
+                                        f"Step {tool_call_count + 1}: OpenAI retry with "
+                                        "fresh context was refused. Leaving this test unresolved "
+                                        "and moving to a different target."
+                                        if fresh_retry_refused
                                         else f"Step {tool_call_count + 1}: provider refused this "
-                                        "request twice — skipping it and moving to a "
+                                        f"request {refused_count} — skipping it and moving to a "
                                         "different target."
                                     ),
                                     "data": {
@@ -8570,7 +8646,7 @@ async def thinking_agentic_loop(
                                         "refusal_skips": refusal_skips,
                                         **(
                                             {"refusal_recovery": "refused"}
-                                            if scoped_retry_refused
+                                            if fresh_retry_refused
                                             else {}
                                         ),
                                     },
@@ -8621,6 +8697,7 @@ async def thinking_agentic_loop(
             }
             if recovered_turn:
                 response_data["refusal_recovery"] = "accepted"
+                response_data["refusal_recovery_stage"] = recovered_stage
             if not tool_use_blocks:
                 response_data["no_tool_retry"] = no_tool_attempt
                 response_data["no_tool_retry_limit"] = 3
@@ -8630,8 +8707,13 @@ async def thinking_agentic_loop(
                     action_label = ", ".join(b["name"] for b in tool_use_blocks)
                     response_status = "complete"
                     response_message = (
-                        f"Step {tool_call_count + 1}: shorter OpenAI retry accepted; "
-                        f"continuing with {action_label}."
+                        (
+                            f"Step {tool_call_count + 1}: OpenAI retry with fresh context "
+                            f"accepted; continuing with {action_label}."
+                            if recovered_stage == "fresh"
+                            else f"Step {tool_call_count + 1}: shorter OpenAI retry "
+                            f"accepted; continuing with {action_label}."
+                        )
                         if recovered_turn
                         else f"Step {tool_call_count + 1}: LLM → {action_label} (stop: {stop_reason})"
                     )
@@ -8641,9 +8723,15 @@ async def thinking_agentic_loop(
                         "empty response" if no_usable_content else "text-only response"
                     )
                     response_message = (
-                        f"Step {tool_call_count + 1}: shorter OpenAI retry was accepted "
-                        f"but returned {response_kind} without a tool call; "
-                        f"asking again ({no_tool_attempt}/3)."
+                        (
+                            f"Step {tool_call_count + 1}: OpenAI retry with fresh context "
+                            f"was accepted but returned {response_kind} without a tool "
+                            f"call; asking again ({no_tool_attempt}/3)."
+                            if recovered_stage == "fresh"
+                            else f"Step {tool_call_count + 1}: shorter OpenAI retry was "
+                            f"accepted but returned {response_kind} without a tool call; "
+                            f"asking again ({no_tool_attempt}/3)."
+                        )
                         if recovered_turn
                         else f"Step {tool_call_count + 1}: LLM returned {response_kind} "
                         f"without a tool call (native stop: {stop_reason}); "

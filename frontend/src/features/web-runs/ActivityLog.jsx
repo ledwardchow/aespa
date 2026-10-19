@@ -1,15 +1,181 @@
 import { useState, useRef, useEffect } from "react";
 import { truncUrl } from "../../shared/lib/urls.js";
-import { LOG_EVENT_TYPES, visibleLogEntries } from "./activityLogFilters.js";
-export function ActivityLog({ runId, activityLog, sitePlanData, active, onClearLog, onError }) {
+import {
+  buildRefusalTraces,
+  logEventTypes,
+  LOG_EVENT_TYPES,
+  visibleLogEntries,
+} from "./activityLogFilters.js";
+
+const TRACE_OUTCOMES = {
+  succeeded: { label: "Retry succeeded", description: "The provider accepted the retry." },
+  skipped: {
+    label: "Retry refused · test skipped",
+    description: "The retry was refused and AESPA left this test unresolved.",
+  },
+  stopped: { label: "Scan stopped", description: "The provider refusal stopped the scan." },
+  pending: { label: "No outcome recorded", description: "The log has no retry result yet." },
+};
+
+function OriginalLogEvent({ entry }) {
+  const [showData, setShowData] = useState(false);
+  return (
+    <div className="activity-refusal-trace-event">
+      <time>{entry._ts}</time>
+      <span>{entry.message}</span>
+      {entry.data && Object.keys(entry.data).length > 0 && (
+        <details onToggle={(event) => setShowData(event.currentTarget.open)}>
+          <summary>View event data</summary>
+          {showData && <pre>{JSON.stringify(entry.data, null, 2)}</pre>}
+        </details>
+      )}
+    </div>
+  );
+}
+
+function RefusalTrace({ trace }) {
+  const outcome = TRACE_OUTCOMES[trace.outcome];
+  const [copiedPrompt, setCopiedPrompt] = useState(null);
+  const [copyError, setCopyError] = useState("");
+  const copyPrompt = async (prompt, index) => {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setCopiedPrompt(index);
+      setCopyError("");
+    } catch {
+      setCopyError("Could not copy the prompt.");
+    }
+  };
+  return (
+    <article className="activity-refusal-trace">
+      <div className="activity-refusal-trace-heading">
+        <strong>Step {trace.step}</strong>
+        <span className="activity-refusal-trace-time">{trace.time}</span>
+        <span
+          className={`activity-refusal-trace-outcome activity-refusal-trace-outcome--${trace.outcome}`}
+        >
+          {outcome.label}
+        </span>
+      </div>
+      <p>{outcome.description}</p>
+      <div className="activity-refusal-trace-context">
+        <span>Last test before refusal</span>
+        {trace.precedingTest ? (
+          <>
+            <strong>{trace.precedingTest.purpose || trace.precedingTest.action}</strong>
+            {trace.precedingTest.purpose && <div>{trace.precedingTest.action}</div>}
+            {trace.precedingTest.target && <code>{trace.precedingTest.target}</code>}
+          </>
+        ) : (
+          <div>No preceding test was recorded for this step.</div>
+        )}
+      </div>
+      <ol className="activity-refusal-trace-timeline">
+        {trace.attempts.map((attempt, index) => (
+          <li
+            className={`activity-refusal-trace-point activity-refusal-trace-point--${attempt.outcome}`}
+            key={`${attempt.startedAt}-${index}`}
+          >
+            <strong>Try {index + 1}</strong>
+            <span>{attempt.label}</span>
+            <b>{attempt.outcome === "pending" ? "Waiting for result" : attempt.outcome}</b>
+            <time>
+              {attempt.startedAt}
+              {attempt.finishedAt &&
+                attempt.finishedAt !== attempt.startedAt &&
+                ` → ${attempt.finishedAt}`}
+            </time>
+          </li>
+        ))}
+      </ol>
+      <div className="activity-refusal-trace-after">
+        <span>What happened after</span>
+        <span>{trace.nextAction?.message ?? "No later action recorded"}</span>
+        {trace.nextAction?.time && <time>{trace.nextAction.time}</time>}
+      </div>
+      <div className="activity-refusal-trace-prompts">
+        {trace.rejectedPrompts.length > 0 ? (
+          trace.rejectedPrompts.map((prompt, index) => {
+            const label =
+              trace.rejectedPrompts.length === 1
+                ? "Rejected prompt"
+                : `Rejected prompt ${index + 1}`;
+            return (
+              <div className="activity-refusal-trace-prompt" key={`${prompt.time}-${index}`}>
+                <div className="activity-refusal-trace-prompt-heading">
+                  <strong>{label}</strong>
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    onClick={() => copyPrompt(prompt.text, index)}
+                  >
+                    {copiedPrompt === index ? "Copied" : "Copy prompt"}
+                  </button>
+                </div>
+                <details>
+                  <summary>View full prompt</summary>
+                  <pre>{prompt.text}</pre>
+                </details>
+              </div>
+            );
+          })
+        ) : (
+          <div className="activity-refusal-trace-prompt-missing">
+            The full prompt was not saved for this refusal.
+          </div>
+        )}
+        {copyError && <div role="alert">{copyError}</div>}
+      </div>
+      <details className="activity-refusal-trace-events">
+        <summary>Show original log events</summary>
+        {trace.events.map((entry, index) => (
+          <OriginalLogEvent entry={entry} key={`${entry._id}-${index}`} />
+        ))}
+      </details>
+    </article>
+  );
+}
+export function ActivityLog({
+  runId,
+  activityLog,
+  sitePlanData,
+  active,
+  onClearLog,
+  onError,
+  view = "log",
+}) {
   const [clearBusy, setClearBusy] = useState("");
   const [expandedLogIds, setExpandedLogIds] = useState(new Set());
   const [showDisplayOptions, setShowDisplayOptions] = useState(false);
   const displayOptionsRef = useRef(null);
   const displayOptionsButtonRef = useRef(null);
-  const [newestFirst, setNewestFirst] = useState(false);
+  const [newestFirst, setNewestFirst] = useState(true);
   const [selectedTypes, setSelectedTypes] = useState(new Set());
-  const displayedEntries = visibleLogEntries(activityLog, selectedTypes, newestFirst);
+  const traceView = view === "errors";
+  const refusalData = traceView ? buildRefusalTraces(activityLog) : null;
+  const otherLlmErrors = traceView
+    ? activityLog.filter(
+        (entry, index) =>
+          !refusalData.usedIndices.has(index) && logEventTypes(entry).has("llm-errors"),
+      )
+    : [];
+  if (traceView && newestFirst) otherLlmErrors.reverse();
+  const displayedEntries = traceView
+    ? otherLlmErrors
+    : visibleLogEntries(activityLog, selectedTypes, newestFirst);
+  const refusalTraces = traceView
+    ? newestFirst
+      ? [...refusalData.traces].reverse()
+      : refusalData.traces
+    : [];
+  const traceCounts = { succeeded: 0, failed: 0, pending: 0 };
+  for (const trace of refusalTraces) {
+    const skippedRequests = trace.events.filter((entry) => entry.data?.refusal_skips).length;
+    traceCounts.failed += skippedRequests;
+    if (trace.outcome === "succeeded") traceCounts.succeeded += 1;
+    else if (trace.outcome === "pending") traceCounts.pending += 1;
+    else if (!skippedRequests) traceCounts.failed += 1;
+  }
   const toggleLogId = (id) =>
     setExpandedLogIds((prev) => {
       const next = new Set(prev);
@@ -39,16 +205,26 @@ export function ActivityLog({ runId, activityLog, sitePlanData, active, onClearL
   useEffect(() => {
     if (!active || !activityFeedRef.current) return;
     activityFeedRef.current.scrollTop = newestFirst ? 0 : activityFeedRef.current.scrollHeight;
-  }, [activityLog.length, active, newestFirst, selectedTypes]);
+  }, [activityLog.length, active, newestFirst, selectedTypes, traceView]);
 
   return (
     <div className="activity-log">
       <div className="activity-log-toolbar">
         <span className="activity-count-label">
-          {displayedEntries.length} of {activityLog.length} event
-          {activityLog.length !== 1 ? "s" : ""}
+          {traceView ? (
+            <>
+              Refusals: {traceCounts.succeeded} succeeded · {traceCounts.failed} failed
+              {traceCounts.pending > 0 && <> · {traceCounts.pending} pending</>} ·{" "}
+              {otherLlmErrors.length} other LLM error{otherLlmErrors.length !== 1 ? "s" : ""}
+            </>
+          ) : (
+            <>
+              {displayedEntries.length} of {activityLog.length} event
+              {activityLog.length !== 1 ? "s" : ""}
+            </>
+          )}
         </span>
-        {activityLog.some((e) => e.data?.mode === "agentic") && (
+        {!traceView && activityLog.some((e) => e.data?.mode === "agentic") && (
           <span className="activity-mode-badge">Continuous session</span>
         )}
         <div className="activity-log-display-anchor" ref={displayOptionsRef}>
@@ -76,41 +252,45 @@ export function ActivityLog({ runId, activityLog, sitePlanData, active, onClearL
                 />
                 Newest first
               </label>
-              <div className="activity-log-filter-title">Event type</div>
-              <div className="activity-log-filter-options">
-                <label className="activity-log-option">
-                  <input
-                    type="checkbox"
-                    checked={selectedTypes.size === 0}
-                    onChange={() => setSelectedTypes(new Set())}
-                  />
-                  All
-                </label>
-                {LOG_EVENT_TYPES.map(([type, label]) => (
-                  <label className="activity-log-option" key={type}>
+              {!traceView && <div className="activity-log-filter-title">Event type</div>}
+              {!traceView && (
+                <div className="activity-log-filter-options">
+                  <label className="activity-log-option">
                     <input
                       type="checkbox"
-                      checked={selectedTypes.has(type)}
-                      onChange={() =>
-                        setSelectedTypes((previous) => {
-                          const next = new Set(previous);
-                          if (next.has(type)) next.delete(type);
-                          else next.add(type);
-                          return next;
-                        })
-                      }
+                      checked={selectedTypes.size === 0}
+                      onChange={() => setSelectedTypes(new Set())}
                     />
-                    {label}
+                    All
                   </label>
-                ))}
-              </div>
+                  {LOG_EVENT_TYPES.map(([type, label]) => (
+                    <label className="activity-log-option" key={type}>
+                      <input
+                        type="checkbox"
+                        checked={selectedTypes.has(type)}
+                        onChange={() =>
+                          setSelectedTypes((previous) => {
+                            const next = new Set(previous);
+                            if (next.has(type)) next.delete(type);
+                            else next.add(type);
+                            return next;
+                          })
+                        }
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
-        <a className="btn ghost sm" href={`/api/test-runs/${runId}/thinking-log/export`} download>
-          Export log ↓
-        </a>
-        {activityLog.length > 0 && (
+        {!traceView && (
+          <a className="btn ghost sm" href={`/api/test-runs/${runId}/thinking-log/export`} download>
+            Export log ↓
+          </a>
+        )}
+        {!traceView && activityLog.length > 0 && (
           <button
             className="btn danger-outline sm"
             disabled={clearBusy === "activity"}
@@ -132,7 +312,7 @@ export function ActivityLog({ runId, activityLog, sitePlanData, active, onClearL
         )}
       </div>
       <div className="activity-feed" ref={activityFeedRef}>
-        {sitePlanData && (
+        {!traceView && sitePlanData && (
           <div className="site-plan-card">
             <div className="site-plan-header">
               <span className="site-plan-label">Site Test Plan</span>
@@ -175,7 +355,7 @@ export function ActivityLog({ runId, activityLog, sitePlanData, active, onClearL
             )}
           </div>
         )}
-        {activityLog.length === 0 && (
+        {activityLog.length === 0 && !traceView && (
           <div
             className="subtle"
             style={{
@@ -186,10 +366,24 @@ export function ActivityLog({ runId, activityLog, sitePlanData, active, onClearL
             No activity yet. Start a Crawl or Dynamic Scan to begin.
           </div>
         )}
-        {activityLog.length > 0 && displayedEntries.length === 0 && (
-          <div className="activity-log-empty">No events match these filters.</div>
+        {displayedEntries.length === 0 &&
+          refusalTraces.length === 0 &&
+          (traceView || activityLog.length > 0) && (
+            <div className="activity-log-empty">
+              {traceView ? "No LLM errors recorded." : "No events match these filters."}
+            </div>
+          )}
+        {traceView && refusalTraces.length > 0 && (
+          <div className="activity-refusal-traces">
+            {refusalTraces.map((trace) => (
+              <RefusalTrace key={trace.id} trace={trace} />
+            ))}
+          </div>
         )}
-        {displayedEntries.map((entry) => {
+        {traceView && otherLlmErrors.length > 0 && (
+          <div className="activity-refusal-other-heading">Other LLM errors</div>
+        )}
+        {(traceView ? otherLlmErrors : displayedEntries).map((entry) => {
           const PHASE_META = {
             crawl: {
               label: "Crawl",

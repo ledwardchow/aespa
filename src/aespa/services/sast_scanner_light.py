@@ -128,6 +128,7 @@ def _restore_candidate_state(sast_run_id: int) -> list[dict]:
     return [item for item in value if isinstance(item, dict)]
 
 
+@events_svc.scoped_agent
 async def _run_checkpointed_agent(
     *,
     sast_run_id: int,
@@ -1230,6 +1231,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 )
                 try:
                     await _run_checkpointed_agent(
+                        agent_id=agent_id,
+                        role=role,
                         sast_run_id=sast_run_id,
                         phase="validation",
                         worker_key=f"validator:{candidate_id}",
@@ -1475,6 +1478,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
 
                     try:
                         summary = await _run_checkpointed_agent(
+                            agent_id=agent_id,
+                            role=role,
                             sast_run_id=sast_run_id,
                             phase="discovery",
                             worker_key=worker.worker_key,
@@ -1821,6 +1826,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 },
             )
             attack_summary = await _run_checkpointed_agent(
+                agent_id="sast-attack-path",
+                role="Attack Path Analyst",
                 sast_run_id=sast_run_id,
                 phase="attack_path",
                 worker_key="attack_path",

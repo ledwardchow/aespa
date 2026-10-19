@@ -69,7 +69,7 @@ function WarningDialog({ pending, onCancel, onView, onConfirm, onRetry }) {
               View workflows
             </button>
             <button type="button" className="btn" onClick={onConfirm}>
-              {pending.action === "crawl-then-scan" ? "Continue anyway" : "Start scan anyway"}
+              Start scan anyway
             </button>
           </>
         )}
@@ -92,6 +92,10 @@ export function useUncrawledWorkflowWarning({ runId, onStart, onViewWorkflows, o
     busy.current = true;
     updatePending(null);
     try {
+      if (action === "crawl-then-scan") {
+        await onStart(action, coverageMode);
+        return;
+      }
       const result = await webRunsApi.getWorkflowNotes(runId);
       if (!Array.isArray(result?.notes)) throw new Error("Workflow notes could not be loaded.");
       const workflows = uncrawledWorkflows(result.notes);

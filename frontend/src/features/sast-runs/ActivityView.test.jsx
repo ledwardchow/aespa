@@ -76,6 +76,60 @@ test("keeps the phase log on a separate tab", async () => {
 
   fireEvent.click(screen.getByRole("button", { name: "Log" }));
   await waitFor(() => expect(screen.getByText("Source scope ready.")).toBeTruthy());
-  expect(screen.getByText("1 entries")).toBeTruthy();
+  expect(screen.getByText("1 entry")).toBeTruthy();
   expect(window.location.hash).toBe("#/sast-runs/14/activity?subtab=log");
+});
+
+test("shows newest SAST events first and lets the user change order and filter", async () => {
+  const { container } = render(
+    <ActivityView
+      {...baseProps}
+      scanRunning={false}
+      agentLog={[
+        { agent_id: "sast-worker-4", role: "SAST Review Worker", display_name: "routes:review" },
+      ]}
+      logs={[
+        {
+          id: 1,
+          phase: "scope",
+          message: "Scope ready",
+          created_at: "2026-09-11T01:00:00Z",
+          agent_id: "system",
+          role: "System",
+        },
+        {
+          id: 2,
+          phase: "discovery",
+          message: "Read source",
+          created_at: "2026-09-11T01:01:00Z",
+          agent_id: "sast-worker-4",
+          role: "SAST Review Worker",
+        },
+        {
+          id: 3,
+          phase: "discovery",
+          message: "Found lead",
+          created_at: "2026-09-11T01:02:00Z",
+          agent_id: "sast-worker-4",
+          role: "SAST Review Worker",
+        },
+      ]}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Log" }));
+  const messages = () =>
+    [...container.querySelectorAll(".sast-activity-message")].map((row) => row.textContent);
+  await waitFor(() => expect(messages()).toEqual(["Found lead", "Read source", "Scope ready"]));
+  expect(screen.getAllByText("routes:review")).toHaveLength(2);
+
+  fireEvent.click(screen.getByRole("button", { name: "Display options" }));
+  const newestFirst = screen.getByRole("checkbox", { name: "Newest first" });
+  expect(newestFirst.checked).toBe(true);
+  fireEvent.click(newestFirst);
+  expect(messages()).toEqual(["Scope ready", "Read source", "Found lead"]);
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "discovery" }));
+  expect(messages()).toEqual(["Read source", "Found lead"]);
+  expect(screen.getByText("2 of 3 entries")).toBeTruthy();
 });

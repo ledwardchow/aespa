@@ -6,7 +6,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
-- **OpenAI refusal recovery**: Global settings now has an option to retry a web or API scan step once with shorter instructions when ChatGPT-plan or Codex blocks it for cybersecurity risk. The option starts off. The first request, target, tools, and scan limits stay the same. The activity log shows when the shorter retry starts, whether the provider accepts it, and whether a second refusal leaves the test unresolved.
+- **OpenAI refusal recovery**: Global settings now has an option to retry a web or API scan step with shorter instructions when ChatGPT-plan or Codex blocks it for cybersecurity risk. If that retry is also refused, AESPA tries once more with fresh context from saved scan data. The option starts off. The first request, target, and tools stay the same. The activity log shows each retry and whether the provider accepts it or leaves the test unresolved. Repeated refusals can be skipped without a fixed count limit; other scan limits still apply.
 
 - **Site settings export**: The Export button lets you download a site's settings and saved accounts without its test runs or results, or download everything. Importing a settings-only file creates a site ready for new runs, including when saved workflows have blank instructions.
 
@@ -22,9 +22,11 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **SAST activity log**: The Log tab now shows the newest events first. Display options let you change the order and filter by event type. New scans show which agent or system process wrote each event; older events without saved agent details are marked as unknown.
+
 - **Usage time views**: The Usage page now shows all-time, monthly, weekly, daily, and custom date ranges. Choose a start and end date for a custom range. Usage tables are grouped by provider, with an estimated cost for each provider. Fast mode calls appear beside standard calls for the same provider. New usage is recorded by day so shorter ranges can show exact totals. A one-time backfill tool can recover some older daily usage from saved call records, monthly records confined to one day, and SAST runs completed on the day they started. Usage that cannot be dated stays in the monthly and all-time views, and the page flags it when a shorter range overlaps that month.
 
-- **Scanner log display**: The Log tab now has a pop-out menu for newest-first order and filters for Test Lead, Specialist, Reporting, Validator, and LLM Errors. The LLM Errors filter shows the full LLM step when a provider error or refusal occurs, including requests, retries, and recovery results.
+- **Scanner log display**: The Log tab now shows the newest entries first by default, with a pop-out menu to change the order and filter for Test Lead, Specialist, Reporting, and Validator. A separate LLM Errors tab groups repeated refusals for the same scanner step into one trace that shows the preceding test, one item per request and its result, and the next recorded action. It counts successful and failed retries, with pending outcomes shown separately. Each new refusal saves its full prompt for viewing and copying. Original log events remain available in each trace, with their full data collapsed until opened. Other LLM errors appear below the traces.
 
 - **Workflow activity**: Continuing a workflow now shows the Crawler as active until all running workflows finish. The Activity Log shows each retry's browser steps and whether it reached the workflow, needs more test data, failed, or was stopped.
 
@@ -36,7 +38,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Site form tabs**: Adding or editing a site now uses Site, Credentials, Workflows, and Instructions tabs instead of one long page, with Save always visible at the bottom. Accounts are listed beside the selected account's settings, and each login field takes one row. Login methods use plain names, such as "Form fill + TOTP code" and "Log in myself in a browser". The per-account login page is under **Override login page URL**. The Workflows tab appears once a crawl has saved a workflow for the site. If a value is missing on another tab when you save, the form opens that tab and marks it.
 
-- **Benchmark model badges**: Benchmark results show which Daybreak program an OpenAI scan used, and Mythos results show a Glasswing badge. Published results include the Daybreak program for the main scan model. Codex checks available programs for each model before requesting one. A one-time script can label older saved benchmark results after showing a preview and making a database backup. ChatGPT text streams and Codex tool calls save the program used by the run.
+- **Benchmark model badges**: Benchmark results show which Daybreak program an OpenAI scan used, and Mythos results show a Glasswing badge. Published results include the Daybreak program for the main scan model. Codex checks available programs for each model before requesting one. ChatGPT plan requests for GPT-6 Sol let OpenAI choose the program automatically. A one-time script can label older saved benchmark results after showing a preview and making a database backup. ChatGPT text streams and Codex tool calls save the program used by the run.
 
 - **Benchmark prices for Fast mode scans**: Published results use Normal mode prices for Fast mode calls so scan costs can be compared. The result comment also shows the estimated scan cost with Fast mode.
 
@@ -54,15 +56,19 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **SAST activity log height**: The log fills the available space on the Activity tab instead of stopping after 520 pixels.
+
+- **Crawl and scan workflow warning**: Starting a crawl that will scan afterward no longer warns that saved workflows have not been crawled. Starting a scan without a new crawl still shows the warning.
+
 - **Crawl-only run status**: The Sites run list shows "Crawled" when a run has finished crawling but has not completed a scan.
 
-- **Workflow input notice**: Choosing to start a scan with unfinished workflows now hides their Needs input count. A later workflow attempt still shows a new notice.
+- **Workflow input notice**: Starting a scan with unfinished workflows now hides their Needs input count, including when the scan starts automatically after crawling. A later workflow attempt still shows a new notice.
 
 - **Findings dropped during web scans**: A finding with no selected object check can now be saved when the Test Lead sends `0` for that optional field. Invalid check links and missing evidence are reported as rejections instead of duplicates. A.L.I.C.E. also reports whether its finding was saved, already existed, or was rejected.
 
 - **Workflow progress during crawls**: While a crawl tried workflows that it had not reached, the Activity Log showed only the start and the result of each workflow, and the crawler card on the Agents view did not change. Each step, such as signing in, opening the starting page, or choosing the next action, now appears in both places, along with how many workflows the crawler model suggested.
 
-- **Scans no longer fail on a single refused request**: When the model provider refused one request during a web or API scan, the whole run stopped and was marked failed. AESPA now retries a refused request once, and if it is refused again, skips that line of investigation and continues the scan on a different target. A scan fails only if the provider keeps refusing across many skipped requests.
+- **Scans no longer fail on a single refused request**: When the model provider refused one request during a web or API scan, the whole run stopped and was marked failed. AESPA now retries a refused request once, and if it is refused again, skips that line of investigation and continues the scan on a different target. Anthropic responses with a `content_filtered` stop reason appear in LLM Errors and get two retries before AESPA moves to another test.
 
 - **Scans pause instead of failing when the LLM provider can't be reached**: A short network drop, such as Wi-Fi reconnecting or a computer waking from sleep, could stop a long web, API, or SAST scan and mark it failed. This included failures to refresh AWS credentials for Amazon Bedrock. AESPA now retries the request several times over about four minutes. If the provider still can't be reached, the scan is paused at its last saved step and can be resumed once the connection is back.
 

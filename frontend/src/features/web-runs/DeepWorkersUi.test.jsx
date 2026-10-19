@@ -156,6 +156,50 @@ test("shows Deep worker traces inside Work Queue without a separate Workers tab"
   ).toBeGreaterThan(0);
 });
 
+test("opens refusal traces in the LLM Errors tab", async () => {
+  render(
+    <WebRunActivityTab
+      activeTab="activity"
+      runId={1}
+      run={{ coverage_mode: "standard" }}
+      thinkingStatus={{ status: "complete" }}
+      activityLog={[
+        {
+          _id: 1,
+          _ts: "10:00:00",
+          phase: "llm_request",
+          message: "Step 2: sending to LLM",
+          status: "pending",
+          data: { step: 2 },
+        },
+        {
+          _id: 2,
+          _ts: "10:00:01",
+          phase: "llm_response",
+          message: "Step 2: provider refused this request",
+          status: "warning",
+          data: { step: 2, error_type: "LLMRefusalError" },
+        },
+      ]}
+      agents={[]}
+      sitePlanData={null}
+      onClearLog={vi.fn()}
+      onError={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Log" }));
+  expect(document.querySelectorAll(".activity-refusal-trace")).toHaveLength(0);
+  fireEvent.click(screen.getByRole("button", { name: "LLM Errors" }));
+  expect(await screen.findByText("No outcome recorded")).toBeTruthy();
+  expect(document.querySelectorAll(".activity-refusal-trace")).toHaveLength(1);
+  expect(document.querySelector(".activity-count-label").textContent).toContain(
+    "0 succeeded · 0 failed · 1 pending",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Display options" }));
+  expect(screen.queryByText("Event type")).toBeNull();
+});
+
 test("hides the empty Burp row without scan activity", () => {
   render(
     <ActivityAgents

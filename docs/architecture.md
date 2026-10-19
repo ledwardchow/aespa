@@ -916,8 +916,11 @@ The loop terminates when:
 When OpenAI refusal recovery is on, the first Test Lead or web specialist request is unchanged.
 An explicit `cyber_policy` refusal from ChatGPT-plan or Codex starts one retry with a shorter
 prompt for the same assignment. The retry keeps completed tool results, scope checks, and
-the configured tools. Codex starts a new native thread for that retry. If the retry is
-also refused, the loop leaves the step unresolved and uses its existing refusal skip limit.
+the configured tools. Codex starts a new native thread for that retry. If the shorter retry
+is also refused, the loop tries once more with a fresh conversation built from the run brief
+or specialist handoff. It asks the model to use `context_tool` for saved scan data and choose
+another in-scope test. A further refusal leaves the step unresolved. The scan has no fixed
+refusal count limit.
 Other providers and other refusal types keep their existing behavior.
 
 The Execution Monitor is disabled by default and can be enabled in the Scanner settings.

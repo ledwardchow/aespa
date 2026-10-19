@@ -1056,6 +1056,9 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 2;
   padding: 7px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
@@ -1086,12 +1089,17 @@
   border-bottom-color: var(--accent);
 }
 .sast-activity-feed {
-  max-height: 520px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.sast-log-display-options {
+  max-height: min(500px, 70vh);
   overflow-y: auto;
 }
 .sast-activity-entry {
   display: grid;
-  grid-template-columns: 70px 125px minmax(0, 1fr);
+  grid-template-columns: 70px 125px 180px minmax(0, 1fr);
   gap: 9px;
   align-items: baseline;
   padding: 9px 12px;
@@ -1110,6 +1118,12 @@
   font-weight: 700;
   text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
+}
+.sast-activity-agent {
+  overflow: hidden;
+  color: var(--text-2);
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .sast-activity-message {
@@ -1535,6 +1549,9 @@
     gap: 4px 8px;
   }
   .sast-activity-phase {
+    grid-column: 2;
+  }
+  .sast-activity-agent {
     grid-column: 2;
   }
   .sast-activity-message {

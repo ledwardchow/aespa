@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -418,7 +419,7 @@ def test_accepted_scoped_retry_without_tool_reports_followup(monkeypatch):
     )
 
 
-def test_scoped_second_refusal_skips_without_dropping_evidence(monkeypatch):
+def test_scoped_second_refusal_retries_with_fresh_context(monkeypatch):
     config = LLMConfig(
         provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048
     )
@@ -434,7 +435,13 @@ def test_scoped_second_refusal_skips_without_dropping_evidence(monkeypatch):
             return _tool("http_request", "probe-1")
         if len(seen) in (2, 3):
             raise ChatGPTCyberError()
-        assert any("baseline result" in str(m.get("content")) for m in messages)
+        assert system == "scoped system"
+        assert len(messages) == 2
+        assert messages[0]["content"] == "original opening"
+        assert messages[0]["_openai_refusal_recovery"]["stage"] == "fresh"
+        assert "context_tool" in messages[1]["content"]
+        assert "baseline result" not in str(messages)
+        assert "refused" not in str(messages)
         return _done("moved on")
 
     async def execute(_name, _args, _step):
@@ -453,11 +460,138 @@ def test_scoped_second_refusal_skips_without_dropping_evidence(monkeypatch):
     )
     assert summary == "moved on"
     assert len(seen) == 4
+    rejected_prompts = [
+        json.loads(event["data"]["prompt"])
+        for event in events
+        if event.get("data", {}).get("error_type") == "ChatGPTCyberError"
+    ]
+    assert [item["system"] for item in rejected_prompts] == [
+        "original system",
+        "scoped system",
+    ]
+    assert rejected_prompts[0]["messages"][0]["content"] == "original opening"
+    assert rejected_prompts[1]["messages"][0]["content"] == "scoped opening"
     assert any(
-        event.get("data", {}).get("refusal_recovery") == "refused"
-        and "unresolved" in event.get("message", "")
+        event.get("data", {}).get("refusal_recovery") == "fresh_context"
         for event in events
     )
+    assert any(
+        event.get("data", {}).get("refusal_recovery_stage") == "fresh"
+        and "OpenAI retry with fresh context accepted" in event.get("message", "")
+        for event in events
+    )
+
+
+def test_fresh_context_refusal_skips_without_replaying_refusal(monkeypatch):
+    config = LLMConfig(
+        provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048
+    )
+    prompt = RefusalRecoveryPrompt(
+        "scoped system", "scoped opening", "web-test-lead-v1"
+    )
+    seen = []
+    events = []
+
+    async def fake_call(_config, system, messages, tools=None):
+        seen.append((system, json.loads(json.dumps(messages))))
+        if len(seen) <= 3:
+            raise ChatGPTCyberError()
+        assert system == "scoped system"
+        assert messages[0]["content"] == "original opening"
+        assert "safety filter refused" not in str(messages)
+        return _done("continued")
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="original system",
+            initial_user_message="original opening",
+            tool_executor=lambda *_args: None,
+            refusal_recovery_prompt=prompt,
+            emit_fn=events.append,
+        )
+    )
+    assert summary == "continued"
+    assert len(seen) == 4
+    assert seen[1][1][0]["content"] == "scoped opening"
+    assert len(seen[2][1]) == 2
+    assert any(
+        event.get("data", {}).get("refusal_recovery") == "refused"
+        and "fresh context" in event.get("message", "")
+        for event in events
+    )
+
+
+def test_recovery_option_off_never_starts_fresh_context(monkeypatch):
+    config = LLMConfig(
+        provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048
+    )
+    systems = []
+    events = []
+
+    async def fake_call(_config, system, _messages, tools=None):
+        systems.append(system)
+        if len(systems) <= 2:
+            raise ChatGPTCyberError()
+        return _done("continued")
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="original system",
+            initial_user_message="original opening",
+            tool_executor=lambda *_args: None,
+            emit_fn=events.append,
+        )
+    )
+    assert summary == "continued"
+    assert systems == ["original system"] * 3
+    assert not any(
+        event.get("data", {}).get("refusal_recovery") == "fresh_context"
+        for event in events
+    )
+
+
+def test_codex_starts_new_thread_for_fresh_context(monkeypatch):
+    config = LLMConfig(provider="openai_codex", model="gpt-6-sol", max_tokens=2048)
+    prompt = RefusalRecoveryPrompt(
+        "scoped system", "scoped opening", "web-test-lead-v1"
+    )
+    seen = []
+    closed = []
+
+    async def fake_call(_config, system, messages, tools=None):
+        seen.append((system, messages))
+        if len(seen) <= 2:
+            raise codex_provider.CodexCyberPolicyError("cyber_policy")
+        return _done()
+
+    async def close(messages):
+        closed.append(messages)
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call)
+    monkeypatch.setattr(codex_provider, "close_conversation", close)
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            config,
+            system_message="original system",
+            initial_user_message="original opening",
+            tool_executor=lambda *_args: None,
+            refusal_recovery_prompt=prompt,
+        )
+    )
+    assert summary == "complete"
+    assert [system for system, _ in seen] == [
+        "original system",
+        "scoped system",
+        "scoped system",
+    ]
+    assert seen[2][1][0]["content"] == "original opening"
+    assert "context_tool" in seen[2][1][1]["content"]
+    assert closed[0] is seen[0][1]
+    assert closed[1] is seen[1][1]
 
 
 def test_codex_closes_refused_thread_before_scoped_retry(monkeypatch):
@@ -531,3 +665,40 @@ def test_checkpoint_failure_prevents_scoped_retry(monkeypatch):
             )
         )
     assert calls == 1
+
+
+def test_checkpoint_failure_prevents_fresh_context_retry(monkeypatch):
+    config = LLMConfig(
+        provider="openai_chatgpt_plan", model="gpt-6-sol", max_tokens=2048
+    )
+    prompt = RefusalRecoveryPrompt(
+        "scoped system", "scoped opening", "web-test-lead-v1"
+    )
+    calls = 0
+    saved_stages = []
+
+    async def fake_call(_config, _system, _messages, tools=None):
+        nonlocal calls
+        calls += 1
+        raise ChatGPTCyberError()
+
+    async def save(messages, _step):
+        stage = messages[0]["_openai_refusal_recovery"]["stage"]
+        saved_stages.append(stage)
+        if stage == "fresh":
+            raise OSError("checkpoint unavailable")
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call)
+    with pytest.raises(OSError, match="checkpoint unavailable"):
+        asyncio.run(
+            llm.thinking_agentic_loop(
+                config,
+                system_message="original system",
+                initial_user_message="original opening",
+                tool_executor=lambda *_args: None,
+                refusal_recovery_prompt=prompt,
+                on_recovery_checkpoint=save,
+            )
+        )
+    assert calls == 2
+    assert saved_stages == ["rewritten", "fresh"]

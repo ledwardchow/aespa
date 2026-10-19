@@ -91,6 +91,8 @@ def test_codex_file_limit_retries_saved_worker_at_lower_concurrency(
 
     async def scenario():
         result = await scanner._run_checkpointed_agent(
+            agent_id="sast-worker-test",
+            role="SAST Worker",
             sast_run_id=1,
             phase="discovery",
             worker_key="route:1",

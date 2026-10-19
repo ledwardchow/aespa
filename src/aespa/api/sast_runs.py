@@ -651,16 +651,26 @@ def get_scan_log(
         .where(ScanLog.run_kind == "sast")
         .order_by(ScanLog.created_at, ScanLog.id)
     ).all()
-    return [
-        {
-            "id": r.id,
-            "phase": r.phase,
-            "status": r.status,
-            "message": r.message,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-        }
-        for r in rows
-    ]
+    entries = []
+    for r in rows:
+        try:
+            data = json.loads(r.data_json) if r.data_json else None
+        except (TypeError, ValueError):
+            data = None
+        agent = data.get("_activity_agent") if isinstance(data, dict) else None
+        agent = agent if isinstance(agent, dict) else {}
+        entries.append(
+            {
+                "id": r.id,
+                "phase": r.phase,
+                "status": r.status,
+                "message": r.message,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "agent_id": agent.get("agent_id"),
+                "role": agent.get("role"),
+            }
+        )
+    return entries
 
 
 @router.get("/api/sast-runs/{run_id}/agent-log")

@@ -549,7 +549,8 @@ def test_plan_sends_daybreak_program_for_supported_scan_models(monkeypatch):
         await llm._add_daybreak_access(config, kwargs)
         return kwargs
 
-    for model in ("gpt-6-sol", "gpt-6-luna", "gpt-daybreak-blue-latest", "gpt-6-astra"):
+    assert asyncio.run(request("gpt-6-sol")) == {}
+    for model in ("gpt-6-luna", "gpt-daybreak-blue-latest", "gpt-6-astra"):
         assert asyncio.run(request(model)) == {
             "extra_body": {"access_programs": {"cyber": "daybreak_blue"}}
         }

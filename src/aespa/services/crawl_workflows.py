@@ -355,6 +355,14 @@ def list_workflow_notes(session: Session, run_id: int) -> list[dict]:
     notes: list[dict] = []
     resolved_ids: set[int] = set()
     superseded_ids: set[int] = set()
+    latest_scan_start_id = session.exec(
+        select(ScanLog.id)
+        .where(ScanLog.test_run_id == run_id)
+        .where(ScanLog.run_kind == "web")
+        .where(ScanLog.phase == "scan_started")
+        .order_by(ScanLog.id.desc())
+        .limit(1)
+    ).first()
     for row in session.exec(
         select(ScanLog)
         .where(ScanLog.test_run_id == run_id)
@@ -368,7 +376,13 @@ def list_workflow_notes(session: Session, run_id: int) -> list[dict]:
             continue
         if not isinstance(note, dict):
             continue
-        note = {**note, "id": row.id, "needs_input": _needs_user_input(note)}
+        note = {
+            **note,
+            "id": row.id,
+            "needs_input": _needs_user_input(note),
+            "acknowledged": latest_scan_start_id is not None
+            and row.id < latest_scan_start_id,
+        }
         notes.append(note)
         if note.get("status") == "crawled" and isinstance(note.get("retry_of"), int):
             resolved_ids.add(note["retry_of"])

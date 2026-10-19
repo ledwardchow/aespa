@@ -21,7 +21,7 @@ export function WebRunActivityTab(props) {
   } = props;
   const [activitySubTab, setActivitySubTab] = useHashTab(
     "subtab",
-    ["agents", "workers", "deep-queue", "log"],
+    ["agents", "workers", "deep-queue", "log", "llm-errors"],
     "agents",
   );
   const isDeep = run?.coverage_mode === "deep";
@@ -75,16 +75,27 @@ export function WebRunActivityTab(props) {
                 >
                   Log
                 </button>
+                <button
+                  className={
+                    "activity-sub-tab-btn" + (activitySubTab === "llm-errors" ? " active" : "")
+                  }
+                  onClick={() => setActivitySubTab("llm-errors")}
+                >
+                  LLM Errors
+                </button>
               </div>
             </>
           );
         })()}
-        <div style={{ display: activitySubTab === "log" ? "contents" : "none" }}>
+        <div
+          style={{ display: ["log", "llm-errors"].includes(activitySubTab) ? "contents" : "none" }}
+        >
           <ActivityLog
+            view={activitySubTab === "llm-errors" ? "errors" : "log"}
             runId={runId}
             activityLog={activityLog}
             sitePlanData={sitePlanData}
-            active={activeTab === "activity" && activitySubTab === "log"}
+            active={activeTab === "activity" && ["log", "llm-errors"].includes(activitySubTab)}
             onClearLog={onClearLog}
             onError={onError}
           />

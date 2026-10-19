@@ -17,3 +17,12 @@ test("keeps acknowledged attempts hidden after reload and leaves new attempts vi
   expect(visibleWorkflowInputNotes(notes, {}, readAcknowledgedWorkflowIds(7))).toEqual([notes[1]]);
   expect(readAcknowledgedWorkflowIds(8).has(11)).toBe(false);
 });
+
+test("hides workflow attempts acknowledged by a started scan while showing later attempts", () => {
+  const notes = [
+    { id: 11, needs_input: true, status: "needs_input", acknowledged: true },
+    { id: 12, needs_input: true, status: "needs_input", acknowledged: false },
+  ];
+
+  expect(visibleWorkflowInputNotes(notes, {}, new Set())).toEqual([notes[1]]);
+});

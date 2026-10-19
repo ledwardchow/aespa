@@ -38,7 +38,7 @@ const DAST_TABS = [
 
 const GLOBAL_TABS = [
   { key: "features", label: "Feature Visibility" },
-  { key: "openai-refusals", label: "OpenAI Refusals" },
+  { key: "openai-refusals", label: "Refusal Handling" },
   { key: "debug", label: "Debug Settings" },
   { key: "proxy", label: "Connectivity" },
   { key: "libraries", label: "Vulnerable Libraries" },

@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+
+from sqlmodel import Session, select
+
+from aespa.models import ScanLog
 
 
 def test_event_bus_separates_colliding_run_ids():
@@ -74,3 +79,42 @@ def test_persist_only_phase_event_is_not_broadcast(monkeypatch):
 
     assert queue.empty()
     assert persisted == [(91, event)]
+
+
+def test_sast_phase_events_keep_concurrent_agent_identities(isolated_db_engine):
+    from aespa.services import events
+
+    queue: asyncio.Queue = asyncio.Queue()
+    key = ("sast", 92)
+    events._queues[key] = [queue]
+
+    async def worker(agent_id: str):
+        with events.agent_scope(agent_id, "SAST Worker"):
+            await asyncio.sleep(0)
+            events.emit(
+                92,
+                {
+                    "type": "scanner_phase",
+                    "phase": "llm_request",
+                    "data": {"step": 1},
+                },
+            )
+
+    async def run_workers():
+        await asyncio.gather(worker("worker-a"), worker("worker-b"))
+
+    try:
+        with events.run_kind_scope("sast"):
+            asyncio.run(run_workers())
+    finally:
+        events._queues.pop(key, None)
+
+    live = [queue.get_nowait() for _ in range(2)]
+    assert {event["agent_id"] for event in live} == {"worker-a", "worker-b"}
+    assert all(event["role"] == "SAST Worker" for event in live)
+    with Session(isolated_db_engine) as session:
+        rows = session.exec(select(ScanLog).where(ScanLog.test_run_id == 92)).all()
+    assert {
+        json.loads(row.data_json)["_activity_agent"]["agent_id"] for row in rows
+    } == {"worker-a", "worker-b"}
+    assert all(json.loads(row.data_json)["step"] == 1 for row in rows)

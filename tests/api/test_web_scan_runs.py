@@ -102,6 +102,50 @@ def test_run_summary_reports_when_scan_mode_is_locked(client: TestClient, db_ses
     assert detail["scan_mode_locked"] is True
 
 
+def test_workflow_notes_acknowledge_attempts_before_latest_scan_start(
+    client: TestClient, db_session
+):
+    site = _make_site(client)
+    run_id = _make_run(client, site["id"]).json()["id"]
+    other_run_id = _make_run(client, site["id"]).json()["id"]
+
+    def add_log(phase: str, run: int = run_id) -> int:
+        log = ScanLog(
+            test_run_id=run,
+            run_kind="web",
+            phase=phase,
+            data_json=json.dumps(
+                {
+                    "note": {
+                        "name": "Checkout",
+                        "status": "needs_input",
+                        "needs_input": True,
+                    }
+                }
+            )
+            if phase == "crawl_note"
+            else None,
+        )
+        db_session.add(log)
+        db_session.flush()
+        return log.id
+
+    before_ids = [add_log("crawl_note") for _ in range(5)]
+    add_log("scan_started", other_run_id)
+    db_session.commit()
+    before_scan = client.get(f"/api/test-runs/{run_id}/crawl/workflows").json()["notes"]
+    assert [note["acknowledged"] for note in before_scan] == [False] * 5
+
+    add_log("scan_started")
+    after_id = add_log("crawl_note")
+    db_session.commit()
+    notes = client.get(f"/api/test-runs/{run_id}/crawl/workflows").json()["notes"]
+
+    assert [note["id"] for note in notes] == [*before_ids, after_id]
+    assert [note["acknowledged"] for note in notes] == [True] * 5 + [False]
+    assert [note["needs_input"] for note in notes] == [True] * 6
+
+
 def test_create_run_defaults_to_500_pages(client: TestClient):
     site = _make_site(client)
     response = client.post(f"/api/sites/{site['id']}/test-runs", json={})

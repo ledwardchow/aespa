@@ -300,6 +300,7 @@ def queue_lead_revalidation(sast_run_id: int, lead_id: int) -> None:
         session.commit()
 
 
+@events_svc.scoped_agent
 async def _run_checkpointed_agent(
     *,
     sast_run_id: int,
@@ -1734,6 +1735,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     return True, ""
 
                 await _run_checkpointed_agent(
+                    agent_id="sast-threat-modeller",
+                    role="Threat Modeller",
                     sast_run_id=sast_run_id,
                     phase="threat_model",
                     worker_key="hybrid-threat-analyst",
@@ -1922,6 +1925,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 )
                 try:
                     await _run_checkpointed_agent(
+                        agent_id=agent_id,
+                        role=role,
                         sast_run_id=sast_run_id,
                         phase="validation",
                         worker_key=f"validator:{candidate_id}",
@@ -2270,6 +2275,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
 
                     try:
                         summary = await _run_checkpointed_agent(
+                            agent_id=agent_id,
+                            role=role,
                             sast_run_id=sast_run_id,
                             phase="discovery",
                             worker_key=worker.worker_key,
@@ -2667,6 +2674,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             }
             try:
                 await _run_checkpointed_agent(
+                    agent_id="sast-closure-analyst",
+                    role="Closure Analyst",
                     sast_run_id=sast_run_id,
                     phase="closure",
                     worker_key="semantic-closure",
@@ -2862,6 +2871,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             )
             try:
                 attack_summary = await _run_checkpointed_agent(
+                    agent_id="sast-attack-path",
+                    role="Attack Path Analyst",
                     sast_run_id=sast_run_id,
                     phase="attack_path",
                     worker_key="attack_path",

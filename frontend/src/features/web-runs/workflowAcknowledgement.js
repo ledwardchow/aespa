@@ -27,6 +27,7 @@ export function visibleWorkflowInputNotes(notes, retries, acknowledgedIds) {
       note.needs_input &&
       note.status !== "crawled" &&
       !note.superseded &&
+      !note.acknowledged &&
       !isRetryBusy(retries[note.id]) &&
       !acknowledgedIds.has(note.id),
   );

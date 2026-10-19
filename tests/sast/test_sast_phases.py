@@ -261,6 +261,52 @@ def test_agent_log_recovers_fixed_agent_state_from_phase_history(
     assert threat["current_task"] == "Threat model ready."
 
 
+def test_scan_log_returns_new_agent_identity_without_guessing_legacy_rows(
+    client, isolated_db_engine
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        session.add(
+            ScanLog(
+                test_run_id=sast_run_id,
+                run_kind="sast",
+                phase="llm_request",
+                message="Older request",
+            )
+        )
+        session.commit()
+    with events_svc.run_kind_scope("sast"):
+        with events_svc.agent_scope("sast-worker-4", "SAST Sink Worker"):
+            events_svc.emit(
+                sast_run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "llm_request",
+                    "message": "New request",
+                    "data": {"step": 1},
+                },
+            )
+        events_svc.emit(
+            sast_run_id,
+            {
+                "type": "scanner_phase",
+                "phase": "report",
+                "message": "Report ready",
+            },
+        )
+
+    response = client.get(f"/api/sast-runs/{sast_run_id}/scan-log")
+
+    assert response.status_code == 200
+    entries = {item["message"]: item for item in response.json()}
+    assert entries["Older request"]["agent_id"] is None
+    assert entries["Older request"]["role"] is None
+    assert entries["New request"]["agent_id"] == "sast-worker-4"
+    assert entries["New request"]["role"] == "SAST Sink Worker"
+    assert entries["Report ready"]["agent_id"] == "system"
+    assert entries["Report ready"]["role"] == "System"
+
+
 @pytest.mark.parametrize(
     "scanner_module", [sast_scanner, pytest.param(None, id="light")]
 )
@@ -657,6 +703,8 @@ def test_checkpointed_agent_retries_from_last_saved_turn(
 
     result = asyncio.run(
         sast_scanner._run_checkpointed_agent(
+            agent_id="sast-worker-test",
+            role="SAST Worker",
             sast_run_id=sast_run_id,
             phase="discovery",
             worker_key="discovery",
@@ -703,6 +751,8 @@ def test_checkpointed_agent_pauses_when_loop_reports_unreachable_provider(
     with pytest.raises(sast_scanner.SastNetworkPause, match="unreachable"):
         asyncio.run(
             sast_scanner._run_checkpointed_agent(
+                agent_id="sast-worker-test",
+                role="SAST Worker",
                 sast_run_id=sast_run_id,
                 phase="discovery",
                 worker_key="discovery",
@@ -761,6 +811,8 @@ def test_checkpointed_agent_compacts_provider_rejected_context(
 
     result = asyncio.run(
         sast_scanner._run_checkpointed_agent(
+            agent_id="sast-worker-test",
+            role="SAST Worker",
             sast_run_id=sast_run_id,
             phase="discovery",
             worker_key="context-worker",
