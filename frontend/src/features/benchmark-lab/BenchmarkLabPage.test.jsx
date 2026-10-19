@@ -119,6 +119,51 @@ test("shows Glasswing only for the Claude CLI Mythos result", async () => {
   expect(await screen.findByText("Glasswing")).toBeTruthy();
 });
 
+test.each([
+  ["api", "APIs", "API", "Shop API"],
+  ["sast", "SAST", "SAST", null],
+])(
+  "%s saved results open a focused review and return to the same list",
+  async (kind, tab, label, application) => {
+    const user = userEvent.setup();
+    const result = {
+      ...(await benchmarkApi.createBenchmarkResult()),
+      run_kind: kind,
+      run_name: `${label} saved scan`,
+      target_id: kind === "api" ? 2 : null,
+    };
+    benchmarkApi.listBenchmarkResults.mockResolvedValue([result]);
+    const { unmount } = render(<BenchmarkLabPage />);
+    await user.click(await screen.findByRole("tab", { name: tab }));
+    await user.click(screen.getByRole("tab", { name: /Saved results/ }));
+    expect(screen.getByRole("region", { name: `Saved ${label} results` })).toBeTruthy();
+    if (application) expect(screen.getByText(application)).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: `Open ${label} saved scan` }).getAttribute("href"),
+    ).toBe("#/benchmark-lab/results/4");
+    unmount();
+    render(<BenchmarkLabPage initialResultId={4} />);
+    expect(await screen.findByRole("region", { name: "Finding review" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /GT-2.*Missing logging/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Back to results" }).getAttribute("href")).toBe(
+      `#/benchmark-lab?tab=${kind}&view=results`,
+    );
+  },
+);
+
+test("lists completed earlier SAST evaluations as saved results", async () => {
+  const user = userEvent.setup();
+  benchmarkApi.listBenchmarkEvaluations.mockResolvedValue([
+    { id: 13, name: "Earlier source result", status: "completed", sast_run_id: 7 },
+  ]);
+  render(<BenchmarkLabPage />);
+  await user.click(await screen.findByRole("tab", { name: "SAST" }));
+  await user.click(screen.getByRole("tab", { name: /Saved results/ }));
+  expect(screen.getByRole("link", { name: "Earlier source result" }).getAttribute("href")).toBe(
+    "#/benchmark-lab/evaluations/13",
+  );
+});
+
 test("saves the default model in Settings and removes per-run selection", async () => {
   const user = userEvent.setup();
   render(<BenchmarkLabPage />);
@@ -247,7 +292,7 @@ test("completed scans use parent tabs while Sites keeps its existing views", asy
   expect(screen.queryByLabelText("API")).toBeNull();
   await user.click(screen.getByRole("tab", { name: "SAST" }));
   expect(screen.getByRole("region", { name: "SAST finished scans" })).toBeTruthy();
-  expect(screen.getByLabelText("Ground truth for bulk benchmarks")).toBeTruthy();
+  expect(screen.queryByLabelText("Ground truth for bulk benchmarks")).toBeNull();
   expect(screen.queryByLabelText("Completed SAST scan")).toBeNull();
   await user.click(screen.getByRole("tab", { name: "Results" }));
   expect(screen.getByRole("tab", { name: "Analyses", selected: true })).toBeTruthy();
@@ -271,13 +316,9 @@ test.each(["site", "api", "sast"])(
       },
     ]);
     render(<BenchmarkLabPage initialResultId={4} />);
-    if (kind === "site") {
-      expect(await screen.findByRole("button", { name: /GT-1.*SQL injection/ })).toBeTruthy();
-    } else {
-      expect(await screen.findByText(/GT-1 - SQL injection/)).toBeTruthy();
-    }
+    expect(await screen.findByRole("button", { name: /GT-1.*SQL injection/ })).toBeTruthy();
     expect(screen.getByRole("link", { name: "Back to results" }).getAttribute("href")).toBe(
-      kind === "site" ? "#/benchmark-lab?tab=dast&view=results" : "#/benchmark-lab",
+      `#/benchmark-lab?tab=${kind === "site" ? "dast" : kind}&view=results`,
     );
     expect(screen.queryByRole("tab")).toBeNull();
   },

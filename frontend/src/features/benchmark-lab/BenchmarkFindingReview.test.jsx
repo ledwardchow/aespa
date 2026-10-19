@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
-import { DastResultReview } from "./DastResultReview.jsx";
+import { BenchmarkFindingReview } from "./BenchmarkFindingReview.jsx";
 
 vi.mock("../../shared/api/benchmarkLab.js");
 beforeEach(() => vi.clearAllMocks());
@@ -28,7 +28,7 @@ test("puts missing and partial findings first, then filters and reviews a findin
   const user = userEvent.setup();
   const onSaved = vi.fn();
   benchmarkApi.reviewBenchmarkResult.mockResolvedValue(result);
-  render(<DastResultReview result={result} onSaved={onSaved} />);
+  render(<BenchmarkFindingReview result={result} onSaved={onSaved} />);
   const list = screen.getByLabelText("Ground truth findings");
   expect(
     within(list)
@@ -62,7 +62,7 @@ test("puts missing and partial findings first, then filters and reviews a findin
 
 test("clears an unfinished review when filters change and groups severity in risk order", async () => {
   const user = userEvent.setup();
-  render(<DastResultReview result={result} onSaved={vi.fn()} />);
+  render(<BenchmarkFindingReview result={result} onSaved={vi.fn()} />);
   await user.click(screen.getByRole("button", { name: "Review result" }));
   await user.selectOptions(
     screen.getByLabelText("Result", { selector: ".benchmark-review-form select" }),

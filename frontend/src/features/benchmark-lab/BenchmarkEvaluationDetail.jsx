@@ -104,7 +104,7 @@ export function BenchmarkEvaluationDetail({ evaluationId, initialTab }) {
       <PageHeader
         title={
           <>
-            <Crumb href="#/benchmark-lab">Benchmark Lab</Crumb>
+            <Crumb href="#/benchmark-lab?tab=sast&view=results">SAST saved results</Crumb>
             <Sep />
             {evaluation.name || `Evaluation #${evaluation.id}`}
           </>

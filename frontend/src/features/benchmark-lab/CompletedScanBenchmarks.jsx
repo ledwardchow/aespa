@@ -43,7 +43,7 @@ export function CompletedScanBenchmarks({
   const [statusFilter, setStatusFilter] = useState("pending");
   const [sort, setSort] = useState("newest");
   const [setupOpen, setSetupOpen] = useState(false);
-  const dast = category === "site";
+  const showApplication = category !== "sast";
   const label = category === "site" ? "Sites" : category === "api" ? "API" : "SAST";
   const runs = (
     category === "sast"
@@ -72,24 +72,25 @@ export function CompletedScanBenchmarks({
   const pending = runs.filter((run) => !run.result && !run.evaluation);
   const selectedRuns = pending.filter((run) => selectedIds.has(run.id));
   const applications = category === "sast" ? [] : targets[category === "site" ? "sites" : "apis"];
-  const visibleRuns = dast
-    ? runs
-        .filter((run) =>
-          `${run.name} ${run.targetName} ${scanModelLabel(category, run.result?.scan_models || run.scan_models)}`
-            .toLowerCase()
-            .includes(query.trim().toLowerCase()),
-        )
-        .filter((run) => !applicationId || String(run.targetId) === applicationId)
-        .filter((run) =>
-          statusFilter === "all" ? true : statusFilter === "pending" ? !run.result : !!run.result,
-        )
-        .sort((left, right) => {
-          const order =
-            new Date(right.completed_at || 0) - new Date(left.completed_at || 0) ||
-            right.id - left.id;
-          return sort === "oldest" ? -order : order;
-        })
-    : runs;
+  const visibleRuns = runs
+    .filter((run) =>
+      `${run.name} ${run.targetName} ${scanModelLabel(category, run.result?.scan_models || run.scan_models)}`
+        .toLowerCase()
+        .includes(query.trim().toLowerCase()),
+    )
+    .filter((run) => !showApplication || !applicationId || String(run.targetId) === applicationId)
+    .filter((run) =>
+      statusFilter === "all"
+        ? true
+        : statusFilter === "pending"
+          ? !run.result && !run.evaluation
+          : !!run.result || !!run.evaluation,
+    )
+    .sort((left, right) => {
+      const order =
+        new Date(right.completed_at || 0) - new Date(left.completed_at || 0) || right.id - left.id;
+      return sort === "oldest" ? -order : order;
+    });
   const toggle = (ids, checked) => {
     setSelectedIds((current) => {
       const next = new Set(current);
@@ -144,22 +145,24 @@ export function CompletedScanBenchmarks({
   };
   return (
     <section className={styles.section} aria-label={`${label} finished scans`}>
-      <h2>{dast ? "DAST scans" : `${label} finished scans`}</h2>
+      <h2>{category === "site" ? "DAST scans" : `${label} scans`}</h2>
       <p className="subtle">
-        {runs.length} finished scans · {pending.length} need a benchmark.
-        {!dast && " The selected ground truth applies to the selected scans."}
+        {runs.length} finished scans · {pending.length} need a benchmark. The selected ground truth
+        applies to the selected scans.
       </p>
-      {dast && (
-        <div className={styles.filters}>
-          <label>
-            Search scans
-            <input
-              className="input"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Scan, application, or model"
-            />
-          </label>
+      <div
+        className={`${styles.filters} ${!showApplication ? styles.filtersWithoutApplication : ""}`}
+      >
+        <label>
+          Search scans
+          <input
+            className="input"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Scan, application, or model"
+          />
+        </label>
+        {showApplication && (
           <label>
             Application
             <select
@@ -175,32 +178,28 @@ export function CompletedScanBenchmarks({
               ))}
             </select>
           </label>
-          <label>
-            Benchmark status
-            <select
-              className="select"
-              value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value)}
-            >
-              <option value="pending">Needs benchmark</option>
-              <option value="done">Benchmarked</option>
-              <option value="all">All scans</option>
-            </select>
-          </label>
-          <label>
-            Sort
-            <select
-              className="select"
-              value={sort}
-              onChange={(event) => setSort(event.target.value)}
-            >
-              <option value="newest">Newest first</option>
-              <option value="oldest">Oldest first</option>
-            </select>
-          </label>
-        </div>
-      )}
-      {dast && setupOpen && (
+        )}
+        <label>
+          Benchmark status
+          <select
+            className="select"
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+          >
+            <option value="pending">Needs benchmark</option>
+            <option value="done">Benchmarked</option>
+            <option value="all">All scans</option>
+          </select>
+        </label>
+        <label>
+          Sort
+          <select className="select" value={sort} onChange={(event) => setSort(event.target.value)}>
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+          </select>
+        </label>
+      </div>
+      {setupOpen && (
         <button
           className={styles.backdrop}
           type="button"
@@ -208,16 +207,14 @@ export function CompletedScanBenchmarks({
           onClick={() => setSetupOpen(false)}
         />
       )}
-      {(!dast || setupOpen) && (
-        <form className={`card ${styles.controls} ${dast ? styles.setup : ""}`} onSubmit={apply}>
-          {dast && (
-            <div className={styles.setupHeading}>
-              <h3>Benchmark {selectedRuns.length} selected scans</h3>
-              <button type="button" className="btn ghost sm" onClick={() => setSetupOpen(false)}>
-                Close setup
-              </button>
-            </div>
-          )}
+      {setupOpen && (
+        <form className={`card ${styles.controls} ${styles.setup}`} onSubmit={apply}>
+          <div className={styles.setupHeading}>
+            <h3>Benchmark {selectedRuns.length} selected scans</h3>
+            <button type="button" className="btn ghost sm" onClick={() => setSetupOpen(false)}>
+              Close setup
+            </button>
+          </div>
           <label>
             Ground truth for bulk benchmarks
             <select
@@ -281,47 +278,28 @@ export function CompletedScanBenchmarks({
           ))}
         </div>
       )}
-      {!dast && applications.length > 0 && (
-        <fieldset className={styles.applications}>
-          <legend>Select by application</legend>
-          {applications.map((application) => (
-            <label key={application.id}>
-              <ScanSelection
-                ids={pending.filter((run) => run.targetId === application.id).map((run) => run.id)}
-                selectedIds={selectedIds}
-                onToggle={toggle}
-                disabled={busy}
-                label={`Select all scans from ${application.name}`}
-              />
-              {application.name}
-            </label>
-          ))}
-        </fieldset>
-      )}
       {!runs.length ? (
         <p className="subtle">No finished scans in this category.</p>
       ) : !visibleRuns.length ? (
         <p className="subtle">No scans match these filters.</p>
       ) : (
         <div className="table-wrap">
-          {dast && (
-            <label className={styles.mobileSelectAll}>
-              <ScanSelection
-                ids={visibleRuns.filter((run) => !run.result).map((run) => run.id)}
-                selectedIds={selectedIds}
-                onToggle={toggle}
-                disabled={busy}
-                label="Select all visible scans"
-              />{" "}
-              Select all visible scans
-            </label>
-          )}
-          <table className={`${styles.table} ${dast ? styles.dastTable : ""}`}>
+          <label className={styles.mobileSelectAll}>
+            <ScanSelection
+              ids={visibleRuns.filter((run) => !run.result && !run.evaluation).map((run) => run.id)}
+              selectedIds={selectedIds}
+              onToggle={toggle}
+              disabled={busy}
+              label="Select all visible scans"
+            />{" "}
+            Select all visible scans
+          </label>
+          <table className={`${styles.table} ${styles.scanTable}`}>
             <thead>
               <tr>
                 <th scope="col">
                   <ScanSelection
-                    ids={(dast ? visibleRuns : pending)
+                    ids={visibleRuns
                       .filter((run) => !run.result && !run.evaluation)
                       .map((run) => run.id)}
                     selectedIds={selectedIds}
@@ -393,7 +371,7 @@ export function CompletedScanBenchmarks({
           </table>
         </div>
       )}
-      {dast && selectedRuns.length > 0 && (
+      {selectedRuns.length > 0 && (
         <div className={styles.selectionBar}>
           <span>{selectedRuns.length} scans selected</span>
           <button

@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
 import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
-import styles from "./DastResultReview.module.css";
+import styles from "./BenchmarkFindingReview.module.css";
 
 const rank = { missing: 0, partial: 1, full: 2 };
 const severityRank = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
 
-export function DastResultReview({ result, onSaved }) {
+export function BenchmarkFindingReview({ result, onSaved }) {
   const [selectedId, setSelectedId] = useState(null);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");

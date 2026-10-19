@@ -22,7 +22,7 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
-- **DAST benchmarks**: The DAST page opens on scans that need a benchmark, with search and filters for application, status, and date. Selecting scans opens the benchmark setup. Saved results have their own list, and result review shows missing and partial findings first with search and a focused detail panel.
+- **Scan benchmarks**: The DAST, API, and SAST pages open on scans that need a benchmark, with search and filters for status and date. DAST and API also have an application filter. Selecting scans opens the benchmark setup. Saved results have their own list, and result review shows missing and partial findings first with search and a focused detail panel. Earlier SAST evaluations remain available from SAST saved results.
 
 - **SAST activity log**: The Log tab now shows the newest events first. Display options let you change the order and filter by event type. New scans show which agent or system process wrote each event; older events without saved agent details are marked as unknown.
 

@@ -56,6 +56,9 @@
   gap: 12px;
   margin: 18px 0;
 }
+.filtersWithoutApplication {
+  grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(140px, 190px));
+}
 .filters label {
   display: grid;
   gap: 6px;
@@ -69,14 +72,14 @@
 .backdrop {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  z-index: 60;
   border: 0;
   background: rgba(0, 0, 0, 0.55);
   cursor: default;
 }
 .section form.controls.setup {
   position: fixed;
-  z-index: 21;
+  z-index: 61;
   top: 0;
   right: 0;
   bottom: 0;
@@ -118,12 +121,14 @@
   display: none;
 }
 @media (max-width: 900px) {
-  .filters {
+  .filters,
+  .filtersWithoutApplication {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 @media (max-width: 600px) {
-  .filters {
+  .filters,
+  .filtersWithoutApplication {
     grid-template-columns: 1fr;
   }
   .mobileSelectAll {
@@ -132,45 +137,45 @@
     gap: 8px;
     margin: 8px 0;
   }
-  .dastTable {
+  .scanTable {
     min-width: 0;
     display: block;
   }
-  .dastTable thead {
+  .scanTable thead {
     display: none;
   }
-  .dastTable tbody {
+  .scanTable tbody {
     display: grid;
     gap: 10px;
   }
-  .dastTable tr {
+  .scanTable tr {
     display: grid;
     grid-template-columns: 38px minmax(0, 1fr);
     padding: 10px;
     border: 1px solid var(--border);
     border-radius: 8px;
   }
-  .dastTable td,
-  .dastTable td:first-child {
+  .scanTable td,
+  .scanTable td:first-child {
     width: auto;
     min-width: 0;
     padding: 5px;
     border: 0;
     overflow-wrap: anywhere;
   }
-  .dastTable td:first-child {
+  .scanTable td:first-child {
     grid-row: span 2;
   }
-  .dastTable td:nth-child(2) {
+  .scanTable td:nth-child(2) {
     font-weight: 600;
   }
-  .dastTable td:nth-child(n + 3) {
+  .scanTable td:nth-child(n + 3) {
     grid-column: 2;
     display: grid;
     grid-template-columns: 90px minmax(0, 1fr);
     gap: 8px;
   }
-  .dastTable td:nth-child(n + 3)::before {
+  .scanTable td:nth-child(n + 3)::before {
     content: attr(data-label);
     color: var(--muted);
     font-size: 11px;
