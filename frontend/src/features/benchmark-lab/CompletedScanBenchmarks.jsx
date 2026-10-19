@@ -159,7 +159,7 @@ export function CompletedScanBenchmarks({
             className="input"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Scan, application, or model"
+            placeholder={showApplication ? "Scan, application, or model" : "Scan or model"}
           />
         </label>
         {showApplication && (
@@ -344,7 +344,7 @@ export function CompletedScanBenchmarks({
                   <td data-label="Scan model">
                     {scanModelLabel(category, run.result?.scan_models || run.scan_models)}
                   </td>
-                  <td data-label="Application">{run.targetName}</td>
+                  <td data-label="Target">{run.targetName}</td>
                   <td data-label="Finished">
                     {run.completed_at ? fmtDate(run.completed_at) : "—"}
                   </td>

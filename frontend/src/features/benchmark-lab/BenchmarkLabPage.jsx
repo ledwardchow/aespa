@@ -106,7 +106,10 @@ export function BenchmarkLabPage({ initialResultId }) {
       ),
     [results, tab, category, targetId, target, targets],
   );
-  const openResult = (id) => nav(`#/benchmark-lab/results/${id}`);
+  const openResult = (id) =>
+    nav(
+      `#/benchmark-lab/results/${id}${routeSiteTab === "summary" ? "" : `?subtab=${routeSiteTab}`}`,
+    );
   const changeTab = (next) => {
     nav(`#/benchmark-lab?tab=${next}&subtab=${routeSiteTab}`);
     setTargetId("");
