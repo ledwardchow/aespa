@@ -128,6 +128,22 @@ class LLMBudgetPauseError(LLMQuotaPauseError):
 # lost connectivity (Wi-Fi drop, sleep/wake, DNS hiccup) before pausing.
 AGENTIC_NETWORK_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0, 60.0, 120.0)
 
+# Seconds to wait before each retry of an LLM call the provider rejected because
+# it was overloaded (for example OpenAI's "Our servers are currently overloaded"
+# or Anthropic's 529 overloaded_error). Overload clears on its own timescale, so
+# wait about a minute each time rather than retrying within seconds.
+AGENTIC_OVERLOAD_RETRY_DELAY: float = 60.0
+
+# Text and status markers that identify a provider-overload error. These are a
+# temporary busy signal, not a dropped connection, so they are retried on their
+# own slower schedule (see AGENTIC_OVERLOAD_RETRY_DELAY).
+_OVERLOAD_PROVIDER_ERROR_MARKERS = (
+    "overloaded",
+    "currently overloaded",
+    "server is overloaded",
+    "please try again later",
+)
+
 _TRANSIENT_PROVIDER_ERROR_MARKERS = (
     "connectionerror",
     "connecterror",
@@ -171,11 +187,40 @@ def _is_transient_provider_error_once(exc: BaseException) -> bool:
     status_code = status_code or getattr(response, "status_code", None)
     if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
         return True
+    if _is_overloaded_provider_error_once(exc):
+        return True
     name = type(exc).__name__.lower()
     text = str(exc).lower()
     return any(
         marker in name or marker in text for marker in _TRANSIENT_PROVIDER_ERROR_MARKERS
     )
+
+
+def is_overloaded_provider_error(exc: BaseException) -> bool:
+    """Return whether an LLM call failed because the provider was overloaded.
+
+    Overload is a transient error (``is_transient_provider_error`` is also True),
+    but callers retry it on a slower, roughly one-minute schedule because the
+    busy signal clears on its own timescale rather than on reconnection.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if _is_overloaded_provider_error_once(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _is_overloaded_provider_error_once(exc: BaseException) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    status_code = status_code or getattr(response, "status_code", None)
+    if status_code == 529:
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _OVERLOAD_PROVIDER_ERROR_MARKERS)
 
 
 class LLMContextLimitError(RuntimeError):
@@ -8345,14 +8390,23 @@ async def thinking_agentic_loop(
                     and not _is_llm_refusal(exc)
                     and is_transient_provider_error(exc)
                 ):
+                    overloaded = is_overloaded_provider_error(exc)
                     if network_attempt >= len(AGENTIC_NETWORK_RETRY_DELAYS):
                         log.warning(
-                            "thinking_agentic_loop: LLM provider unreachable at "
+                            "thinking_agentic_loop: LLM provider %s at "
                             "step %d after %d retries: %s",
+                            "overloaded" if overloaded else "unreachable",
                             tool_call_count + 1,
                             network_attempt,
                             error_message,
                         )
+                        if overloaded:
+                            raise LLMNetworkPauseError(
+                                "The LLM provider stayed overloaded after "
+                                f"{network_attempt} retries, so the scan was paused "
+                                "at its last saved step. Resume the scan to try "
+                                f"again. Last error: {error_message}"
+                            ) from exc
                         raise LLMNetworkPauseError(
                             "The LLM provider could not be reached after "
                             f"{network_attempt} retries, so the scan was paused at "
@@ -8360,11 +8414,18 @@ async def thinking_agentic_loop(
                             f"provider sign-in, then resume the scan. Last error: "
                             f"{error_message}"
                         ) from exc
-                    delay = AGENTIC_NETWORK_RETRY_DELAYS[network_attempt]
+                    # Provider overload clears on its own timescale, so wait about
+                    # a minute between tries instead of the fast network backoff.
+                    delay = (
+                        AGENTIC_OVERLOAD_RETRY_DELAY
+                        if overloaded
+                        else AGENTIC_NETWORK_RETRY_DELAYS[network_attempt]
+                    )
                     network_attempt += 1
                     log.warning(
-                        "thinking_agentic_loop: temporary LLM error at step %d; "
+                        "thinking_agentic_loop: %s LLM error at step %d; "
                         "retry %d/%d in %ss: %s",
+                        "overloaded" if overloaded else "temporary",
                         tool_call_count + 1,
                         network_attempt,
                         len(AGENTIC_NETWORK_RETRY_DELAYS),
@@ -8373,14 +8434,19 @@ async def thinking_agentic_loop(
                     )
                     if emit_fn:
                         try:
+                            retry_reason = (
+                                "the LLM provider is overloaded"
+                                if overloaded
+                                else "could not reach the LLM provider"
+                            )
                             emit_fn(
                                 {
                                     "type": "scanner_phase",
                                     "phase": "llm_response",
                                     "status": "retrying",
                                     "message": (
-                                        f"Step {tool_call_count + 1}: could not reach "
-                                        f"the LLM provider. Retrying in {delay:g}s "
+                                        f"Step {tool_call_count + 1}: {retry_reason}. "
+                                        f"Retrying in {delay:g}s "
                                         f"({network_attempt}/"
                                         f"{len(AGENTIC_NETWORK_RETRY_DELAYS)})."
                                     ),
@@ -8388,6 +8454,7 @@ async def thinking_agentic_loop(
                                         "step": tool_call_count + 1,
                                         "error": error_message,
                                         "error_type": type(exc).__name__,
+                                        "overloaded": overloaded,
                                         "network_retry": network_attempt,
                                         "network_retry_limit": len(
                                             AGENTIC_NETWORK_RETRY_DELAYS

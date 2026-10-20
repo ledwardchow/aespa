@@ -22,6 +22,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Site page tabs**: A site's page now has Test runs, Saved crawls, and Site details tabs. The base URL, login setting, and account count appear under the site name. Site details holds the site settings that used to open on a separate Edit site page, and saves without leaving the page; unsaved changes are kept while you look at another tab and can be discarded. Old Edit site links open the Site details tab. Test runs now fills the space below the tabs, so it stays visible in short windows, and each run takes one line with its profile in its own column, matching the API test runs list. Saved crawls uses the same table layout as other lists.
+
+- **Clearer labels across the app**: Run pages now show the run's status, such as Completed, Stopped, or Crawl failed, instead of Active or Inactive, and show Running while any agent works. Status badges start with a capital letter. Agent panels on web and API runs use Running, Idle, and Done in place of upper-case labels such as STANDBY and COMPLETE. The SAST Validate scan mode is now called "Check SAST leads only" and sits apart from Quick, Standard, and Full in the scan mode list. The SAST scans list labels its Light and Deep column as Analysis. In Settings, the Global tabs Feature Visibility and Debug Settings are now General and Debugging. The sidebar groups Active Jobs and Usage under Activity, and the Reporting and Benchmark Labs under Labs. On the Findings tab, the source column shows Test Lead or Specialist instead of Dynamic or Specialist agent, and the "#" column is now Count. A.L.I.C.E.'s welcome message no longer names a specific scan button.
+
 - **Scan benchmarks**: The DAST, API, and SAST pages open on scans that need a benchmark, with search and filters for status and date. DAST and API also have an application filter. Selecting scans opens the benchmark setup. Saved results have their own list, and result review shows missing and partial findings first with search and a focused detail panel. Earlier SAST evaluations remain available from SAST saved results.
 
 - **SAST activity log**: The Log tab now shows the newest events first. Display options let you change the order and filter by event type. New scans show which agent or system process wrote each event; older events without saved agent details are marked as unknown.
@@ -57,6 +61,10 @@ All pull requests merged to `main`, in reverse chronological order.
 - **Finding review after web scans**: AESPA reviews batches of findings concurrently, up to the saved DAST LLM request limit. Failed requests and missing verdicts leave the affected findings unvalidated.
 
 ### Fixes
+
+- **Scans no longer stop when the model is overloaded**: When a provider replies that its servers are overloaded, a web, API, or SAST scan now waits about a minute and tries the same step again, instead of stopping. It keeps retrying for a few minutes and only pauses if the provider stays overloaded, which you can clear by resuming the scan. The activity log shows each retry.
+
+- **Run names and saved crawls**: A new run could be given the same automatic name as an existing run on the site after an earlier run was deleted. New runs are now numbered after the highest existing "Run #" name. The Saved crawls list now shows the name of the run each crawl came from, instead of its internal ID, so it matches the run list.
 
 - **Benchmark comparisons with large findings**: Limit finding text sent to the evaluation model so large saved evidence does not exceed its prompt limit. Saved benchmark results still include the full findings.
 

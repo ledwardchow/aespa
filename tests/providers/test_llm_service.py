@@ -1006,6 +1006,88 @@ def test_transient_provider_error_covers_aws_credential_refresh():
     )
 
 
+class _OverloadError(Exception):
+    """Stands in for a provider 'servers are overloaded' response."""
+
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def test_overloaded_provider_error_is_recognized():
+    overloaded = _OverloadError(
+        "Our servers are currently overloaded. Please try again later."
+    )
+    assert llm.is_overloaded_provider_error(overloaded)
+    # Overload is also a transient error, so the retry path still engages.
+    assert llm.is_transient_provider_error(overloaded)
+    # Anthropic signals overload with HTTP 529.
+    assert llm.is_overloaded_provider_error(
+        _OverloadError("overloaded_error", status_code=529)
+    )
+    # A wrapped overload failure is found through the exception chain.
+    try:
+        try:
+            raise _OverloadError("Our servers are currently overloaded.")
+        except _OverloadError as inner:
+            raise RuntimeError("provider call failed") from inner
+    except RuntimeError as outer:
+        assert llm.is_overloaded_provider_error(outer)
+    # An unrelated error is not treated as overload.
+    assert not llm.is_overloaded_provider_error(RuntimeError("bad request"))
+
+
+def test_agentic_loop_retries_overloaded_provider_after_a_minute(monkeypatch):
+    monkeypatch.setattr(llm, "AGENTIC_OVERLOAD_RETRY_DELAY", 60.0)
+    slept: list[float] = []
+
+    async def fake_sleep(delay, stop_check=None):
+        slept.append(delay)
+
+    monkeypatch.setattr(llm, "_sleep_unless_stopped", fake_sleep)
+    calls = 0
+    events: list[dict] = []
+
+    async def fake_call_with_tools(config_arg, system_message, messages, tools=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _OverloadError(
+                "Our servers are currently overloaded. Please try again later."
+            )
+        block = {
+            "type": "tool_use",
+            "id": "d1",
+            "name": "done",
+            "input": {"summary": "ok"},
+        }
+        return [block], "tool_use", [block]
+
+    async def fake_tool_executor(name, tool_input, step):
+        return "ok"
+
+    monkeypatch.setattr(llm, "_call_with_tools", fake_call_with_tools)
+
+    summary = asyncio.run(
+        llm.thinking_agentic_loop(
+            _bedrock_config(),
+            system_message="system",
+            initial_user_message="start",
+            tool_executor=fake_tool_executor,
+            emit_fn=events.append,
+        )
+    )
+
+    assert summary == "ok"
+    assert calls == 2
+    # Overload waits about a minute, not the fast network backoff.
+    assert slept == [60.0]
+    retries = [e for e in events if (e.get("data") or {}).get("overloaded")]
+    assert len(retries) == 1
+    assert retries[0]["status"] == "retrying"
+    assert "overloaded" in retries[0]["message"].lower()
+
+
 def test_agentic_loop_retries_temporary_network_error_then_recovers(monkeypatch):
     monkeypatch.setattr(llm, "AGENTIC_NETWORK_RETRY_DELAYS", (0.0, 0.0, 0.0))
     calls = 0
