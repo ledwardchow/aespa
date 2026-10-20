@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from urllib.parse import urlsplit
 
 import jwt
@@ -145,6 +147,19 @@ def test_csrf_origin_host_and_logout(tmp_path):
     assert client.get("/api/auth/key").status_code == 401
 
 
+def test_cross_site_navigation_loads_page_but_other_requests_are_refused(tmp_path):
+    app = app_for(tmp_path)
+    client = TestClient(app)
+    login(client, app)
+    cross_site = {"Sec-Fetch-Site": "cross-site"}
+    navigate = {**cross_site, "Sec-Fetch-Mode": "navigate"}
+    assert client.get("/", headers=navigate).status_code != 403
+    assert client.get("/api/auth/key", headers=navigate).status_code == 200
+    cors = {**cross_site, "Sec-Fetch-Mode": "cors"}
+    assert client.get("/api/auth/key", headers=cors).status_code == 403
+    assert client.post("/api/auth/logout", headers=navigate).status_code == 403
+
+
 def test_automatic_login_ticket_is_single_use_and_expires(tmp_path, monkeypatch):
     app = app_for(tmp_path)
     auth = app.state.auth
@@ -231,3 +246,75 @@ def test_integration_exemption_is_precise(tmp_path, monkeypatch):
             client.get(path).json()["detail"]
             == "Sign in with your AESPA authentication key."
         )
+
+
+TEAM = "aespa-team.cloudflareaccess.com"
+AUD = "staging-app-aud"
+
+
+@pytest.fixture
+def access_signer(monkeypatch):
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from aespa import cloudflare_access
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
+    jwk["kid"] = "k1"
+    monkeypatch.setattr(cloudflare_access, "_get_jwks", lambda _issuer: {"keys": [jwk]})
+
+    def sign(aud=AUD, iss=f"https://{TEAM}", expires_in=300):
+        claims = {"aud": [aud], "iss": iss, "email": "dev@example.com"}
+        claims["exp"] = int(time.time()) + expires_in
+        token = jwt.encode(
+            claims, private_key, algorithm="RS256", headers={"kid": "k1"}
+        )
+        return {"Cf-Access-Jwt-Assertion": token}
+
+    return sign
+
+
+def test_cloudflare_access_login_signs_in_without_key(tmp_path, access_signer):
+    app = app_for(
+        tmp_path, cloudflare_access_team_domain=TEAM, cloudflare_access_aud=AUD
+    )
+    client = TestClient(app)
+    assert client.get("/api/sites").status_code == 401
+    session = client.get("/api/auth/session", headers=access_signer()).json()
+    assert session["authenticated"] is True
+    assert client.get("/api/sites").status_code == 200
+    client.headers["X-AESPA-CSRF"] = session["csrf_token"]
+    assert client.post("/api/auth/logout").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "token_args",
+    [
+        {"aud": "another-app"},
+        {"iss": "https://other-team.cloudflareaccess.com"},
+        {"expires_in": -60},
+    ],
+)
+def test_cloudflare_access_rejects_other_apps_and_expired_tokens(
+    tmp_path, access_signer, token_args
+):
+    app = app_for(
+        tmp_path, cloudflare_access_team_domain=TEAM, cloudflare_access_aud=AUD
+    )
+    client = TestClient(app)
+    headers = access_signer(**token_args)
+    assert (
+        client.get("/api/auth/session", headers=headers).json()["authenticated"]
+        is False
+    )
+    assert client.get("/api/sites").status_code == 401
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [{}, {"cloudflare_access_team_domain": TEAM}, {"cloudflare_access_aud": AUD}],
+)
+def test_cloudflare_access_signin_needs_team_and_aud(tmp_path, access_signer, updates):
+    client = TestClient(app_for(tmp_path, **updates))
+    session = client.get("/api/auth/session", headers=access_signer()).json()
+    assert session["authenticated"] is False

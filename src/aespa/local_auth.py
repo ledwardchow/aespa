@@ -18,6 +18,7 @@ from starlette.datastructures import Headers
 from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 
+from aespa import cloudflare_access
 from aespa.config import Settings
 
 SESSION_SECONDS = 30 * 24 * 60 * 60
@@ -150,6 +151,17 @@ class AuthManager:
         except jwt.PyJWTError:
             return False
 
+    def cloudflare_access_signin(self, request: Request) -> bool:
+        team_domain = self.settings.cloudflare_access_team_domain
+        audience = self.settings.cloudflare_access_aud
+        token = request.headers.get(cloudflare_access.JWT_HEADER)
+        if not (team_domain and audience and token):
+            return False
+        claims = cloudflare_access.verify_jwt(
+            token, audience, cloudflare_access.team_issuer(team_domain)
+        )
+        return claims is not None
+
     def csrf_token(self, session: str) -> str:
         return hmac.new(
             self.secret.encode(), session.encode(), hashlib.sha256
@@ -223,7 +235,15 @@ class LocalAuthMiddleware:
             expected_origin = f"{scheme}://{connection.url.netloc}"
             if origin and origin.rstrip("/") != expected_origin:
                 status, detail = 403, "Cross-site requests are not allowed."
-            if headers.get("sec-fetch-site") == "cross-site":
+            # Links and SSO redirects (e.g. Cloudflare Access) arrive as
+            # cross-site navigations; the SameSite=strict session cookie is
+            # not sent on them, so only non-navigation requests are refused.
+            navigation = (
+                scope["type"] == "http"
+                and scope["method"] in {"GET", "HEAD"}
+                and headers.get("sec-fetch-mode") == "navigate"
+            )
+            if headers.get("sec-fetch-site") == "cross-site" and not navigation:
                 status, detail = 403, "Cross-site requests are not allowed."
         protected = (
             (
@@ -290,6 +310,8 @@ def auth_router(auth: AuthManager) -> APIRouter:
     def session(request: Request):
         token = request.cookies.get(auth.cookie_name)
         authenticated = auth.valid_session(token)
+        if not authenticated and auth.cloudflare_access_signin(request):
+            return session_response(auth.session(), request)
         return JSONResponse(
             {
                 "authenticated": authenticated,

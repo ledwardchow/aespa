@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import mimetypes
 import sys
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import httpx
-import jwt
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 
+from aespa import cloudflare_access
 from aespa.api.alice import router as alice_router
 from aespa.api.api_collections import router as api_collections_router
 from aespa.api.api_test_runs import router as api_test_runs_router
@@ -67,74 +65,6 @@ async def _lifespan(app: FastAPI):  # noqa: ARG001
         await antigravity_provider_svc.close_clients()
 
 
-_JWKS_CACHE: dict[str, tuple[dict, float]] = {}
-JWKS_CACHE_TTL = 3600.0
-
-
-def _get_cloudflare_jwks(issuer: str) -> dict:
-    now = time.time()
-    if issuer in _JWKS_CACHE:
-        keys, expiry = _JWKS_CACHE[issuer]
-        if now < expiry:
-            return keys
-
-    resp = httpx.get(f"{issuer.rstrip('/')}/cdn-cgi/access/certs")
-    resp.raise_for_status()
-    keys = resp.json()
-    _JWKS_CACHE[issuer] = (keys, now + JWKS_CACHE_TTL)
-    return keys
-
-
-def _verify_cloudflare_jwt(token: str, audience: str | None = None) -> str | None:
-    try:
-        # 1. Unverified decode to extract the issuer
-        unverified = jwt.decode(token, options={"verify_signature": False})
-        issuer = unverified.get("iss")
-        if (
-            not issuer
-            or not issuer.startswith("https://")
-            or not issuer.endswith(".cloudflareaccess.com")
-        ):
-            return None
-
-        # 2. Get JWKS dynamically from verified issuer
-        jwks = _get_cloudflare_jwks(issuer)
-
-        # 3. Get Key ID (kid) from header
-        headers = jwt.get_unverified_header(token)
-        kid = headers.get("kid")
-        if not kid:
-            return None
-
-        # 4. Find matching key
-        jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
-        if not jwk:
-            return None
-
-        # 5. Decode and cryptographically verify. When an Access application
-        # audience (AUD) is configured, enforce it — otherwise any Cloudflare
-        # Access tenant's token would pass the issuer check. With none configured
-        # we preserve the prior behaviour and skip the audience check.
-        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(jwk)
-        if audience:
-            decoded = jwt.decode(
-                token,
-                public_key,
-                algorithms=["RS256"],
-                audience=audience,
-            )
-        else:
-            decoded = jwt.decode(
-                token,
-                public_key,
-                algorithms=["RS256"],
-                options={"verify_aud": False},
-            )
-        return decoded.get("email")
-    except Exception:
-        return None
-
-
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     app = FastAPI(title="AESPA", version=settings.app_version, lifespan=_lifespan)
@@ -176,13 +106,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request, session: Session = Depends(get_session)
     ) -> dict[str, str | None]:
         # Extract JWT assertion header if present
-        jwt_token = request.headers.get(
-            "cf-access-jwt-assertion"
-        ) or request.headers.get("Cf-Access-Jwt-Assertion")
+        jwt_token = request.headers.get(cloudflare_access.JWT_HEADER)
         username = None
         if jwt_token:
             audience = get_cloudflare_access_config(session).audience
-            username = _verify_cloudflare_jwt(jwt_token, audience)
+            claims = cloudflare_access.verify_jwt(jwt_token, audience)
+            username = claims.get("email") if claims else None
         return {"version": settings.app_version, "username": username}
 
     web_dir: Path = settings.web_dir

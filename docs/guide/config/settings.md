@@ -19,6 +19,8 @@ variable is optional and uses the `AESPA_` prefix.
 | `AESPA_AUTH_KEY_FILE` | Not set | Protected file containing the management authentication key, at least 32 characters |
 | `AESPA_ALLOWED_HOSTS` | `[]` | Additional accepted hostnames as a JSON list. Localhost and loopback IPs are always accepted. |
 | `AESPA_AUTH_COOKIE_SECURE` | `false` | Require HTTPS for browser cookies. HTTPS requests also set secure cookies automatically. |
+| `AESPA_CLOUDFLARE_ACCESS_TEAM_DOMAIN` | Not set | Cloudflare Access team domain, such as `myteam.cloudflareaccess.com`. Set with `AESPA_CLOUDFLARE_ACCESS_AUD` to sign in through Cloudflare Access. |
+| `AESPA_CLOUDFLARE_ACCESS_AUD` | Not set | Application Audience (AUD) tag of the Cloudflare Access application in front of AESPA. |
 | `AESPA_INTEGRATION_PORT` | Not set | Optional second listener for the API extension. Disabled inside Docker. |
 | `AESPA_INTEGRATION_HOST` | `127.0.0.1` | Bind address for the optional integration listener |
 | `AESPA_WEB_DIR` | `./src/aespa/web` | Compiled frontend directory |
@@ -54,7 +56,12 @@ optional separate listener.
 AESPA is designed to run on localhost. Behind an HTTPS reverse proxy,
 configure `AESPA_ALLOWED_HOSTS` and set `AESPA_AUTH_COOKIE_SECURE=true`.
 Cloudflare Access can still supply a verified display name through
-`Cf-Access-Jwt-Assertion`; AESPA's browser authentication remains required.
+`Cf-Access-Jwt-Assertion`. To let a Cloudflare Access login sign in to AESPA
+without the key, set both `AESPA_CLOUDFLARE_ACCESS_TEAM_DOMAIN` and
+`AESPA_CLOUDFLARE_ACCESS_AUD`. AESPA then accepts a browser whose Access token
+is signed by that team and issued for that application. Anyone your Access
+policy allows gets full access to AESPA, so keep the policy narrow. Requests
+that do not come through Cloudflare Access still need the key.
 
 ## Agent Settings
 

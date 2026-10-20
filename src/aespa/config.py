@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     allowed_hosts: list[str] = []
     auth_key_file: Path | None = None
     auth_cookie_secure: bool = False
+    cloudflare_access_team_domain: str = ""
+    cloudflare_access_aud: str = ""
     integration_port: int | None = Field(default=None, ge=1, le=65535)
     integration_host: str = "127.0.0.1"
     running_in_docker: bool = False
