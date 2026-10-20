@@ -731,7 +731,12 @@ export function SiteSummary({ results, onOpen, siteSelector, showChart = true })
             {modelBadges(hovered.result.scan_models?.primary).length > 0 && (
               <div className="benchmark-tooltip-badges">
                 {modelBadges(hovered.result.scan_models?.primary).map((label) => (
-                  <span className={`benchmark-model-badge${label === "Glasswing" ? " benchmark-model-badge-glasswing" : ""}`} key={label}>{label}</span>
+                  <span
+                    className={`benchmark-model-badge${label === "Glasswing" ? " benchmark-model-badge-glasswing" : ""}`}
+                    key={label}
+                  >
+                    {label}
+                  </span>
                 ))}
               </div>
             )}

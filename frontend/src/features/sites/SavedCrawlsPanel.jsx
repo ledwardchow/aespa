@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as sitesApi from "../../shared/api/sites.js";
 import { fmtDate } from "../../shared/lib/dates.js";
 import { fmtSize } from "../../shared/lib/sizes.js";
-import { IconChevronDown } from "../../shared/ui/Icons.jsx";
 
 const CRAWLER_MODE_LABELS = { url: "URL", interactive: "Interactive SPA" };
 
@@ -98,7 +97,9 @@ function SavedCrawlRow({ siteId, saved, onChanged, onDeleted, onError }) {
         {saved.source_run_id == null ? (
           <span className="subtle">From file</span>
         ) : saved.source_run_exists ? (
-          <a href={`#/runs/${saved.source_run_id}`}>Run #{saved.source_run_id}</a>
+          <a href={`#/runs/${saved.source_run_id}`}>
+            {saved.source_run_name || `Run #${saved.source_run_id}`}
+          </a>
         ) : (
           <span className="subtle">Run deleted</span>
         )}
@@ -125,7 +126,6 @@ function SavedCrawlRow({ siteId, saved, onChanged, onDeleted, onError }) {
 
 export function SavedCrawlsPanel({ siteId }) {
   const [items, setItems] = useState(null);
-  const [expanded, setExpanded] = useState(true);
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef(null);
@@ -151,7 +151,6 @@ export function SavedCrawlsPanel({ siteId }) {
     try {
       const saved = await sitesApi.uploadSavedCrawl(siteId, file);
       setItems((list) => [saved, ...(list || [])]);
-      setExpanded(true);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -163,20 +162,11 @@ export function SavedCrawlsPanel({ siteId }) {
   const totalSize = (items || []).reduce((sum, item) => sum + (item.size_bytes || 0), 0);
 
   return (
-    <div className="card saved-crawls-panel">
+    <div className="stack">
       <div className="row spread">
-        <button
-          type="button"
-          className="saved-crawls-heading"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
-        >
-          <span className={`site-details-chevron${expanded ? " is-expanded" : ""}`}>
-            <IconChevronDown />
-          </span>
-          Saved crawls
-          {items && <span className="subtle saved-crawls-count">{count}</span>}
-        </button>
+        <div className="subtle saved-crawls-summary">
+          {count > 0 && `${count} saved crawl${count !== 1 ? "s" : ""} · ${fmtSize(totalSize)}`}
+        </div>
         <button
           className="btn secondary sm"
           onClick={() => fileRef.current?.click()}
@@ -186,24 +176,16 @@ export function SavedCrawlsPanel({ siteId }) {
         </button>
         <input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={onFile} />
       </div>
-      {error && (
-        <div className="alert error" style={{ marginTop: 10 }}>
-          {error}
-        </div>
-      )}
-      {expanded && items === null && !error && (
-        <div className="subtle" style={{ marginTop: 10 }}>
-          Loading…
-        </div>
-      )}
-      {expanded && items && count === 0 && (
-        <div className="subtle" style={{ marginTop: 10, fontSize: 13 }}>
+      {error && <div className="alert error">{error}</div>}
+      {items === null && !error && <div className="subtle">Loading…</div>}
+      {items && count === 0 && (
+        <div className="subtle">
           No saved crawls yet. Open a run with crawl data and choose Save crawl.
         </div>
       )}
-      {expanded && count > 0 && (
+      {count > 0 && (
         <>
-          <div className="table-wrap saved-crawls-table">
+          <div className="table-wrap">
             <table>
               <colgroup>
                 <col style={{ width: "30%" }} />
@@ -242,9 +224,6 @@ export function SavedCrawlsPanel({ siteId }) {
                 ))}
               </tbody>
             </table>
-          </div>
-          <div className="subtle" style={{ marginTop: 8, fontSize: 12 }}>
-            {count} saved crawl{count !== 1 ? "s" : ""} · {fmtSize(totalSize)}
           </div>
         </>
       )}

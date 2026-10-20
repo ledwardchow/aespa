@@ -20,7 +20,7 @@ import {
 export function useAliceChat(runId, { onActivate } = {}) {
   const identity = useMemo(() => ({ runKind: "web", runId }), [runId]);
   const ALICE_WELCOME_MESSAGE =
-    "Hello! I am A.L.I.C.E, your interactive pentesting partner. To start a test, click Start scan at the top right, or you can tell me to work on something specific!";
+    "Hello! I'm A.L.I.C.E., your pentesting partner. Start a scan from the top right, or tell me what to test.";
   const _aliceDefaultChats = () => [
     {
       id: "tab-default",

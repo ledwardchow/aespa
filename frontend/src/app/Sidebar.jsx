@@ -142,6 +142,11 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           </span>
           {!collapsed && " SAST Scans"}
         </a>
+        {!collapsed && (
+          <div className="nav-section-label" style={{ marginTop: 8 }}>
+            Activity
+          </div>
+        )}
         <a
           href="#/active-jobs"
           className={"nav-item" + (onActiveJobs ? " active" : "")}
@@ -152,11 +157,6 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           </span>
           {!collapsed && " Active Jobs"}
         </a>
-        {!collapsed && (
-          <div className="nav-section-label" style={{ marginTop: 8 }}>
-            Stats
-          </div>
-        )}
         <a href="#/stats/usage" className={"nav-item" + (onStats ? " active" : "")} title="Usage">
           <span className="nav-icon">
             <IconChart />
@@ -224,7 +224,7 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
                   marginTop: 8,
                 }}
               >
-                Testing Features
+                Labs
               </div>
             )}
             {reportingDebugCfg?.panel_enabled && (

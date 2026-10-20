@@ -1,3 +1,5 @@
+import { coverageModeLabel } from "../runs/coverageModes.js";
+
 export function CoverageStatusBadges({
   mode = "track",
   percent,
@@ -7,18 +9,7 @@ export function CoverageStatusBadges({
   enforce,
   unitLabel = "cells",
 }) {
-  const modeLabel =
-    mode === "enforce"
-      ? "Full"
-      : mode === "standard"
-        ? "Standard"
-        : mode === "deep"
-          ? "Deep"
-          : mode === "team"
-            ? "Team"
-            : mode === "sast_validate"
-              ? "SAST Validate"
-              : "Quick";
+  const modeLabel = coverageModeLabel(mode);
   return (
     <>
       <span className={"badge " + (mode === "enforce" ? "warning" : "neutral")}>

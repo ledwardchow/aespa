@@ -1,0 +1,22 @@
+.summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+.summary > .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.details {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+.details[hidden] {
+  display: none;
+}

@@ -14,15 +14,10 @@ export const routes = {
     Component: lazyNamed(() => import("../features/sites/SiteForm.jsx"), "SiteForm"),
     props: () => ({ key: "new" }),
   },
-  "site-edit": {
-    section: "sites",
-    Component: lazyNamed(() => import("../features/sites/SiteForm.jsx"), "SiteForm"),
-    props: (route) => ({ key: route.id, siteId: route.id }),
-  },
   "site-detail": {
     section: "sites",
     Component: lazyNamed(() => import("../features/sites/SiteDetail.jsx"), "SiteDetail"),
-    props: (route) => ({ key: route.id, siteId: route.id }),
+    props: (route) => ({ key: route.id, siteId: route.id, initialTab: route.tab }),
   },
   "api-list": {
     section: "apis",

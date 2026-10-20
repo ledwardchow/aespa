@@ -71,7 +71,7 @@ test("locks a started Team run to Team mode", () => {
   render(
     <WebRunHeader
       {...props}
-      run={{ ...props.run, coverage_mode: "team", scan_mode_locked: true }}
+      run={{ ...props.run, status: "complete", coverage_mode: "team", scan_mode_locked: true }}
       coverageMode="team"
       showDeepScan
     />,
@@ -81,17 +81,17 @@ test("locks a started Team run to Team mode", () => {
   expect(screen.getByRole("option", { name: "Team" }).disabled).toBe(false);
   expect(screen.getByRole("option", { name: "Standard" }).disabled).toBe(true);
   expect(screen.getByRole("option", { name: "Deep" }).disabled).toBe(true);
-  expect(screen.getByTitle("Test run is inactive").textContent).toBe("Inactive");
+  expect(screen.getByTitle("Test run status").textContent).toBe("Completed");
 });
 
 test.each([
   ["crawler", { crawlerActive: true }],
   ["Test Lead", { testLeadActive: true }],
   ["ALICE", { aliceRunning: true }],
-])("shows one Active badge while %s is running", (_agent, activeProp) => {
+])("shows one Running badge while %s is running", (_agent, activeProp) => {
   render(<WebRunHeader {...props} {...activeProp} />);
 
-  expect(screen.getByTitle("Test run is active").textContent).toBe("Active");
+  expect(screen.getByTitle("Test run status").textContent).toBe("Running");
   expect(screen.queryByTitle(/agent is/)).toBeNull();
 });
 

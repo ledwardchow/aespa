@@ -5,6 +5,7 @@ import { useState, useEffect } from "react";
 import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
 
 import { ApiAlicePanel } from "./ApiAlicePanel.jsx";
+import { agentStatusLabel } from "../../shared/runs/AgentStatusRows.jsx";
 
 export function ApiRunAgentsTab({ runId, scanRunning }) {
   // ── Agent list state ──────────────────────────────────────────────────────
@@ -213,7 +214,7 @@ export function ApiRunAgentsTab({ runId, scanRunning }) {
                   "agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")
                 }
               >
-                {anyActive ? "ACTIVE" : children.length > 0 ? "COMPLETE" : "IDLE"}
+                {anyActive ? "Running" : children.length > 0 ? "Done" : "Idle"}
               </span>
               <span className="agent-current-task">{summaryTask}</span>
               {canExpand && (
@@ -247,7 +248,7 @@ export function ApiRunAgentsTab({ runId, scanRunning }) {
                             (cActive ? " agent-badge-active" : " agent-badge-complete")
                           }
                         >
-                          {cActive ? "ACTIVE" : "COMPLETE"}
+                          {cActive ? "Running" : "Done"}
                         </span>
                         <span className="agent-current-task" title={cTask}>
                           {cTask.length > 90 ? cTask.slice(0, 89) + "…" : cTask}
@@ -299,7 +300,7 @@ export function ApiRunAgentsTab({ runId, scanRunning }) {
                   "agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")
                 }
               >
-                {anyActive ? "ACTIVE" : children.length > 0 ? "COMPLETE" : "IDLE"}
+                {anyActive ? "Running" : children.length > 0 ? "Done" : "Idle"}
               </span>
               <span className="agent-current-task">{summaryTask}</span>
               {canExpand && (
@@ -339,7 +340,7 @@ export function ApiRunAgentsTab({ runId, scanRunning }) {
                             (vaActive ? " agent-badge-active" : " agent-badge-complete")
                           }
                         >
-                          {vaActive ? "ACTIVE" : "COMPLETE"}
+                          {vaActive ? "Running" : "Done"}
                         </span>
                         <span className="agent-current-task" title={vaTask}>
                           {vaTask.length > 90 ? vaTask.slice(0, 89) + "…" : vaTask}
@@ -387,11 +388,7 @@ export function ApiRunAgentsTab({ runId, scanRunning }) {
                 "agent-badge" + (isActive ? " agent-badge-active" : " agent-badge-complete")
               }
             >
-              {isActive
-                ? "ACTIVE"
-                : isComplete
-                  ? "COMPLETE"
-                  : (agent.status || "IDLE").toUpperCase()}
+              {isActive ? "Running" : isComplete ? "Done" : agentStatusLabel(agent.status)}
             </span>
             {task && (
               <span className="agent-current-task" title={task}>

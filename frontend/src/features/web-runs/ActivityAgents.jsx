@@ -121,7 +121,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                     (activeCount > 0 ? " agent-badge-active" : " agent-badge-complete")
                   }
                 >
-                  {activeCount > 0 ? "ACTIVE" : workerAgents.length > 0 ? "COMPLETE" : "IDLE"}
+                  {activeCount > 0 ? "Running" : workerAgents.length > 0 ? "Done" : "Idle"}
                 </span>
                 <span className="agent-current-task">{summaryTask}</span>
                 {canExpand && (
@@ -205,7 +205,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                     "agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")
                   }
                 >
-                  {anyActive ? "ACTIVE" : specialistAgents.length > 0 ? "COMPLETE" : "IDLE"}
+                  {anyActive ? "Running" : specialistAgents.length > 0 ? "Done" : "Idle"}
                 </span>
                 <span className="agent-current-task">{summaryTask}</span>
                 {canExpand && (
@@ -239,7 +239,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                               (saActive ? " agent-badge-active" : " agent-badge-complete")
                             }
                           >
-                            {saActive ? "ACTIVE" : "COMPLETE"}
+                            {saActive ? "Running" : "Done"}
                           </span>
                           <span className="agent-current-task" title={saTask}>
                             {saTask.length > 90 ? saTask.slice(0, 89) + "…" : saTask}
@@ -292,7 +292,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                     "agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")
                   }
                 >
-                  {anyActive ? "ACTIVE" : validatorAgents.length > 0 ? "COMPLETE" : "IDLE"}
+                  {anyActive ? "Running" : validatorAgents.length > 0 ? "Done" : "Idle"}
                 </span>
                 <span className="agent-current-task">{summaryTask}</span>
                 {canExpand && (
@@ -333,7 +333,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                               (vaActive ? " agent-badge-active" : " agent-badge-complete")
                             }
                           >
-                            {vaActive ? "ACTIVE" : "COMPLETE"}
+                            {vaActive ? "Running" : "Done"}
                           </span>
                           <span className="agent-current-task" title={vaTask}>
                             {vaTask.length > 90 ? vaTask.slice(0, 89) + "…" : vaTask}
@@ -392,7 +392,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                     "agent-badge" + (anyActive ? " agent-badge-active" : " agent-badge-complete")
                   }
                 >
-                  {anyActive ? "ACTIVE" : burpAgents.length > 0 ? "COMPLETE" : "IDLE"}
+                  {anyActive ? "Running" : burpAgents.length > 0 ? "Done" : "Idle"}
                 </span>
                 <span className="agent-current-task">{summaryTask}</span>
                 {canExpand && (
@@ -424,7 +424,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                               (baActive ? " agent-badge-active" : " agent-badge-complete")
                             }
                           >
-                            {baActive ? "ACTIVE" : ba.status === "failed" ? "FAILED" : "COMPLETE"}
+                            {baActive ? "Running" : ba.status === "failed" ? "Failed" : "Done"}
                           </span>
                           <span className="agent-current-task" title={baTask}>
                             {baTask.length > 90 ? baTask.slice(0, 89) + "…" : baTask}
@@ -437,7 +437,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
               </div>
             );
           }
-          // ── A.L.I.C.E custom row ────────────────────────────────────
+          // ── A.L.I.C.E. custom row ────────────────────────────────────
           if (a.id === "alice") {
             const isExpanded = !collapsedAgentIds.has("alice");
             const isActive = a.status === "active";
@@ -453,7 +453,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                   aria-hidden="true"
                 ></span>
                 <span className={"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>
-                  A.L.I.C.E
+                  A.L.I.C.E.
                 </span>
                 <span
                   className={
@@ -461,7 +461,7 @@ export function ActivityAgents({ runId, agents, run, thinkingStatus, activityLog
                     (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")
                   }
                 >
-                  {isActive ? "ACTIVE" : "STANDBY"}
+                  {isActive ? "Running" : "Idle"}
                 </span>
                 <span className="agent-current-task" title={currentTask}>
                   {currentTask}

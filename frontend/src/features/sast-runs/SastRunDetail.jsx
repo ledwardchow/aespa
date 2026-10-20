@@ -408,7 +408,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
               <Sep />
               <span className="sast-header-name">{run.name}</span>
               <span className="badge neutral">
-                {run.analysis_mode === "light" ? "Light" : "Deep"}
+                {run.analysis_mode === "light" ? "Light analysis" : "Deep analysis"}
               </span>
               <StatusBadge status={scanRunning ? "scanning" : run.status} />
             </span>

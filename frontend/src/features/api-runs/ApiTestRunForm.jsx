@@ -111,10 +111,16 @@ export function ApiTestRunForm({ collectionId }) {
                 })
               }
             >
-              <option value="track">Quick — adaptive scan with coverage tracking</option>
-              <option value="standard">Standard — meet the configured coverage target</option>
-              <option value="enforce">Full — run every applicable test</option>
-              <option value="sast_validate">SAST Validate — test only imported SAST leads</option>
+              <optgroup label="Scan depth">
+                <option value="track">Quick — adaptive scan with coverage tracking</option>
+                <option value="standard">Standard — meet the configured coverage target</option>
+                <option value="enforce">Full — run every applicable test</option>
+              </optgroup>
+              <optgroup label="Other">
+                <option value="sast_validate">
+                  Check SAST leads only — test only imported SAST leads
+                </option>
+              </optgroup>
             </select>
           </div>
           {error && (

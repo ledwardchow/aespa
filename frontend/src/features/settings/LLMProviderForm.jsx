@@ -188,8 +188,8 @@ function CodexConnectionCard() {
       )}
       {state?.account && state.daybreak && (
         <div className="field-hint" style={{ marginTop: 8 }}>
-          Daybreak Blue: {state.daybreak.blue ? "Available" : "Not available"}.{" "}
-          Daybreak Red: {state.daybreak.red ? "Available" : "Not available"}.
+          Daybreak Blue: {state.daybreak.blue ? "Available" : "Not available"}. Daybreak Red:{" "}
+          {state.daybreak.red ? "Available" : "Not available"}.
         </div>
       )}
       {state?.account && state.daybreak === null && (

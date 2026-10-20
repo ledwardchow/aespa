@@ -82,7 +82,7 @@ test("shows feature visibility and debug settings under Global", () => {
   render(<ScanPolicyPage />);
 
   expect(screen.getByText("features settings")).toBeTruthy();
-  fireEvent.click(screen.getByRole("tab", { name: "Debug Settings" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Debugging" }));
   expect(screen.getByText("debug settings")).toBeTruthy();
   expect(window.location.hash).toBe("#/scan-policy/global/debug");
   fireEvent.click(screen.getByRole("tab", { name: "Connectivity" }));
@@ -102,9 +102,7 @@ test("opens a nested tab from its URL", () => {
 
 test("opens the first Global tab by default", () => {
   render(<ScanPolicyPage />);
-  expect(
-    screen.getByRole("tab", { name: "Feature Visibility" }).getAttribute("aria-selected"),
-  ).toBe("true");
+  expect(screen.getByRole("tab", { name: "General" }).getAttribute("aria-selected")).toBe("true");
 });
 
 test("only shows Systems and Component Mapper when Systems is enabled", () => {

@@ -273,14 +273,20 @@ def _site_or_404(session: Session, site_id: int) -> Site:
     return site
 
 
-def _saved_crawl_out(saved: SavedCrawl, existing_run_ids: set[int]) -> SavedCrawlOut:
+def _saved_crawl_out(saved: SavedCrawl, run_names: dict[int, str]) -> SavedCrawlOut:
     return SavedCrawlOut.model_validate(saved).model_copy(
-        update={"source_run_exists": saved.source_run_id in existing_run_ids}
+        update={
+            "source_run_exists": saved.source_run_id in run_names,
+            "source_run_name": run_names.get(saved.source_run_id),
+        }
     )
 
 
-def _site_run_ids(session: Session, site_id: int) -> set[int]:
-    return set(session.exec(select(TestRun.id).where(TestRun.site_id == site_id)))
+def _site_run_names(session: Session, site_id: int) -> dict[int, str]:
+    rows = session.exec(
+        select(TestRun.id, TestRun.name).where(TestRun.site_id == site_id)
+    )
+    return dict(rows.all())
 
 
 def _saved_crawl_or_error(session: Session, site_id: int, saved_id: int) -> SavedCrawl:
@@ -295,9 +301,9 @@ def list_saved_crawls(
     site_id: int, session: Session = Depends(get_session)
 ) -> list[SavedCrawlOut]:
     _site_or_404(session, site_id)
-    run_ids = _site_run_ids(session, site_id)
+    run_names = _site_run_names(session, site_id)
     return [
-        _saved_crawl_out(saved, run_ids)
+        _saved_crawl_out(saved, run_names)
         for saved in saved_crawls_svc.list_for_site(session, site_id)
     ]
 
@@ -329,7 +335,7 @@ async def upload_saved_crawl(
         )
     except ArchiveError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
-    return _saved_crawl_out(saved, set())
+    return _saved_crawl_out(saved, {})
 
 
 @router.patch("/{site_id}/saved-crawls/{saved_id}", response_model=SavedCrawlOut)
@@ -343,7 +349,7 @@ def update_saved_crawl(
     saved = saved_crawls_svc.update(
         session, saved, name=payload.name, notes=payload.notes
     )
-    return _saved_crawl_out(saved, _site_run_ids(session, site_id))
+    return _saved_crawl_out(saved, _site_run_names(session, site_id))
 
 
 @router.delete(

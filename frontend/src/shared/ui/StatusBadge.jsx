@@ -44,9 +44,14 @@ const LABEL_OVERRIDE = {
   preparing: "preparing source",
 };
 
+export const statusText = (text) => {
+  const value = String(text || "");
+  return value.charAt(0).toUpperCase() + value.slice(1);
+};
+
 export function StatusBadge({ status, className = "", title }) {
   const variant = VARIANT[status] || "neutral";
-  const label = LABEL_OVERRIDE[status] || status;
+  const label = statusText(LABEL_OVERRIDE[status] || status);
   return (
     <span className={`badge ${variant} ${className}`.trim()} title={title || undefined}>
       {label}

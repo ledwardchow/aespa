@@ -534,7 +534,7 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
           "agent-badge" + (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")
         }
       >
-        {isActive ? "ACTIVE" : "STANDBY"}
+        {isActive ? "Running" : "Idle"}
       </span>
       <span className="agent-current-task">{agent.task}</span>
       <span className="activity-expand-chevron">{isExpanded ? "▲" : "▼"}</span>

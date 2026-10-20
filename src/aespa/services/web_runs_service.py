@@ -8,6 +8,7 @@ match the other run services.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -40,6 +41,9 @@ def get_run(session: Session, run_id: int) -> TestRun:
     return run
 
 
+_AUTO_NAME = re.compile(r"Run #(\d+)")
+
+
 def validate_page_selection(crawler_mode: str, page_selection: str) -> None:
     if crawler_mode != "url" and page_selection != "each_url":
         raise HTTPException(
@@ -49,8 +53,13 @@ def validate_page_selection(crawler_mode: str, page_selection: str) -> None:
 
 
 def _auto_name(session: Session, site_id: int) -> str:
-    existing = session.exec(select(TestRun).where(TestRun.site_id == site_id)).all()
-    return f"Run #{len(existing) + 1}"
+    names = session.exec(select(TestRun.name).where(TestRun.site_id == site_id)).all()
+    numbers = [
+        int(match.group(1))
+        for name in names
+        if (match := _AUTO_NAME.fullmatch(name or ""))
+    ]
+    return f"Run #{max(numbers, default=len(names)) + 1}"
 
 
 def create_run(session: Session, site_id: int, payload: TestRunCreate) -> TestRun:

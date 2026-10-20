@@ -61,6 +61,7 @@ def test_save_list_and_load_saved_crawl(client: TestClient):
     listed = client.get(f"/api/sites/{site['id']}/saved-crawls").json()
     assert [item["id"] for item in listed] == [body["id"]]
     assert listed[0]["source_run_exists"] is True
+    assert listed[0]["source_run_name"] == source["name"]
     assert "archive_gz" not in listed[0]
 
     target = _make_run(client, site["id"])
@@ -324,6 +325,7 @@ def test_saved_crawl_survives_source_run_deletion(client: TestClient):
     listed = client.get(f"/api/sites/{site['id']}/saved-crawls").json()
     assert listed[0]["id"] == saved_id
     assert listed[0]["source_run_exists"] is False
+    assert listed[0]["source_run_name"] is None
 
     target = _make_run(client, site["id"])
     loaded = client.post(f"/api/test-runs/{target['id']}/crawl/load/{saved_id}")

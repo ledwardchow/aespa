@@ -1,4 +1,5 @@
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
+import { agentStatusLabel as sharedAgentStatusLabel } from "../../shared/runs/AgentStatusRows.jsx";
 import { truncUrl } from "../../shared/lib/urls.js";
 import { parseDate } from "../../shared/lib/dates.js";
 export function activityPresentation({ run, thinkingStatus, aliceIsThinking, activityLog }) {
@@ -280,12 +281,10 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
     }
     return agent?.currentTask || "Waiting for work";
   };
-  const agentStatusLabel = (agent) => {
-    if (agent?.status === "active") return "ACTIVE";
-    if (agent?.status === "idle") return "IDLE";
-    if (agent?.status === "failed") return "FAILED";
-    return "COMPLETE";
-  };
+  const agentStatusLabel = (agent) =>
+    sharedAgentStatusLabel(
+      ["active", "idle", "failed"].includes(agent?.status) ? agent.status : "complete",
+    );
   return {
     normalizeAgentForRun,
     defaultAgentRoster,

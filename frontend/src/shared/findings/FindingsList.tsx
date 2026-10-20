@@ -69,7 +69,7 @@ export function FindingsList({
     140,
     null,
     96,
-    52,
+    80,
     96,
   ]) as [(number | null)[], (index: number, event: MouseEvent) => void];
   const { main, sections } = useMemo(() => groupFindings(findings), [findings]);
@@ -254,8 +254,8 @@ export function FindingsList({
     </Fragment>
   );
 
-  const header = (label: string, index: number) => (
-    <th>
+  const header = (label: string, index: number, title?: string) => (
+    <th title={title}>
       {label}{" "}
       <div
         className="col-rh"
@@ -279,7 +279,7 @@ export function FindingsList({
             {header("Source", 1)}
             {header("Title", 2)}
             {header("OWASP", 3)}
-            {header("#", 4)}
+            {header("Count", 4, "Number of grouped instances")}
             <th></th>
           </tr>
         </thead>

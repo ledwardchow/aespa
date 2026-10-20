@@ -8,7 +8,8 @@ import {
 export function sourceLabel(source) {
   const labels = {
     alice: "A.L.I.C.E.",
-    dynamic_scan: "Dynamic",
+    dynamic_scan: "Test Lead",
+    specialist_agent: "Specialist",
     burp_active_scan: "Burp",
     burp_mcp: "Burp MCP",
     deterministic_probe: "Deterministic",

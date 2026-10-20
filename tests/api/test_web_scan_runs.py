@@ -247,6 +247,15 @@ def test_create_run_auto_increments(client: TestClient):
     assert r2.json()["name"] == "Run #2"
 
 
+def test_auto_name_skips_names_freed_by_deleted_runs(client: TestClient):
+    site = _make_site(client)
+    first = _make_run(client, site["id"]).json()
+    _make_run(client, site["id"])
+    assert client.delete(f"/api/test-runs/{first['id']}").status_code == 204
+
+    assert _make_run(client, site["id"]).json()["name"] == "Run #3"
+
+
 def test_list_runs(client: TestClient):
     site = _make_site(client)
     _make_run(client, site["id"])

@@ -227,7 +227,7 @@ export function ApiTestRunDetail({
                     gap: 6,
                     fontSize: 12,
                   }}
-                  title="Quick: observe coverage as the scan runs. Standard: require the configured percentage of applicable coverage cells. Full: drive every applicable endpoint × category to covered or skipped-with-reason. SAST Validate: validate only imported SAST leads."
+                  title="Quick: observe coverage as the scan runs. Standard: require the configured percentage of applicable coverage cells. Full: drive every applicable endpoint × category to covered or skipped-with-reason. Check SAST leads only: test only the leads imported from a SAST scan."
                 >
                   Scan mode:
                   <select
@@ -235,10 +235,14 @@ export function ApiTestRunDetail({
                     disabled={scanBusy}
                     onChange={(e) => setCoverageMode(e.target.value)}
                   >
-                    <option value="track">Quick</option>
-                    <option value="standard">Standard</option>
-                    <option value="enforce">Full</option>
-                    <option value="sast_validate">SAST Validate</option>
+                    <optgroup label="Scan depth">
+                      <option value="track">Quick</option>
+                      <option value="standard">Standard</option>
+                      <option value="enforce">Full</option>
+                    </optgroup>
+                    <optgroup label="Other">
+                      <option value="sast_validate">Check SAST leads only</option>
+                    </optgroup>
                   </select>
                 </label>
                 <button className="btn" disabled={scanBusy} onClick={onStartScan}>

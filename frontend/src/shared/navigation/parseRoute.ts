@@ -62,9 +62,12 @@ export function parseRoute(hash = "#/"): Route {
     : undefined;
   let m;
   if ((m = routeHash.match(/^#\/sites\/new$/))) return { name: "site-new" };
-  if ((m = routeHash.match(/^#\/sites\/(\d+)\/edit$/))) return { name: "site-edit", id: +m[1] };
+  if ((m = routeHash.match(/^#\/sites\/(\d+)\/edit$/)))
+    return { name: "site-detail", id: +m[1], tab: "details" };
   if ((m = routeHash.match(/^#\/sites\/(\d+)\/runs\/new$/)))
     return { name: "run-new", siteId: +m[1] };
+  if ((m = routeHash.match(/^#\/sites\/(\d+)\/(saved-crawls|details)$/)))
+    return { name: "site-detail", id: +m[1], tab: m[2] };
   if ((m = routeHash.match(/^#\/sites\/(\d+)$/))) return { name: "site-detail", id: +m[1] };
   if ((m = routeHash.match(/^#\/apis\/new$/))) return { name: "api-new" };
   if ((m = routeHash.match(/^#\/apis\/(\d+)\/edit$/))) return { name: "api-edit", id: +m[1] };

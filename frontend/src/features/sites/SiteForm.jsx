@@ -26,6 +26,17 @@ const emptyForm = {
   credentials: [],
 };
 
+const formFromSite = (site) => ({
+  name: site.name,
+  base_url: site.base_url,
+  requires_auth: site.requires_auth,
+  login_url: site.login_url || "",
+  notes: site.notes || "",
+  scan_guidance: site.scan_guidance || "",
+  workflow_data: site.workflow_data || [],
+  credentials: site.credentials.map(credentialFromSite),
+});
+
 const firstInvalid = (root) =>
   root?.querySelector("input:invalid, select:invalid, textarea:invalid");
 
@@ -36,9 +47,14 @@ const invalidTabs = (root) =>
       .filter(Boolean),
   );
 
-export function SiteForm({ siteId }) {
+// With `onSaved`, the form is embedded in the site page: it saves in place and
+// reports the updated site instead of navigating away.
+export function SiteForm({ siteId, onSaved }) {
   const isEdit = typeof siteId === "number";
+  const embedded = typeof onSaved === "function";
   const [form, setForm] = useState(emptyForm);
+  const [savedForm, setSavedForm] = useState(emptyForm);
+  const [savedNotice, setSavedNotice] = useState(false);
   const [hasSavedWorkflows, setHasSavedWorkflows] = useState(false);
   const [tab, setTab] = useState("site");
   const [loading, setLoading] = useState(isEdit);
@@ -61,16 +77,9 @@ export function SiteForm({ siteId }) {
     (async () => {
       try {
         const d = await sitesApi.getSite(siteId);
-        setForm({
-          name: d.name,
-          base_url: d.base_url,
-          requires_auth: d.requires_auth,
-          login_url: d.login_url || "",
-          notes: d.notes || "",
-          scan_guidance: d.scan_guidance || "",
-          workflow_data: d.workflow_data || [],
-          credentials: d.credentials.map(credentialFromSite),
-        });
+        const loaded = formFromSite(d);
+        setForm(loaded);
+        setSavedForm(loaded);
         setHasSavedWorkflows(Boolean(d.workflow_data?.length));
       } catch (e) {
         setError(e.message);
@@ -83,7 +92,17 @@ export function SiteForm({ siteId }) {
     if (checked) setTabErrors(invalidTabs(formRef.current));
   }, [checked, form]);
 
-  const upd = (p) => setForm((f) => ({ ...f, ...p }));
+  const upd = (p) => {
+    setSavedNotice(false);
+    setForm((f) => ({ ...f, ...p }));
+  };
+  const dirty = JSON.stringify(form) !== JSON.stringify(savedForm);
+  const discardChanges = () => {
+    setForm(savedForm);
+    setChecked(false);
+    setTabErrors(new Set());
+    setError(null);
+  };
 
   const onSubmit = async (e) => {
     e.preventDefault();
@@ -117,7 +136,16 @@ export function SiteForm({ siteId }) {
       credentials: form.requires_auth ? form.credentials.map(credentialPayload) : [],
     };
     try {
-      if (isEdit) {
+      if (embedded) {
+        const updated = await sitesApi.updateSite(siteId, payload);
+        const saved = formFromSite(updated);
+        setForm(saved);
+        setSavedForm(saved);
+        setHasSavedWorkflows(Boolean(updated.workflow_data?.length));
+        setChecked(false);
+        setSavedNotice(true);
+        onSaved(updated);
+      } else if (isEdit) {
         await sitesApi.updateSite(siteId, payload);
         nav(`#/sites/${siteId}`);
       } else {
@@ -178,14 +206,23 @@ export function SiteForm({ siteId }) {
   );
   return (
     <>
-      <PageHeader title={bc} />
+      {!embedded && <PageHeader title={bc} />}
       {loading ? (
         <div className="content">
           <div className="subtle">Loading…</div>
         </div>
       ) : (
         <form ref={formRef} className={`content ${styles.page}`} noValidate onSubmit={onSubmit}>
-          <Tabs label="Site settings" tabs={tabs} value={tab} onChange={setTab} />
+          <Tabs
+            label="Site settings"
+            tabs={tabs}
+            value={tab}
+            onChange={setTab}
+            {...(embedded && {
+              className: "activity-sub-tab-bar coverage-sub-tab-bar",
+              buttonClassName: "activity-sub-tab-btn coverage-sub-tab-btn",
+            })}
+          />
           <div className={styles.scroll}>
             <div className={styles.panel} data-tab="site" hidden={tab !== "site"}>
               <div className={styles.panelBody}>
@@ -268,13 +305,26 @@ export function SiteForm({ siteId }) {
             </div>
           </div>
           <div className={styles.footer}>
-            <button
-              type="button"
-              className="btn ghost"
-              onClick={() => (isEdit ? nav(`#/sites/${siteId}`) : nav("#/"))}
-            >
-              Cancel
-            </button>
+            {embedded ? (
+              dirty && (
+                <button type="button" className="btn ghost" onClick={discardChanges}>
+                  Discard changes
+                </button>
+              )
+            ) : (
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => (isEdit ? nav(`#/sites/${siteId}`) : nav("#/"))}
+              >
+                Cancel
+              </button>
+            )}
+            {embedded && !error && (dirty || savedNotice) && (
+              <span className="subtle" aria-live="polite">
+                {dirty ? "Unsaved changes" : "Changes saved"}
+              </span>
+            )}
             {error && (
               <div className={`alert error ${styles.footerError}`} role="alert">
                 {error}

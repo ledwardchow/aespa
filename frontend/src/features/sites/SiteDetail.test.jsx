@@ -20,6 +20,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   sitesApi.getSite.mockResolvedValue(site);
   settingsApi.listLLMProfiles.mockResolvedValue([]);
+  settingsApi.getBrowserDebugConfig.mockResolvedValue({});
 });
 
 test("shows a Deep badge beside runs started in Deep mode", async () => {
@@ -51,41 +52,69 @@ test("shows a Deep badge beside runs started in Deep mode", async () => {
   expect(within(standardRow).queryByText("Deep")).toBeNull();
 });
 
-test("starts with site details collapsed and allows them to be expanded", async () => {
-  const user = userEvent.setup();
+test("shows the site's address and login summary in the header", async () => {
   sitesApi.getSite.mockResolvedValue({
     ...site,
     requires_auth: true,
-    notes: "Use the staging tenant.",
-    credentials: [
-      {
-        id: 8,
-        label: "Admin account",
-        auth_mode: "form",
-        login_url: "https://example.test/login",
-        login_fields: [{ key: "username", label: "Username" }],
-      },
-    ],
+    credentials: [{ id: 8, label: "Admin account", auth_mode: "form", login_fields: [] }],
   });
   sitesApi.listRuns.mockResolvedValue([]);
 
   render(<SiteDetail siteId={site.id} />);
 
   expect(await screen.findByText("https://example.test")).toBeTruthy();
-  expect(screen.queryByText("Admin account")).toBeNull();
-  expect(screen.queryByText("Use the staging tenant.")).toBeNull();
-  expect(screen.getByText("1 credential")).toBeTruthy();
+  expect(screen.getByText("Login required")).toBeTruthy();
+  expect(screen.getByText("1 account")).toBeTruthy();
+  const tabs = screen.getByRole("tablist", { name: "Site views" });
+  expect(within(tabs).getByRole("tab", { name: "Test runs" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
+});
 
-  const expandButton = screen.getByRole("button", { name: "Expand site details" });
-  expect(expandButton.getAttribute("aria-expanded")).toBe("false");
-  await user.click(expandButton);
+test("edits the site on the Site details tab and stays on the page", async () => {
+  const user = userEvent.setup();
+  sitesApi.listRuns.mockResolvedValue([]);
+  sitesApi.updateSite.mockImplementation(async (_id, payload) => ({
+    ...site,
+    ...payload,
+    credentials: [],
+  }));
 
-  expect(screen.getByText("Admin account")).toBeTruthy();
-  expect(screen.getByText("Use the staging tenant.")).toBeTruthy();
+  render(<SiteDetail siteId={site.id} initialTab="details" />);
 
-  const collapseButton = screen.getByRole("button", { name: "Collapse site details" });
-  expect(collapseButton.getAttribute("aria-expanded")).toBe("true");
-  await user.click(collapseButton);
+  const name = await screen.findByLabelText("Name");
+  await user.clear(name);
+  await user.type(name, "Renamed");
+  expect(screen.getByText("Unsaved changes")).toBeTruthy();
 
-  expect(screen.queryByText("Admin account")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(sitesApi.updateSite).toHaveBeenCalledWith(
+    site.id,
+    expect.objectContaining({ name: "Renamed" }),
+  );
+  expect(await screen.findByText("Changes saved")).toBeTruthy();
+  expect(screen.getByLabelText("Name").value).toBe("Renamed");
+  expect(within(document.querySelector(".topbar")).getByText("Renamed")).toBeTruthy();
+});
+
+test("discards unsaved site changes", async () => {
+  const user = userEvent.setup();
+  sitesApi.getSite.mockResolvedValue({
+    ...site,
+    requires_auth: true,
+    credentials: [{ id: 8, label: "Admin account", auth_mode: "form", login_fields: [] }],
+  });
+  sitesApi.listRuns.mockResolvedValue([]);
+
+  render(<SiteDetail siteId={site.id} initialTab="details" />);
+
+  const name = await screen.findByLabelText("Name");
+  expect(screen.queryByText("Unsaved changes")).toBeNull();
+  await user.type(name, " draft");
+  await user.click(screen.getByRole("button", { name: "Discard changes" }));
+
+  expect(screen.getByLabelText("Name").value).toBe("Example");
+  expect(screen.queryByText("Unsaved changes")).toBeNull();
+  expect(sitesApi.updateSite).not.toHaveBeenCalled();
 });

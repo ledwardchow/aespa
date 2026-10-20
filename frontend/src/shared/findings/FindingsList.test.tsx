@@ -107,7 +107,7 @@ test("renders the same columns and sections for web and API runs", () => {
     const { unmount } = renderList({ runKind });
     expect(
       [...document.querySelectorAll(".findings-table th")].map((th) => th.textContent?.trim()),
-    ).toEqual(["Severity", "Source", "Title", "OWASP", "#", ""]);
+    ).toEqual(["Severity", "Source", "Title", "OWASP", "Count", ""]);
     // Unconfirmed starts open; the other sections start closed.
     expect(groupTitles()).toEqual(["Stored XSS", "CORS reflection", "Weak header"]);
     expect(screen.getByText("Low confidence")).toBeTruthy();

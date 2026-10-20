@@ -155,10 +155,7 @@ test("Benchmark Lab tabs fit the content panel", async ({ page }) => {
 test("Settings tabs restore from their URLs and browser history", async ({ page }) => {
   await installFixtures(page);
   await page.goto("/#/scan-policy");
-  await expect(page.getByRole("tab", { name: "Feature Visibility" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  await expect(page.getByRole("tab", { name: "General" })).toHaveAttribute("aria-selected", "true");
   await page.getByRole("tab", { name: "DAST", exact: true }).click();
   await expect(page).toHaveURL(/#\/scan-policy\/dast\/scan-behaviour$/);
   await page.getByRole("tab", { name: "HTTP Headers" }).click();
@@ -405,7 +402,10 @@ test("site and SAST navigation rows open from their non-interactive cells", asyn
   await page.screenshot({ path: path.join(tmpdir(), "aespa-navigation-row-site.png") });
   await siteRow.locator("td").nth(1).click();
   await expect(page).toHaveURL(/#\/sites\/1$/);
-  await expect(page.getByText("Test Runs", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Test runs" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
 
   await page.goto("/#/sast-runs");
   const sastRow = page.getByRole("row", { name: /Open Fixture SAST/ });
@@ -669,8 +669,8 @@ test("Settings groups feature visibility and debug controls under Global", async
   await installFixtures(page);
   await page.goto("/#/scan-policy");
 
-  const featureTab = page.getByRole("tab", { name: "Feature Visibility", exact: true });
-  const debugTab = page.getByRole("tab", { name: "Debug Settings", exact: true });
+  const featureTab = page.getByRole("tab", { name: "General", exact: true });
+  const debugTab = page.getByRole("tab", { name: "Debugging", exact: true });
   await expect(featureTab).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("Browser", { exact: true })).toBeVisible();
   await expect(page.getByText("Reporting Lab", { exact: true })).toBeVisible();

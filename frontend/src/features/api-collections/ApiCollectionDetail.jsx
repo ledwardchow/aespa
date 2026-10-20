@@ -1,3 +1,4 @@
+import { coverageModeLabel } from "../../shared/runs/coverageModes.js";
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { fmtDate } from "../../shared/lib/dates.js";
 import { useBenchmarkLinks } from "../../shared/hooks/useBenchmarkLinks.js";
@@ -862,28 +863,22 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                               label={`Open ${r.name}`}
                             >
                               <td>
-                                <a
-                                  href={`#/api-runs/${r.id}/status`}
-                                  style={{
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  {r.name}
-                                </a>
-                                <BenchmarkBadge href={benchmarkLinks[`api:${r.id}`]} />
+                                <span className="run-name">
+                                  <a
+                                    href={`#/api-runs/${r.id}/status`}
+                                    style={{
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {r.name}
+                                  </a>
+                                  <BenchmarkBadge inline href={benchmarkLinks[`api:${r.id}`]} />
+                                </span>
                               </td>
                               <td>
                                 <StatusBadge status={r.status} />
                               </td>
-                              <td>
-                                {r.coverage_mode === "enforce"
-                                  ? "Full"
-                                  : r.coverage_mode === "standard"
-                                    ? "Standard"
-                                    : r.coverage_mode === "sast_validate"
-                                      ? "SAST Validate"
-                                      : "Quick"}
-                              </td>
+                              <td>{coverageModeLabel(r.coverage_mode)}</td>
                               <td
                                 style={{
                                   fontSize: 12,

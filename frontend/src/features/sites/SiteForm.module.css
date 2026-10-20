@@ -1,4 +1,4 @@
-.page {
+.page:global(.content) {
   padding: 0;
 }
 .page > :global(.tab-bar) {

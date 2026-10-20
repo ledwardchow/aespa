@@ -4,6 +4,8 @@ import { IconChevronDown, IconPlay, IconStop } from "../../shared/ui/Icons.jsx";
 import { PageHeader, Breadcrumbs } from "../../shared/ui/PageHeader.jsx";
 import { resolveRunPrimaryAction, RUN_PRIMARY_ACTION } from "./runState.js";
 import { LoadSavedCrawlButton, SaveCrawlButton } from "./SavedCrawlControls.jsx";
+import { runWorkflowStatus } from "../../shared/runs/presentation.jsx";
+import { statusText } from "../../shared/ui/StatusBadge.jsx";
 
 const RUN_ACTION_DETAILS = {
   [RUN_PRIMARY_ACTION.START_CRAWL]: { label: "Start crawl", className: "run-start-action" },
@@ -151,6 +153,11 @@ export function WebRunHeader({
   const showDeepOption = showDeepScan || run?.coverage_mode === "deep";
   const showTeamOption = showTeamScan || run?.coverage_mode === "team";
   const runActive = crawlerActive || testLeadActive || aliceRunning;
+  const workflowStatus = runWorkflowStatus(run);
+  const headerStatus =
+    runActive && workflowStatus.key !== "running"
+      ? { key: "running", label: "Running" }
+      : workflowStatus;
   const canStartPentest = !scanStopping && canStartScan;
   const primaryAction = resolveRunPrimaryAction({
     hasCrawlResult,
@@ -174,11 +181,8 @@ export function WebRunHeader({
             />
             {run && (
               <span className="run-agent-badges">
-                <span
-                  className={`badge ${runActive ? "ok" : "neutral"}`}
-                  title={`Test run is ${runActive ? "active" : "inactive"}`}
-                >
-                  {runActive ? "Active" : "Inactive"}
+                <span className={`badge ${headerStatus.key}`} title="Test run status">
+                  {statusText(headerStatus.label)}
                 </span>
               </span>
             )}
@@ -217,7 +221,7 @@ export function WebRunHeader({
             <label
               className="subtle"
               style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}
-              title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: run every applicable test on every page. Deep: use a persistent tester queue and attack workers. Team: run independent Standard Test Leads followed by a coverage and chain review. SAST Validate: validate only imported SAST leads."
+              title="Quick: adaptive scan with coverage tracking. Standard: require the configured percentage of applicable coverage cells. Full: run every applicable test on every page. Deep: use a persistent tester queue and attack workers. Team: run independent Standard Test Leads followed by a coverage and chain review. Check SAST leads only: test only the leads imported from a SAST scan."
             >
               Scan mode:
               <select
@@ -230,28 +234,38 @@ export function WebRunHeader({
                     : undefined
                 }
               >
-                <option value="track" disabled={Boolean(experimentalModeLocked)}>
-                  Quick
-                </option>
-                <option value="standard" disabled={Boolean(experimentalModeLocked)}>
-                  Standard
-                </option>
-                <option value="enforce" disabled={Boolean(experimentalModeLocked)}>
-                  Full
-                </option>
-                {showDeepOption && (
-                  <option value="deep" disabled={ordinaryModeLocked || experimentalMode === "team"}>
-                    Deep
+                <optgroup label="Scan depth">
+                  <option value="track" disabled={Boolean(experimentalModeLocked)}>
+                    Quick
                   </option>
-                )}
-                {showTeamOption && (
-                  <option value="team" disabled={ordinaryModeLocked || experimentalMode === "deep"}>
-                    Team
+                  <option value="standard" disabled={Boolean(experimentalModeLocked)}>
+                    Standard
                   </option>
-                )}
-                <option value="sast_validate" disabled={Boolean(experimentalModeLocked)}>
-                  SAST Validate
-                </option>
+                  <option value="enforce" disabled={Boolean(experimentalModeLocked)}>
+                    Full
+                  </option>
+                  {showDeepOption && (
+                    <option
+                      value="deep"
+                      disabled={ordinaryModeLocked || experimentalMode === "team"}
+                    >
+                      Deep
+                    </option>
+                  )}
+                  {showTeamOption && (
+                    <option
+                      value="team"
+                      disabled={ordinaryModeLocked || experimentalMode === "deep"}
+                    >
+                      Team
+                    </option>
+                  )}
+                </optgroup>
+                <optgroup label="Other">
+                  <option value="sast_validate" disabled={Boolean(experimentalModeLocked)}>
+                    Check SAST leads only
+                  </option>
+                </optgroup>
               </select>
             </label>
           )}

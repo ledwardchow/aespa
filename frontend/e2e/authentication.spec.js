@@ -58,7 +58,9 @@ test("a launcher link exchanges its secret and cleans the address", async ({ pag
     expect(route.request().postDataJSON()).toEqual({ token: "single-use-secret" });
     return route.fulfill({ json: { authenticated: true, csrf_token: "csrf" } });
   });
-  await page.goto("/#aespa-login=single-use-secret&next=%23%2Fscan-policy%2Fglobal%2Fauthentication");
+  await page.goto(
+    "/#aespa-login=single-use-secret&next=%23%2Fscan-policy%2Fglobal%2Fauthentication",
+  );
   await expect(
     page.getByRole("heading", { name: "Authentication key", exact: true }),
   ).toBeVisible();

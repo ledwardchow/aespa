@@ -15,12 +15,12 @@ export function normaliseAgentStatus(status) {
 
 export function agentStatusLabel(status) {
   const normalised = normaliseAgentStatus(status);
-  if (normalised === "active") return "ACTIVE";
-  if (normalised === "queued") return "QUEUED";
-  if (normalised === "paused") return "PAUSED";
-  if (normalised === "failed") return "FAILED";
-  if (normalised === "complete") return "COMPLETE";
-  return "IDLE";
+  if (normalised === "active") return "Running";
+  if (normalised === "queued") return "Queued";
+  if (normalised === "paused") return "Paused";
+  if (normalised === "failed") return "Failed";
+  if (normalised === "complete") return "Done";
+  return "Idle";
 }
 
 function statusClasses(status, small = false) {

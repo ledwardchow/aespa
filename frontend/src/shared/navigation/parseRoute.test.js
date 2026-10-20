@@ -4,7 +4,9 @@ import { parseRoute } from "./parseRoute.ts";
 test.each([
   ["#/", { name: "list" }],
   ["#/sites/new", { name: "site-new" }],
-  ["#/sites/7/edit", { name: "site-edit", id: 7 }],
+  ["#/sites/7/edit", { name: "site-detail", id: 7, tab: "details" }],
+  ["#/sites/7/details", { name: "site-detail", id: 7, tab: "details" }],
+  ["#/sites/7/saved-crawls", { name: "site-detail", id: 7, tab: "saved-crawls" }],
   ["#/sites/7/runs/new", { name: "run-new", siteId: 7 }],
   ["#/sites/7", { name: "site-detail", id: 7 }],
   ["#/apis", { name: "api-list" }],

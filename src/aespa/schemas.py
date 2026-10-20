@@ -1419,6 +1419,7 @@ class SavedCrawlOut(BaseModel):
     notes: str | None = None
     source_run_id: int | None = None
     source_run_exists: bool = False
+    source_run_name: str | None = None
     crawler_mode: str
     page_selection: str = "each_url"
     page_count: int

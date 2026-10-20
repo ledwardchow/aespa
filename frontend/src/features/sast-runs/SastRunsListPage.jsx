@@ -205,7 +205,7 @@ export function SastRunsListPage() {
                     style={{ cursor: "pointer", userSelect: "none" }}
                     onClick={() => toggleSort("analysis_mode")}
                   >
-                    Mode {sortArrow("analysis_mode")}
+                    Analysis {sortArrow("analysis_mode")}
                   </th>
                   <th
                     style={{ cursor: "pointer", userSelect: "none" }}
