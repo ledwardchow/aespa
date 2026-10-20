@@ -426,3 +426,37 @@ test("loads ChatGPT account models automatically when the account is selected", 
     },
   });
 });
+
+test("finishes ChatGPT sign-in from a pasted address without saving the provider", async () => {
+  const user = userEvent.setup();
+  settingsApi.getChatGPTPlanStatus.mockResolvedValue({ active: null, accounts: [] });
+  settingsApi.startChatGPTPlanLogin.mockResolvedValue({
+    login_id: "attempt",
+    url: "https://auth.openai.com/api/accounts/authorize",
+  });
+  settingsApi.getChatGPTPlanLogin.mockResolvedValue({ status: "pending", error: "" });
+  settingsApi.completeChatGPTPlanLogin.mockResolvedValue({ status: "complete", error: "" });
+  vi.spyOn(window, "open").mockReturnValue({ location: {} });
+  const address = "http://127.0.0.1:51234/auth/callback?code=abc&state=xyz";
+  render(
+    <LLMProviderForm
+      mode="edit"
+      provider={{ ...provider, api_format: "openai_chatgpt_plan" }}
+      models={[]}
+      profiles={[]}
+      onProviderUpdated={vi.fn()}
+      onConfigureModel={vi.fn()}
+    />,
+  );
+
+  await user.click(await screen.findByRole("button", { name: "Continue with ChatGPT" }));
+  await user.type(await screen.findByLabelText(/paste its address here/), address);
+  await user.click(screen.getByRole("button", { name: "Finish sign-in" }));
+  await user.type(screen.getByLabelText(/paste its address here/), "{Enter}");
+
+  await waitFor(() =>
+    expect(settingsApi.completeChatGPTPlanLogin).toHaveBeenCalledTimes(2),
+  );
+  expect(settingsApi.completeChatGPTPlanLogin).toHaveBeenCalledWith("attempt", address);
+  expect(settingsApi.updateLLMProvider).not.toHaveBeenCalled();
+});

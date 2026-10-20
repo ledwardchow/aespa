@@ -967,8 +967,9 @@ def test_expired_token_refreshes_once_for_concurrent_calls(monkeypatch, tmp_path
     )
 
 
+@pytest.mark.parametrize("finish", ["loopback", "pasted_address"])
 def test_login_callback_saves_validated_tokens_without_exposing_them(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, finish
 ):
     monkeypatch.setattr(chatgpt_plan, "_storage_path", lambda: tmp_path / "plan.json")
     callbacks = []
@@ -1033,6 +1034,14 @@ def test_login_callback_saves_validated_tokens_without_exposing_them(
     async def complete_login():
         login = await chatgpt_plan.start_login()
         state = parse_qs(urlsplit(login["url"]).query)["state"][0]
+        writer = Writer()
+        if finish == "pasted_address":
+            await chatgpt_plan.complete_login(
+                login["login_id"],
+                "http://127.0.0.1:1455/auth/callback"
+                f"?code=abc&state={state}&client_id=oaiapp_test",
+            )
+            return login, writer
         reader = SimpleNamespace(
             readline=lambda: asyncio.sleep(
                 0,
@@ -1041,7 +1050,6 @@ def test_login_callback_saves_validated_tokens_without_exposing_them(
                 ).encode(),
             )
         )
-        writer = Writer()
         await callbacks[0](reader, writer)
         return login, writer
 
@@ -1214,3 +1222,35 @@ def test_plan_fast_speed_usage_is_recorded_under_its_tier(
     with Session(isolated_db_engine) as session:
         row = session.exec(select(LLMUsageMonth)).one()
     assert row.service_tier == "priority"
+
+
+def test_pasted_address_with_wrong_state_is_rejected_and_sign_in_stays_open(
+    client: TestClient,
+):
+    chatgpt_plan._pending["attempt"] = {
+        "server": SimpleNamespace(close=lambda: None),
+        "redirect_uri": "http://127.0.0.1:1455/auth/callback",
+        "client_id": None,
+        "state": "expected",
+        "nonce": "n",
+        "verifier": "v",
+        "expires_at": time.time() + 600,
+        "status": "pending",
+    }
+    try:
+        url = "/api/settings/llm/chatgpt-plan/login/attempt/complete"
+        wrong = client.post(
+            url,
+            json={"url": "http://127.0.0.1:1455/auth/callback?code=x&state=other"},
+        )
+        not_callback = client.post(url, json={"url": "https://example.test/"})
+        missing = client.post(
+            "/api/settings/llm/chatgpt-plan/login/unknown/complete",
+            json={"url": "http://127.0.0.1:1455/auth/callback?code=x&state=expected"},
+        )
+        assert wrong.status_code == 400
+        assert not_callback.status_code == 400
+        assert missing.status_code == 404
+        assert chatgpt_plan.login_status("attempt")["status"] == "pending"
+    finally:
+        chatgpt_plan._pending.pop("attempt", None)

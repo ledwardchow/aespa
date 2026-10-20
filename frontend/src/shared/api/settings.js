@@ -78,6 +78,8 @@ export const startChatGPTPlanLogin = (client_id) =>
     body: client_id ? { client_id } : {},
   });
 export const getChatGPTPlanLogin = (id) => req(`/api/settings/llm/chatgpt-plan/login/${id}`);
+export const completeChatGPTPlanLogin = (id, url) =>
+  req(`/api/settings/llm/chatgpt-plan/login/${id}/complete`, { method: "POST", body: { url } });
 export const selectChatGPTPlanAccount = (client_id) =>
   req("/api/settings/llm/chatgpt-plan/select", { method: "POST", body: { client_id } });
 export const logoutChatGPTPlan = (client_id) =>

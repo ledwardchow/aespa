@@ -140,6 +140,88 @@ def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
+async def _finish_login(login_id: str, query: str) -> None:
+    attempt = _pending.get(login_id)
+    if not attempt:
+        raise ValueError("Sign-in expired")
+    params = parse_qs(query)
+    if params.get("state", [None])[0] != attempt["state"]:
+        raise ValueError("Sign-in could not be verified")
+    if attempt["status"] != "pending" or time.time() > attempt["expires_at"]:
+        raise ValueError("Sign-in expired")
+    attempt["status"] = "processing"
+    try:
+        if params.get("error"):
+            raise ValueError("ChatGPT sign-in was cancelled")
+        client_id = attempt["client_id"]
+        code = params.get("code", [None])[0]
+        issued_id = params.get("client_id", [None])[0]
+        if client_id and issued_id and issued_id != client_id:
+            raise ValueError("ChatGPT returned a different account registration")
+        issued_id = client_id or issued_id
+        if not code or not issued_id or issued_id == "dynamic_agent_client":
+            raise ValueError("ChatGPT did not complete registration")
+        async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
+            response = await http.post(
+                TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": issued_id,
+                    "code_verifier": attempt["verifier"],
+                    "redirect_uri": attempt["redirect_uri"],
+                    "resource": RESOURCE,
+                },
+            )
+            response.raise_for_status()
+            tokens = response.json()
+            claims = await _validate_id_token(
+                http, tokens["id_token"], issued_id, attempt["nonce"]
+            )
+        scopes = set(tokens.get("scope", "").split())
+        if "chatgpt.tokens.use.direct" not in scopes:
+            raise ValueError("ChatGPT plan usage was not granted")
+        async with _lock:
+            async with _credential_lock():
+                stored = _read()
+                old = stored["accounts"].get(issued_id)
+                if old and old.get("subject") != claims["sub"]:
+                    raise ValueError("A different ChatGPT account was selected")
+                stored["accounts"][issued_id] = {
+                    "subject": claims["sub"],
+                    "email": claims.get("email"),
+                    "id_token": tokens["id_token"],
+                    "access_token": tokens["access_token"],
+                    "refresh_token": tokens["refresh_token"],
+                    "expires_at": time.time() + int(tokens.get("expires_in", 3600)),
+                    "scopes": sorted(scopes),
+                }
+                stored["active"] = issued_id
+                _write(stored)
+                _access_checks.pop(issued_id, None)
+        attempt["status"] = "complete"
+    except Exception as exc:
+        attempt["status"] = "error"
+        attempt["error"] = str(exc)[:200]
+    finally:
+        attempt["server"].close()
+
+
+async def complete_login(login_id: str, callback_url: str) -> dict[str, str]:
+    """Finish sign-in from the address the browser landed on.
+
+    The browser is sent to a loopback address on the machine running it, which
+    is not the AESPA host when AESPA runs on another machine.
+    """
+    if login_id not in _pending:
+        raise KeyError(login_id)
+    parts = urlsplit(callback_url.strip())
+    if parts.path != "/auth/callback" or not parts.query:
+        raise ValueError("Paste the full address from the sign-in window")
+    await _finish_login(login_id, parts.query)
+    return login_status(login_id)
+
+
 async def start_login(client_id: str | None = None) -> dict[str, str]:
     async with _lock:
         async with _credential_lock():
@@ -162,72 +244,9 @@ async def start_login(client_id: str | None = None) -> dict[str, str]:
                 method, target, _ = line.decode("ascii").split(" ", 2)
                 if method != "GET" or urlsplit(target).path != "/auth/callback":
                     raise ValueError("Invalid callback")
-                params = parse_qs(urlsplit(target).query)
-                if params.get("state", [None])[0] != state:
-                    raise ValueError("Sign-in could not be verified")
-                attempt = _pending.get(login_id)
-                if (
-                    not attempt
-                    or attempt["status"] != "pending"
-                    or time.time() > attempt["expires_at"]
-                ):
-                    raise ValueError("Sign-in expired")
-                attempt["status"] = "processing"
-                if params.get("error"):
-                    raise ValueError("ChatGPT sign-in was cancelled")
-                code = params.get("code", [None])[0]
-                issued_id = params.get("client_id", [None])[0]
-                if client_id and issued_id and issued_id != client_id:
-                    raise ValueError(
-                        "ChatGPT returned a different account registration"
-                    )
-                issued_id = client_id or issued_id
-                if not code or not issued_id or issued_id == "dynamic_agent_client":
-                    raise ValueError("ChatGPT did not complete registration")
-                async with httpx.AsyncClient(timeout=20, **httpx_options()) as http:
-                    response = await http.post(
-                        TOKEN_URL,
-                        data={
-                            "grant_type": "authorization_code",
-                            "code": code,
-                            "client_id": issued_id,
-                            "code_verifier": verifier,
-                            "redirect_uri": attempt["redirect_uri"],
-                            "resource": RESOURCE,
-                        },
-                    )
-                    response.raise_for_status()
-                    tokens = response.json()
-                    claims = await _validate_id_token(
-                        http, tokens["id_token"], issued_id, nonce
-                    )
-                scopes = set(tokens.get("scope", "").split())
-                if "chatgpt.tokens.use.direct" not in scopes:
-                    raise ValueError("ChatGPT plan usage was not granted")
-                async with _lock:
-                    async with _credential_lock():
-                        stored = _read()
-                        old = stored["accounts"].get(issued_id)
-                        if old and old.get("subject") != claims["sub"]:
-                            raise ValueError("A different ChatGPT account was selected")
-                        stored["accounts"][issued_id] = {
-                            "subject": claims["sub"],
-                            "email": claims.get("email"),
-                            "id_token": tokens["id_token"],
-                            "access_token": tokens["access_token"],
-                            "refresh_token": tokens["refresh_token"],
-                            "expires_at": time.time()
-                            + int(tokens.get("expires_in", 3600)),
-                            "scopes": sorted(scopes),
-                        }
-                        stored["active"] = issued_id
-                        _write(stored)
-                        _access_checks.pop(issued_id, None)
-                attempt["status"] = "complete"
-            except Exception as exc:
-                if login_id in _pending:
-                    _pending[login_id]["status"] = "error"
-                    _pending[login_id]["error"] = str(exc)[:200]
+                await _finish_login(login_id, urlsplit(target).query)
+            except Exception:
+                pass
             finally:
                 outcome = _pending.get(login_id, {}).get("status")
                 body = (
@@ -244,8 +263,6 @@ async def start_login(client_id: str | None = None) -> dict[str, str]:
                 await writer.drain()
                 writer.close()
                 await writer.wait_closed()
-                if login_id in _pending:
-                    _pending[login_id]["server"].close()
 
         server = await asyncio.start_server(callback, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
@@ -253,6 +270,10 @@ async def start_login(client_id: str | None = None) -> dict[str, str]:
         _pending[login_id] = {
             "server": server,
             "redirect_uri": redirect_uri,
+            "client_id": client_id,
+            "state": state,
+            "nonce": nonce,
+            "verifier": verifier,
             "expires_at": time.time() + 600,
             "status": "pending",
         }

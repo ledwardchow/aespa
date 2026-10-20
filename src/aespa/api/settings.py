@@ -193,6 +193,20 @@ def chatgpt_plan_login_status(login_id: str) -> dict:
         ) from exc
 
 
+@router.post("/llm/chatgpt-plan/login/{login_id}/complete")
+async def complete_chatgpt_plan_login(login_id: str, payload: dict[str, str]) -> dict:
+    from aespa.services import chatgpt_plan
+
+    try:
+        return await chatgpt_plan.complete_login(login_id, payload.get("url", ""))
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="ChatGPT sign-in was not found"
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/llm/chatgpt-plan/select")
 async def select_chatgpt_plan_account(payload: dict[str, str]) -> dict:
     from aespa.services import chatgpt_plan

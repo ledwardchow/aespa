@@ -62,6 +62,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Fixes
 
+- **ChatGPT sign-in on a remote server**: Signing in with ChatGPT now works when AESPA runs on another machine. After you sign in, the browser tries to return to an address on your own computer and may show a page that can't be reached. Copy that page's address into the new box under ChatGPT connection and select **Finish sign-in**. Sign-in on the same machine still completes on its own.
+
 - **Scans no longer stop when the model is overloaded**: When a provider replies that its servers are overloaded, a web, API, or SAST scan now waits about a minute and tries the same step again, instead of stopping. It keeps retrying for a few minutes and only pauses if the provider stays overloaded, which you can clear by resuming the scan. The activity log shows each retry.
 
 - **Run names and saved crawls**: A new run could be given the same automatic name as an existing run on the site after an earlier run was deleted. New runs are now numbered after the highest existing "Run #" name. The Saved crawls list now shows the name of the run each crawl came from, instead of its internal ID, so it matches the run list.

@@ -210,6 +210,7 @@ function ChatGPTPlanConnectionCard({ value, onSelect, reloadKey }) {
   const [state, setState] = useState(null);
   const [daybreak, setDaybreak] = useState(null);
   const [pending, setPending] = useState(null);
+  const [callbackUrl, setCallbackUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
@@ -292,11 +293,21 @@ function ChatGPTPlanConnectionCard({ value, onSelect, reloadKey }) {
       } else {
         window.location.href = result.url;
       }
+      setCallbackUrl("");
       setPending(result.login_id);
     } catch (e) {
       popup?.close();
       setError(e.message);
       setBusy(false);
+    }
+  };
+
+  const finishWithAddress = async () => {
+    setError(null);
+    try {
+      await settingsApi.completeChatGPTPlanLogin(pending, callbackUrl);
+    } catch (e) {
+      setError(e.message);
     }
   };
 
@@ -379,7 +390,38 @@ function ChatGPTPlanConnectionCard({ value, onSelect, reloadKey }) {
           </>
         )}
       </div>
-      {pending && <div className="field-hint">Finish signing in in your browser.</div>}
+      {pending && (
+        <div className="field" style={{ marginTop: 12 }}>
+          <div className="field-hint">Finish signing in in your browser.</div>
+          <label htmlFor="chatgpt-callback-url">
+            If the browser shows a page that can't be reached, paste its address here
+          </label>
+          <div className="row" style={{ gap: 8 }}>
+            <input
+              id="chatgpt-callback-url"
+              style={{ flex: 1 }}
+              value={callbackUrl}
+              onChange={(e) => setCallbackUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                if (callbackUrl.trim()) finishWithAddress();
+              }}
+              placeholder="http://127.0.0.1:…/auth/callback?code=…"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <button
+              type="button"
+              className="btn secondary sm"
+              disabled={!callbackUrl.trim()}
+              onClick={finishWithAddress}
+            >
+              Finish sign-in
+            </button>
+          </div>
+        </div>
+      )}
       {error && <div className="alert error">{error}</div>}
     </div>
   );
