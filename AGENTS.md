@@ -21,7 +21,8 @@ uv sync                              # install deps
 uv run playwright install chromium   # one-time, required for web crawl/scan
 uv run aespa                         # run the server -> http://127.0.0.1:8000
 
-uv run pytest                        # full suite, in-memory SQLite; requires local ports
+uv run pytest                        # full suite in parallel (pytest-xdist), in-memory SQLite; requires local ports
+uv run pytest -n 0                   # run serially, e.g. for breakpoints or print debugging
 uv run pytest tests/test_scanner_service.py            # one file
 uv run pytest tests/test_scanner_service.py::test_name # one test
 uv run pytest -k "validator and not api"               # by keyword
@@ -44,6 +45,12 @@ When making UI changes:
 2. Do not edit files directly in `src/aespa/web/`; these are generated build artifacts.
 3. After completing UI changes, run `npm run build` inside `frontend/`. This rebuild places compiled assets in `src/aespa/web/` so they are served by `uv run aespa`.
 
+### Interface wording
+
+- Use plain, direct language across every interface. Keep labels short and describe actions and results in words users already know.
+- Avoid jargon, abstract labels, and polished or AI-generated sounding explanations. For example, use "Findings", "Finding details", and "Missing evidence" instead of "Candidate ledger", "Evidence chain", and "Proof gaps".
+- Check headings, buttons, empty states, status text, and help text when adding or changing a screen. Use technical terms only when they help users make a decision or understand a result.
+
 Frontend refactoring notes:
 
 - Do not trust Vite builds to catch undefined variables. Bundlers may ignore undefined variable references.
@@ -55,7 +62,7 @@ Frontend refactoring notes:
 ### Frontend layout and visual QA
 
 - Reusable tab bars depend on their parent layout. For example, Attack Surface and Coverage use `.activity-sub-tab-bar` with `.coverage-sub-tab-bar` inside a full-width wrapper. Do not copy only the child tab classes into a padded container.
-- The Agent Settings page has padded content: its scroll area has 16px top padding and the content column has 16px left padding. A full-width inner tab bar must be a sibling above the overflowed scroll area, or live inside a wrapper that owns the full-bleed layout. Negative margins inside `.scroll-content` do not work because its `overflow-x: hidden` clips the bar. Otherwise dark gutters appear along the top or left edge.
+- The Agent Settings page has padded content: its scroll area has 16px top padding and the content column has the standard 28px left page gutter. A full-width inner tab bar must be a sibling above the overflowed scroll area, or live inside a wrapper that owns the full-bleed layout. Negative margins inside `.scroll-content` do not work because its `overflow-x: hidden` clips the bar. Otherwise dark gutters appear along the top or left edge.
 - When changing a nested tab bar or panel, inspect the computed bounds of the bar and its parent after the build. Check the real route in a screenshot at desktop width and confirm that the bar reaches the same edges as its surrounding panel before finishing.
 
 ## Configuration
@@ -108,6 +115,12 @@ Everything is asyncio. Crawl, scan, SAST, and ALICE jobs run as background `asyn
 
 SQLite via SQLModel, single file `aespa.db` (gitignored; never commit it). Do not inspect it by default, but read-only inspection is allowed when the user explicitly asks to diagnose a local run; use SQLite read-only mode and avoid exposing stored secrets. Schema evolution is managed via **Alembic**.
 
+### Extension database access
+
+Extension code may read AESPA's main database, for example to find saved LLM profiles or inspect completed runs. Extension code must never write to or change the main database. Do not call `add`, `delete`, `flush`, `commit`, write SQL, migrations, or core service methods that change main database data from an extension. Store extension-owned results and state in the extension's separate database through `registry.data_store(...)`. When an extension needs to change a scan or another core record, return the result to an AESPA-owned service or API so core code makes and validates that change.
+
+AESPA core owns the existing extension enablement, settings, secrets, scan results, and LLM usage writes. A call through AESPA's LLM service may record usage in the main database; extension code must not write usage records itself. Extension code must not call the write methods on `registry.secrets`; secret changes go through AESPA's settings API. Review new extension code for indirect main database writes through imported services as well as direct SQLModel sessions.
+
 Migration workflow for schema changes:
 
 1. Update the SQLModel definition in `models.py`.
@@ -132,14 +145,18 @@ Tables shared across both run kinds, such as `agent_log`, `scan_log`, `scanner_s
 - `tests/conftest.py` spins up a fresh in-memory DB per test with a dependency-overridden session.
 - All files use `from __future__ import annotations`.
 - No external network or live LLM calls in tests. Stub or mock LLM clients.
-- The app intentionally has no auth and is localhost-only by design. Optional Cloudflare Access JWT verification in `main.py` is only for users who front it with a reverse proxy. Do not add features assuming a trusted multi-user deployment.
+- The app is intended for local use. Management routes require browser-session authentication through `local_auth.py`. The API extension's `/v1/` routes use separate bearer tokens. The optional integration listener exposes only those routes and is disabled inside Docker. Cloudflare Access JWT verification supplies a display name, not management authentication. Do not add features assuming a trusted multi-user deployment.
 - When interacting with GitHub, use the `gh` command, because the repo may be on a different account than the authenticated GitHub Copilot session.
+
+### Terminology
+
+- Use clear, specific terms such as "test case," "test," "coverage item," or "remaining test." Avoid calling testing work an "obligation" unless that word has a precise, defined meaning in the code or domain. If it is necessary, define it where it first appears.
 
 ## Desktop Launchers & PyInstaller Builds
 
-When adding new runtime dependencies, backend frameworks, data assets, or modifying desktop launchers (`src/aespa/desktop.py`, `src/aespa/desktop_win.py`) and PyInstaller scripts (`build_mac.sh`, `build_win.ps1`, `AESPA.spec`):
+When adding new runtime dependencies, backend frameworks, data assets, or modifying desktop launchers (`src/aespa/desktop.py`, `src/aespa/desktop_win.py`) and PyInstaller scripts (`scripts/build_mac.sh`, `scripts/build_win.ps1`, `scripts/AESPA.spec`):
 
-1. **Dynamic Runtime Assets & Migration Configs**: Any runtime configuration files, database migration directories (e.g. `alembic.ini`, `alembic/`), static assets, templates, or non-Python files read by the app must be explicitly bundled in PyInstaller scripts (`build_mac.sh`, `build_win.ps1`, `AESPA.spec`) via `--add-data`. All backend path resolvers (e.g. `_get_alembic_config` in `src/aespa/db.py`) must check `sys.frozen` / `sys._MEIPASS` when frozen before falling back to repo-relative paths (`Path(__file__).resolve().parents[...]`).
+1. **Dynamic Runtime Assets & Migration Configs**: Any runtime configuration files, database migration directories (e.g. `alembic.ini`, `alembic/`), static assets, templates, or non-Python files read by the app must be explicitly bundled in PyInstaller scripts (`scripts/build_mac.sh`, `scripts/build_win.ps1`, `scripts/AESPA.spec`) via `--add-data`. All backend path resolvers (e.g. `_get_alembic_config` in `src/aespa/db.py`) must check `sys.frozen` / `sys._MEIPASS` when frozen before falling back to repo-relative paths (`Path(__file__).resolve().parents[...]`).
 2. **Framework & Dynamic Import Collection**: Any third-party package loaded via dynamic string imports, reflection, plugin systems, or ASGI/WSGI servers (e.g. `alembic`, `uvicorn`, `playwright`, `webview`) must be explicitly bundled using `--collect-all <package>` or `--collect-submodules <package>`. In desktop launcher scripts (`desktop.py`, `desktop_win.py`), avoid string-based target resolution (e.g. `"aespa.main:app"`) and pass explicit module/object references (e.g. `uvicorn.Config(app, ...)`).
 3. **Fail-Fast Thread & Port Verification**: Background server threads (`_serve()`) must trap startup exceptions into a shared variable, and port polling functions (`_wait_port()`) must re-raise thread errors immediately or raise `TimeoutError` on deadline. Never allow `_wait_port()` to return cleanly when backend startup fails, as launching webviews on dead ports causes silent white screens.
 
@@ -172,6 +189,13 @@ Group entries under these headings, in this order:
 
 Omit empty categories. Place each change in the category that best describes it. Split entries that combine unrelated changes or changes belonging to different categories, and avoid repeating the same change across categories.
 
+Describe the final release behaviour compared with the last released version. Do not use the changelog as a record of each development step within a pull request or unreleased release.
+
+- Before adding an entry, check whether the same feature or change is already described under `## Unreleased`.
+- When fixing or refining a feature introduced or updated in the same unreleased pull request, update its existing entry only if the final user-visible behaviour needs clarification. Do not append separate fix entries for bugs introduced during that work.
+- Use `### Fixes` for bugs that affected a previously released version. If a fix concerns only an unreleased feature or update, fold any useful detail into that feature or update entry and remove redundant entries for the same work.
+- Keep separate entries for unrelated changes, even when they share a pull request.
+
 When updating `CHANGELOG.md`, write for users rather than implementation specialists:
 
 - Use clear, professional release-note language consistent with the surrounding changelog entries.
@@ -180,4 +204,13 @@ When updating `CHANGELOG.md`, write for users rather than implementation special
 - Keep technical detail only when it helps users understand behaviour, compatibility, configuration, or risk.
 - Avoid casual phrasing, promotional language, and repetitive sentence patterns that make the entry sound machine-generated.
 - Do not include source file paths or internal function and class names unless they are genuinely useful to the intended reader.
-- Preserve existing changelog text unless the user explicitly asks for it to be revised.
+- Preserve released changelog text and unrelated unreleased entries unless the user explicitly asks for them to be revised. You may revise or consolidate entries for the current unreleased work as described above.
+
+### Pull requests to `main`
+
+When the user asks for a pull request to `main`, do all of the following without asking for further confirmation:
+
+1. Commit all outstanding changes on the current branch and push it.
+2. Open the pull request with `gh pr create --base main`.
+3. Rename the `## Unreleased` heading in `CHANGELOG.md` to `## [PR #<number>] <Month> <Day> - <short title>`, matching earlier release headings (for example, `## [PR #283] October 16 - Workflow detection, grouped page routes`). Keep any short title the user has already added to the Unreleased heading.
+4. Commit and push the changelog heading change to the same branch so it is part of the pull request.

@@ -1,45 +1,55 @@
+import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { Tabs } from "../../shared/ui/Tabs.tsx";
 import { ProfilesList } from "./ProfilesList.jsx";
-import { ModelsList } from "./ModelsList.jsx";
 import { ProvidersList } from "./ProvidersList.jsx";
 import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect, useRef, useCallback } from "react";
+import { nav } from "../../shared/navigation/router.js";
 
 import { LLMProviderForm } from "./LLMProviderForm.jsx";
 import { LLMModelForm } from "./LLMModelForm.jsx";
 import { ScanProfileForm } from "./ScanProfileForm.jsx";
+import { Notice, PageError } from "../../shared/ui/Notice.jsx";
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 const SETTINGS_TABS = [
   { key: "profiles", label: "Profiles" },
-  { key: "models", label: "Models" },
   { key: "providers", label: "Providers" },
 ];
 
-export function SettingsPage() {
+const settingsListHref = (section) => `#/settings/${section}`;
+const settingsNewHref = (section) => `#/settings/${section}/new`;
+const settingsEditHref = (section, id) => `#/settings/${section}/${id}/edit`;
+
+export function SettingsPage({
+  section = "profiles",
+  screen = "list",
+  itemId,
+  initialProviderId,
+  initialModel,
+}) {
   const [profiles, setProfiles] = useState(null); // scan profiles (LLMProfile)
   const [models, setModels] = useState(null); // models (LLMConfig)
   const [providers, setProviders] = useState(null);
-  const [tab, setTab] = useState("profiles");
-  const [screen, setScreen] = useState("list");
-  const [editing, setEditing] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(null);
+  const [message, setMessage] = useState(null);
   const [importing, setImporting] = useState(false);
   const importRef = useRef(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [profItems, modelItems, providerItems] = await Promise.all([
+      const [profItems, modelItems, providerItems, extensionItems] = await Promise.all([
         settingsApi.listLLMProfiles(),
         settingsApi.listLLMModels(),
         settingsApi.listLLMProviders(),
+        settingsApi.listExtensionLLMCatalog(),
       ]);
       setProfiles(profItems);
-      setModels(modelItems);
-      setProviders(providerItems);
+      setModels([...modelItems, ...extensionItems.models]);
+      setProviders([...providerItems, ...extensionItems.providers]);
     } catch (e) {
       setError(e.message);
     }
@@ -47,25 +57,60 @@ export function SettingsPage() {
   useEffect(() => {
     load();
   }, [load]);
-  const onSaved = async () => {
+  const loaded = profiles && models && providers;
+  const savedModels = (models || []).filter((item) => !item.extension_id);
+  const editing = loaded
+    ? section === "profiles"
+      ? profiles.find((item) => item.id === itemId)
+      : section === "providers"
+        ? providers.find((item) => item.id === itemId)
+        : models.find((item) => item.id === itemId)
+    : null;
+  const onSaved = async (savedItem) => {
     await load();
-    setScreen("list");
-    setEditing(null);
+    if (section === "models") {
+      const providerId = savedItem?.provider_id || editing?.provider_id || initialProviderId;
+      nav(providerId ? settingsEditHref("providers", providerId) : settingsListHref("providers"));
+      return;
+    }
+    nav(settingsListHref(section));
   };
   const onEdit = (item) => {
-    setEditing(item);
-    setScreen("edit");
-    setError(null);
+    nav(settingsEditHref(section, item.id));
   };
   const onNew = () => {
-    setEditing(null);
-    setScreen("new");
-    setError(null);
+    nav(settingsNewHref(section));
+  };
+  const onConfigureProviderModel = (provider, modelName, configuredModel) => {
+    if (configuredModel) {
+      nav(settingsEditHref("models", configuredModel.id));
+      return;
+    }
+    const query = new URLSearchParams({
+      provider_id: String(provider.id),
+      model: modelName,
+    });
+    nav(`#/settings/models/new?${query}`);
+  };
+  const onProviderUpdated = useCallback(
+    (savedProvider) => {
+      setProviders((current) =>
+        current?.map((item) => (item.id === savedProvider.id ? savedProvider : item)),
+      );
+      void load();
+    },
+    [load],
+  );
+  const onProviderCreated = (savedProvider) => {
+    nav(settingsEditHref("providers", savedProvider.id));
   };
   const onCancel = () => {
-    setScreen("list");
-    setEditing(null);
-    setError(null);
+    if (section === "models") {
+      const providerId = editing?.provider_id || initialProviderId;
+      nav(providerId ? settingsEditHref("providers", providerId) : settingsListHref("providers"));
+      return;
+    }
+    nav(settingsListHref(section));
   };
   const onActivate = async (item) => {
     setBusyId(item.id);
@@ -80,13 +125,11 @@ export function SettingsPage() {
     }
   };
   const onDelete = async (item) => {
-    const what = tab === "profiles" ? "profile" : "model";
-    if (!confirm(`Delete LLM ${what} "${item.name}"?`)) return;
+    if (!confirm(`Delete LLM profile "${item.name}"?`)) return;
     setBusyId(item.id);
     setError(null);
     try {
-      if (tab === "profiles") await settingsApi.deleteLLMProfile(item.id);
-      else await settingsApi.deleteLLMModel(item.id);
+      await settingsApi.deleteLLMProfile(item.id);
       await load();
     } catch (e) {
       setError(e.message);
@@ -108,10 +151,7 @@ export function SettingsPage() {
     }
   };
   const switchTab = (next) => {
-    setTab(next);
-    setScreen("list");
-    setEditing(null);
-    setError(null);
+    nav(settingsListHref(next));
   };
   const onExport = async () => {
     setError(null);
@@ -151,7 +191,7 @@ export function SettingsPage() {
       }
       const result = await settingsApi.importLLMConfig(parsed);
       await load();
-      alert(
+      setMessage(
         `Import complete: ${result.providers_created} provider(s) created, ${result.providers_updated} updated; ${result.profiles_created} model(s) created, ${result.profiles_updated} updated.`,
       );
     } catch (e) {
@@ -165,23 +205,26 @@ export function SettingsPage() {
     models: "Model",
     providers: "Provider",
   };
-  const noun = TAB_NOUN[tab];
+  const noun = TAB_NOUN[section];
   const title =
-    screen === "new" ? `New LLM ${noun}` : screen === "edit" ? `Edit LLM ${noun}` : `LLM ${noun}s`;
-  const canCreateModel = (providers || []).length > 0;
-  const canCreateProfile = (models || []).length > 0;
-  const newDisabled =
-    (tab === "models" && !canCreateModel) || (tab === "profiles" && !canCreateProfile);
-  const loaded = profiles && models && providers;
+    screen === "new"
+      ? `New LLM ${noun}`
+      : screen === "edit"
+        ? `Edit LLM ${noun}`
+        : "LLM Configuration";
+  const canCreateProfile = savedModels.length > 0;
+  const newDisabled = section === "profiles" && !canCreateProfile;
+  const visibleTab = section === "models" ? "providers" : section;
+  const missingItem = loaded && screen === "edit" && !editing;
   return (
     <>
       <div className="topbar">
         <div className="topbar-title">{title}</div>
         <div className="topbar-actions">
-          <button className="btn secondary sm" disabled={importing} onClick={onExport}>
+          <button className="btn secondary" disabled={importing} onClick={onExport}>
             Export
           </button>
-          <button className="btn secondary sm" disabled={importing} onClick={onImportClick}>
+          <button className="btn secondary" disabled={importing} onClick={onImportClick}>
             {importing ? "Importing…" : "Import"}
           </button>
           <input
@@ -193,26 +236,34 @@ export function SettingsPage() {
             }}
             onChange={onImportFile}
           />
-          {screen === "list" && (
+          {screen === "list" && section !== "models" && (
             <button className="btn" disabled={newDisabled} onClick={onNew}>
-              New {noun.toLowerCase()}
+              <IconPlus /> New {noun.toLowerCase()}
             </button>
           )}
         </div>
       </div>
       <div className="content scroll-content settings-content">
         <Tabs
-          label="LLM settings"
+          label="LLM configuration"
           className="tab-bar settings-tab-bar"
           tabs={SETTINGS_TABS}
-          value={tab}
+          value={visibleTab}
           onChange={switchTab}
         />
         {!loaded && !error && <div className="subtle">Loading…</div>}
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!loaded} onDismiss={() => setError(null)} />
+        {message && (
+          <Notice variant="success" onDismiss={() => setMessage(null)}>
+            {message}
+          </Notice>
+        )}
+        {missingItem && (
+          <div className="alert error">The requested {noun.toLowerCase()} was not found.</div>
+        )}
         {loaded && (
           <ProfilesList
-            visible={tab === "profiles" && screen === "list"}
+            visible={section === "profiles" && screen === "list"}
             profiles={profiles}
             models={models}
             busyId={busyId}
@@ -222,67 +273,77 @@ export function SettingsPage() {
           />
         )}
         {loaded && (
-          <ModelsList
-            visible={tab === "models" && screen === "list"}
-            models={models}
-            providers={providers}
-            busyId={busyId}
-            onEdit={onEdit}
-            onDelete={onDelete}
-          />
-        )}
-        {loaded && (
           <ProvidersList
-            visible={tab === "providers" && screen === "list"}
+            visible={section === "providers" && screen === "list"}
             providers={providers}
+            models={models}
             busyId={busyId}
             onEdit={onEdit}
             onDeleteProvider={onDeleteProvider}
           />
         )}
-        {loaded && tab === "profiles" && screen === "new" && (
+        {loaded && section === "profiles" && screen === "new" && (
           <ScanProfileForm
             mode="new"
-            models={models}
+            models={savedModels}
             onSaved={onSaved}
             onCancel={profiles.length ? onCancel : null}
           />
         )}
-        {loaded && tab === "profiles" && screen === "edit" && editing && (
+        {loaded && section === "profiles" && screen === "edit" && editing && (
           <ScanProfileForm
             mode="edit"
             profile={editing}
-            models={models}
+            models={savedModels}
             onSaved={onSaved}
             onCancel={onCancel}
           />
         )}
-        {loaded && tab === "models" && screen === "new" && (
+        {loaded && section === "models" && screen === "new" && (
           <LLMModelForm
             mode="new"
-            providers={providers}
+            providers={providers.filter((item) => !item.extension_id)}
+            modelConfigs={savedModels}
+            initialProviderId={initialProviderId}
+            initialModel={initialModel}
             onSaved={onSaved}
-            onCancel={models.length ? onCancel : null}
+            onCancel={onCancel}
           />
         )}
-        {loaded && tab === "models" && screen === "edit" && editing && (
+        {loaded && section === "models" && screen === "edit" && editing && (
           <LLMModelForm
             mode="edit"
             profile={editing}
-            providers={providers}
+            providers={providers.filter((item) => !item.extension_id)}
+            modelConfigs={savedModels}
             onSaved={onSaved}
             onCancel={onCancel}
           />
         )}
-        {loaded && tab === "providers" && screen === "new" && (
+        {loaded && section === "providers" && screen === "new" && (
           <LLMProviderForm
             mode="new"
+            models={savedModels}
+            profiles={profiles.filter((item) => !item.extension_id)}
+            onProviderCreated={onProviderCreated}
+            providerNames={providers.map((item) => item.name)}
             onSaved={onSaved}
             onCancel={providers.length ? onCancel : null}
           />
         )}
-        {loaded && tab === "providers" && screen === "edit" && editing && (
-          <LLMProviderForm mode="edit" provider={editing} onSaved={onSaved} onCancel={onCancel} />
+        {loaded && section === "providers" && screen === "edit" && editing && (
+          <LLMProviderForm
+            mode="edit"
+            provider={editing}
+            models={savedModels}
+            profiles={profiles.filter((item) => !item.extension_id)}
+            onConfigureModel={(modelName, configuredModel) =>
+              onConfigureProviderModel(editing, modelName, configuredModel)
+            }
+            onProviderUpdated={onProviderUpdated}
+            onSaved={onSaved}
+            onCancel={onCancel}
+          />
         )}
       </div>
     </>

@@ -20,9 +20,10 @@ to ``pending`` so the campaign can resume the action without a stale run id.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, text
+from sqlalchemy import delete, inspect, or_, text
 from sqlmodel import Session, select
 
 from aespa.models import (
@@ -33,13 +34,23 @@ from aespa.models import (
     ApiEndpointTest,
     ApiTestRun,
     AssessmentCampaign,
+    CampaignFindingReference,
     CampaignSourceMember,
     CampaignTargetMember,
+    CampaignValidationCase,
     ComponentConnection,
     ComponentFact,
     ComponentSnapshot,
     CoverageEvidence,
     CrawledPage,
+    DeepScanAttempt,
+    DeepScanCheck,
+    DeepScanClaim,
+    DeepScanProbeOutcome,
+    DeepScanTask,
+    DeepScanTaskFinding,
+    DeepScanVariant,
+    DiscoveredTarget,
     LeadTargetMapping,
     PageCredentialView,
     PageLink,
@@ -48,7 +59,21 @@ from aespa.models import (
     ProbeExecution,
     RunIdentity,
     RunPause,
+    SastCodeCall,
+    SastCodeSymbol,
+    SastCoverageObligation,
+    SastDiscoveryTelemetry,
+    SastEvidenceReceipt,
+    SastObligationLead,
+    SastPartition,
     SastRun,
+    SastSourceFile,
+    SastSurfaceEdge,
+    SastSurfaceItem,
+    SastThreatModel,
+    SastThreatScenario,
+    SastWorker,
+    SastWorkItem,
     ScanCheckpoint,
     ScanFinding,
     ScanLead,
@@ -56,10 +81,38 @@ from aespa.models import (
     ScanLog,
     ScannerSession,
     ScanObligation,
+    TargetAccessObservation,
+    TargetDiscovery,
     TargetIntelItem,
     TestRun,
     TrafficEntry,
+    WorkflowCoverageItem,
+    WorkflowTargetReservation,
 )
+
+
+class LegacyBenchmarkReferenceError(RuntimeError):
+    """A retired core benchmark row still has a restrictive SAST foreign key."""
+
+
+def ensure_sast_run_deletable(session: Session, run_id: int) -> None:
+    """Guard all SAST deletion paths against retained legacy benchmark rows."""
+    if not inspect(session.connection()).has_table("benchmark_evaluation"):
+        return
+    # A parent cascade can already have FK-sensitive deletes queued. This
+    # compatibility lookup must not flush them before the normal cleanup order.
+    with session.no_autoflush:
+        referenced = session.execute(
+            text(
+                "SELECT 1 FROM benchmark_evaluation WHERE sast_run_id = :run_id LIMIT 1"
+            ),
+            {"run_id": run_id},
+        ).first()
+    if referenced:
+        raise LegacyBenchmarkReferenceError(
+            "An older Benchmark Lab evaluation still refers to this SAST run. "
+            "The run cannot be deleted while it exists."
+        )
 
 
 def _delete_run_identity(session: Session, run_id: int, run) -> None:
@@ -74,6 +127,139 @@ def _delete_run_identity(session: Session, run_id: int, run) -> None:
         session.delete(run)
         session.flush()
     session.execute(delete(RunIdentity).where(RunIdentity.id == run_id))
+
+
+def _detach_validation_cases_for_leads(
+    session: Session, lead_ids: list[int], *, reason: str = "child_run_deleted"
+) -> None:
+    """Leave cases reviewable when their imported child lead is removed."""
+    if not lead_ids:
+        return
+    for case in session.exec(
+        select(CampaignValidationCase).where(
+            CampaignValidationCase.copied_lead_id.in_(lead_ids)
+        )
+    ).all():
+        case.copied_lead_id = None
+        case.execution_status = "not_queued"
+        case.readiness_status = "pending"
+        try:
+            blockers = json.loads(case.blocker_codes_json or "[]")
+        except (TypeError, ValueError):
+            blockers = []
+        if reason not in blockers:
+            blockers.append(reason)
+        case.blocker_codes_json = json.dumps(blockers, separators=(",", ":"))
+        case.updated_at = datetime.now(timezone.utc)
+        session.add(case)
+
+
+def _detach_validation_cases_for_findings(
+    session: Session, finding_ids: list[int]
+) -> None:
+    if not finding_ids:
+        return
+    for case in session.exec(
+        select(CampaignValidationCase).where(
+            CampaignValidationCase.finding_id.in_(finding_ids)
+        )
+    ).all():
+        case.finding_id = None
+        case.updated_at = datetime.now(timezone.utc)
+        session.add(case)
+
+
+def detach_finding_dependents(session: Session, finding_ids: list[int]) -> None:
+    """Clear restrictive references to findings that are about to be deleted.
+
+    Workflow coverage items keep their result but lose the finding link.  A
+    campaign finding reference is an alias for exactly one finding, so it is
+    removed with that finding.  Flushes so the caller can delete the findings
+    on SQLite with foreign-key enforcement on.
+    """
+    if not finding_ids:
+        return
+    for item in session.exec(
+        select(WorkflowCoverageItem).where(
+            WorkflowCoverageItem.finding_id.in_(finding_ids)
+        )
+    ).all():
+        item.finding_id = None
+        session.add(item)
+    for reference in session.exec(
+        select(CampaignFindingReference).where(
+            CampaignFindingReference.finding_id.in_(finding_ids)
+        )
+    ).all():
+        session.delete(reference)
+    session.flush()
+
+
+def detach_credential_dependents(session: Session, credential_ids: list[int]) -> None:
+    """Clear references to site credentials that are about to be deleted.
+
+    Past runs, replayed pages and scanner sessions keep their records but lose
+    the link to the removed login.
+    """
+    if not credential_ids:
+        return
+    for run in session.exec(
+        select(TestRun).where(TestRun.crawl_credential_id.in_(credential_ids))
+    ).all():
+        run.crawl_credential_id = None
+        session.add(run)
+    for page in session.exec(
+        select(CrawledPage).where(CrawledPage.replay_credential_id.in_(credential_ids))
+    ).all():
+        page.replay_credential_id = None
+        session.add(page)
+    for scanner_session in session.exec(
+        select(ScannerSession).where(ScannerSession.credential_id.in_(credential_ids))
+    ).all():
+        scanner_session.credential_id = None
+        session.add(scanner_session)
+    session.flush()
+
+
+def detach_traffic_dependents(session: Session, traffic_ids: list[int]) -> None:
+    """Clear references to traffic entries that are about to be deleted.
+
+    Probe results keep their outcome but lose the link to the request.
+    """
+    if not traffic_ids:
+        return
+    for outcome in session.exec(
+        select(DeepScanProbeOutcome).where(
+            DeepScanProbeOutcome.traffic_id.in_(traffic_ids)
+        )
+    ).all():
+        outcome.traffic_id = None
+        session.add(outcome)
+    for execution in session.exec(
+        select(ProbeExecution).where(ProbeExecution.traffic_id.in_(traffic_ids))
+    ).all():
+        execution.traffic_id = None
+        session.add(execution)
+    session.flush()
+
+
+def detach_page_dependents(session: Session, page_ids: list[int]) -> None:
+    """Clear restrictive references to crawled pages that are about to be deleted."""
+    if not page_ids:
+        return
+    for item in session.exec(
+        select(WorkflowCoverageItem).where(
+            WorkflowCoverageItem.reached_page_id.in_(page_ids)
+        )
+    ).all():
+        item.reached_page_id = None
+        session.add(item)
+    for discovery in session.exec(
+        select(TargetDiscovery).where(TargetDiscovery.source_page_id.in_(page_ids))
+    ).all():
+        discovery.source_page_id = None
+        session.add(discovery)
+    session.flush()
 
 
 def cascade_delete_web_run(session: Session, run_id: int) -> None:
@@ -114,11 +300,50 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         execution.id for execution in executions if execution.id is not None
     ]
 
+    deep_tasks = list(
+        session.exec(select(DeepScanTask).where(DeepScanTask.run_id == run_id)).all()
+    )
+    deep_task_ids = [task.id for task in deep_tasks if task.id is not None]
+    if deep_task_ids:
+        for claim in session.exec(
+            select(DeepScanClaim).where(DeepScanClaim.task_id.in_(deep_task_ids))
+        ).all():
+            session.delete(claim)
+        for outcome in session.exec(
+            select(DeepScanProbeOutcome).where(
+                DeepScanProbeOutcome.task_id.in_(deep_task_ids)
+            )
+        ).all():
+            session.delete(outcome)
+        for link in session.exec(
+            select(DeepScanTaskFinding).where(
+                DeepScanTaskFinding.task_id.in_(deep_task_ids)
+            )
+        ).all():
+            session.delete(link)
+        for check in session.exec(
+            select(DeepScanCheck).where(DeepScanCheck.task_id.in_(deep_task_ids))
+        ).all():
+            session.delete(check)
+        for attempt in session.exec(
+            select(DeepScanAttempt).where(DeepScanAttempt.task_id.in_(deep_task_ids))
+        ).all():
+            session.delete(attempt)
+        for variant in session.exec(
+            select(DeepScanVariant).where(DeepScanVariant.task_id.in_(deep_task_ids))
+        ).all():
+            session.delete(variant)
+    for task in deep_tasks:
+        session.delete(task)
+    session.flush()
+
     for lead in session.exec(
         select(ScanLead)
         .where(ScanLead.imported_into_run_type == "web")
         .where(ScanLead.imported_into_run_id == run_id)
     ).all():
+        if lead.id is not None:
+            _detach_validation_cases_for_leads(session, [lead.id])
         session.delete(lead)
     for lead in session.exec(
         select(ScanLead)
@@ -129,6 +354,7 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         lead.investigated_by_run_id = None
         session.add(lead)
     if finding_ids:
+        _detach_validation_cases_for_findings(session, finding_ids)
         for lead in session.exec(
             select(ScanLead).where(ScanLead.linked_finding_id.in_(finding_ids))
         ).all():
@@ -163,6 +389,39 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
             session.delete(evidence)
     for execution in executions:
         session.delete(execution)
+    session.flush()
+    for obligation in session.exec(
+        select(ScanObligation)
+        .where(ScanObligation.run_kind == "web")
+        .where(ScanObligation.run_id == run_id)
+    ).all():
+        session.delete(obligation)
+    session.flush()
+    for row in session.exec(
+        select(TargetAccessObservation).where(
+            TargetAccessObservation.test_run_id == run_id
+        )
+    ).all():
+        session.delete(row)
+    for row in session.exec(
+        select(TargetDiscovery).where(TargetDiscovery.test_run_id == run_id)
+    ).all():
+        session.delete(row)
+    session.flush()
+    for target in session.exec(
+        select(DiscoveredTarget).where(DiscoveredTarget.test_run_id == run_id)
+    ).all():
+        session.delete(target)
+    for reservation in session.exec(
+        select(WorkflowTargetReservation).where(
+            WorkflowTargetReservation.test_run_id == run_id
+        )
+    ).all():
+        session.delete(reservation)
+    session.flush()
+
+    detach_finding_dependents(session, finding_ids)
+    detach_page_dependents(session, [page.id for page in pages if page.id is not None])
 
     # Findings and page workprogram cells must go before crawled pages because
     # both carry page references.
@@ -190,6 +449,11 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         .where(TrafficEntry.api_test_run_id == None)  # noqa: E711
     ).all():
         session.delete(entry)
+
+    # SQLAlchemy has no ORM relationships between these models, so one flush
+    # can issue the CrawledPage deletes before TrafficEntry or another page
+    # dependant. Persist the dependant deletes before marking pages for removal.
+    session.flush()
     for page in pages:
         session.delete(page)
 
@@ -217,12 +481,6 @@ def cascade_delete_web_run(session: Session, run_id: int) -> None:
         .where(PhaseCheckpoint.run_id == run_id)
     ).all():
         session.delete(checkpoint)
-    for obligation in session.exec(
-        select(ScanObligation)
-        .where(ScanObligation.run_kind == "web")
-        .where(ScanObligation.run_id == run_id)
-    ).all():
-        session.delete(obligation)
 
     # Retired task-queue tables may still exist in upgraded databases even
     # though their ORM models are no longer part of the application.
@@ -276,9 +534,13 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
         member.updated_at = datetime.now(timezone.utc)
         session.add(member)
 
-    for finding in session.exec(
+    api_findings = session.exec(
         select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
-    ).all():
+    ).all()
+    api_finding_ids = [finding.id for finding in api_findings if finding.id is not None]
+    _detach_validation_cases_for_findings(session, api_finding_ids)
+    detach_finding_dependents(session, api_finding_ids)
+    for finding in api_findings:
         session.delete(finding)
     for entry in session.exec(
         select(TrafficEntry).where(TrafficEntry.api_test_run_id == run_id)
@@ -293,6 +555,8 @@ def cascade_delete_api_run(session: Session, run_id: int) -> None:
         .where(ScanLead.imported_into_run_type == "api")
         .where(ScanLead.imported_into_run_id == run_id)
     ).all():
+        if lead.id is not None:
+            _detach_validation_cases_for_leads(session, [lead.id])
         session.delete(lead)
     for ss in session.exec(
         select(ScannerSession)
@@ -339,6 +603,7 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
     copies imported into a dynamic run keep ``producer_run_id`` pointing here but
     belong to that run and are cleaned up when the run is deleted instead.
     """
+    ensure_sast_run_deletable(session, run_id)
     for member in session.exec(
         select(CampaignSourceMember).where(CampaignSourceMember.sast_run_id == run_id)
     ).all():
@@ -347,12 +612,92 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         member.updated_at = datetime.now(timezone.utc)
         session.add(member)
 
-    for lead in session.exec(
+    original_leads = session.exec(
         select(ScanLead)
         .where(ScanLead.producer_run_id == run_id)
         .where(ScanLead.producer_run_type == "sast")
         .where(ScanLead.imported_into_run_id == None)  # noqa: E711
-    ).all():
+    ).all()
+    lead_ids = [lead.id for lead in original_leads if lead.id is not None]
+    facts = session.exec(
+        select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
+    ).all()
+    fact_ids = [fact.id for fact in facts if fact.id is not None]
+
+    # Campaign correlation rows can outlive their source member and hold
+    # restrictive foreign keys to this run's leads and component facts. Clear
+    # those references before the source rows are marked for deletion.
+    mapping_ids: list[int] = []
+    if lead_ids:
+        mappings = session.exec(
+            select(LeadTargetMapping).where(LeadTargetMapping.lead_id.in_(lead_ids))
+        ).all()
+        mapping_ids = [mapping.id for mapping in mappings if mapping.id is not None]
+        case_filters = [
+            CampaignValidationCase.origin_lead_id.in_(lead_ids),
+            CampaignValidationCase.copied_lead_id.in_(lead_ids),
+        ]
+        if mapping_ids:
+            case_filters.append(CampaignValidationCase.mapping_id.in_(mapping_ids))
+        for case in session.exec(
+            select(CampaignValidationCase).where(or_(*case_filters))
+        ).all():
+            session.delete(case)
+        for mapping in mappings:
+            session.delete(mapping)
+
+    if lead_ids or fact_ids:
+        provenance_filters = []
+        if lead_ids:
+            provenance_filters.append(
+                ScanLeadComponentProvenance.scan_lead_id.in_(lead_ids)
+            )
+        if fact_ids:
+            provenance_filters.append(ScanLeadComponentProvenance.fact_id.in_(fact_ids))
+        for provenance in session.exec(
+            select(ScanLeadComponentProvenance).where(or_(*provenance_filters))
+        ).all():
+            if provenance.scan_lead_id in lead_ids:
+                session.delete(provenance)
+            else:
+                provenance.fact_id = None
+                session.add(provenance)
+
+    if fact_ids:
+        for connection in session.exec(
+            select(ComponentConnection).where(
+                or_(
+                    ComponentConnection.source_fact_id.in_(fact_ids),
+                    ComponentConnection.target_fact_id.in_(fact_ids),
+                )
+            )
+        ).all():
+            session.delete(connection)
+
+    session.flush()
+
+    # Semantic rows contain references to one another without database cascade
+    # rules. Remove dependants first so SQLite can delete the run with foreign
+    # key enforcement enabled.
+    for model in (
+        SastObligationLead,
+        SastCoverageObligation,
+        SastThreatScenario,
+        SastThreatModel,
+        SastSurfaceEdge,
+        SastDiscoveryTelemetry,
+        SastEvidenceReceipt,
+        SastWorkItem,
+        SastWorker,
+        SastPartition,
+        SastSurfaceItem,
+        SastSourceFile,
+        SastCodeCall,
+        SastCodeSymbol,
+    ):
+        session.execute(delete(model).where(model.sast_run_id == run_id))
+
+    for lead in original_leads:
         session.delete(lead)
     for slog in session.exec(
         select(ScanLog)
@@ -372,9 +717,7 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
         .where(PhaseCheckpoint.run_id == run_id)
     ).all():
         session.delete(checkpoint)
-    for fact in session.exec(
-        select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
-    ).all():
+    for fact in facts:
         session.delete(fact)
     run = session.get(SastRun, run_id)
     if run is not None:
@@ -431,10 +774,28 @@ def cascade_delete_campaign(session: Session, campaign_id: int) -> None:
     ).all():
         session.delete(connection)
 
+    # Validation cases reference mappings, target members, source leads, and
+    # copied leads. Remove them before any of those campaign-owned rows.
+    for case in session.exec(
+        select(CampaignValidationCase).where(
+            CampaignValidationCase.campaign_id == campaign_id
+        )
+    ).all():
+        session.delete(case)
+
     for mapping in session.exec(
         select(LeadTargetMapping).where(LeadTargetMapping.campaign_id == campaign_id)
     ).all():
         session.delete(mapping)
+
+    # Campaign finding aliases point at child-run findings and target members,
+    # both of which are deleted below.
+    for reference in session.exec(
+        select(CampaignFindingReference).where(
+            CampaignFindingReference.campaign_id == campaign_id
+        )
+    ).all():
+        session.delete(reference)
 
     campaign_leads = session.exec(
         select(ScanLead)

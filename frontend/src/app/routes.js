@@ -1,4 +1,5 @@
 import { lazy } from "react";
+import { PLAN_USAGE_EXTENSION_ID } from "../shared/api/chatgptPlanUsage.js";
 const lazyNamed = (loader, name) =>
   lazy(() => loader().then((module) => ({ default: module[name] })));
 
@@ -13,15 +14,10 @@ export const routes = {
     Component: lazyNamed(() => import("../features/sites/SiteForm.jsx"), "SiteForm"),
     props: () => ({ key: "new" }),
   },
-  "site-edit": {
-    section: "sites",
-    Component: lazyNamed(() => import("../features/sites/SiteForm.jsx"), "SiteForm"),
-    props: (route) => ({ key: route.id, siteId: route.id }),
-  },
   "site-detail": {
     section: "sites",
     Component: lazyNamed(() => import("../features/sites/SiteDetail.jsx"), "SiteDetail"),
-    props: (route) => ({ key: route.id, siteId: route.id }),
+    props: (route) => ({ key: route.id, siteId: route.id, initialTab: route.tab }),
   },
   "api-list": {
     section: "apis",
@@ -79,6 +75,10 @@ export const routes = {
       runId: route.id,
       initialTab: route.tab,
       initialFindingRef: route.findingRef,
+      findingIds: route.findingIds,
+      coverageReturn: route.coverageReturn,
+      initialLeadRef: route.leadRef,
+      initialTrafficCoverage: route.trafficCoverage,
     }),
   },
   "sast-list": {
@@ -92,7 +92,10 @@ export const routes = {
   "sast-run-new": {
     section: "sast",
     Component: lazyNamed(() => import("../features/sast-runs/SastRunForm.jsx"), "SastRunForm"),
-    props: () => ({ key: "sast-new" }),
+    props: (_route, preferences) => ({
+      key: "sast-new",
+      showSastDeepScan: preferences.showSastDeepScan,
+    }),
   },
   "sast-run-detail": {
     section: "sast",
@@ -107,55 +110,43 @@ export const routes = {
       initialLeadRef: route.leadRef,
     }),
   },
-  "app-list": {
-    section: "applications",
-    Component: lazyNamed(
-      () => import("../features/applications/ApplicationsList.jsx"),
-      "ApplicationsList",
-    ),
+  "system-list": {
+    section: "systems",
+    Component: lazyNamed(() => import("../features/systems/SystemsList.jsx"), "SystemsList"),
     props: () => ({}),
   },
-  "app-new": {
-    section: "applications",
-    Component: lazyNamed(
-      () => import("../features/applications/ApplicationForm.jsx"),
-      "ApplicationForm",
-    ),
-    props: () => ({ key: "app-new" }),
+  "system-new": {
+    section: "systems",
+    Component: lazyNamed(() => import("../features/systems/SystemForm.jsx"), "SystemForm"),
+    props: () => ({ key: "system-new" }),
   },
-  "app-edit": {
-    section: "applications",
-    Component: lazyNamed(
-      () => import("../features/applications/ApplicationForm.jsx"),
-      "ApplicationForm",
-    ),
-    props: (route) => ({ key: route.id, applicationId: route.id }),
+  "system-edit": {
+    section: "systems",
+    Component: lazyNamed(() => import("../features/systems/SystemForm.jsx"), "SystemForm"),
+    props: (route) => ({ key: route.id, systemId: route.id }),
   },
-  "app-detail": {
-    section: "applications",
-    Component: lazyNamed(
-      () => import("../features/applications/ApplicationDetail.jsx"),
-      "ApplicationDetail",
-    ),
-    props: (route) => ({ key: route.id, applicationId: route.id, initialTab: route.tab }),
+  "system-detail": {
+    section: "systems",
+    Component: lazyNamed(() => import("../features/systems/SystemDetail.jsx"), "SystemDetail"),
+    props: (route) => ({ key: route.id, systemId: route.id, initialTab: route.tab }),
   },
   "campaign-new": {
-    section: "applications",
+    section: "systems",
     Component: lazyNamed(
       () => import("../features/campaigns/CampaignNewForm.jsx"),
       "CampaignNewForm",
     ),
-    props: (route) => ({ key: route.id, applicationId: route.id }),
+    props: (route) => ({ key: route.id, systemId: route.id }),
   },
   "campaign-detail": {
-    section: "applications",
+    section: "systems",
     Component: lazyNamed(
       () => import("../features/campaigns/CampaignDetail.jsx"),
       "CampaignDetail",
     ),
     props: (route) => ({
       key: `${route.id}-${route.campaignId}`,
-      applicationId: route.id,
+      systemId: route.id,
       campaignId: route.campaignId,
       initialTab: route.tab,
       initialFindingRef: route.findingRef,
@@ -171,6 +162,14 @@ export const routes = {
     Component: lazyNamed(() => import("../features/statistics/Statistics.jsx"), "StatisticsPage"),
     props: () => ({}),
   },
+  "chatgpt-plan-usage": {
+    section: "chatgpt-plan-usage",
+    Component: lazyNamed(
+      () => import("../features/chatgpt-plan-usage/ChatGPTPlanUsagePage.jsx"),
+      "ChatGPTPlanUsagePage",
+    ),
+    props: () => ({}),
+  },
   "run-new": {
     section: "sites",
     Component: lazyNamed(() => import("../features/sites/TestRunForm.jsx"), "TestRunForm"),
@@ -179,44 +178,74 @@ export const routes = {
   "run-detail": {
     section: "sites",
     Component: lazyNamed(() => import("../features/web-runs/TestRunDetail.jsx"), "TestRunDetail"),
-    props: (route) => ({
+    props: (route, preferences) => ({
       key: route.id,
       runId: route.id,
+      showDeepScan: preferences.showDeepScan,
+      showTeamScan: preferences.showTeamScan,
       initialTab: route.tab,
       initialFindingRef: route.findingRef,
+      findingIds: route.findingIds,
+      coverageReturn: route.coverageReturn,
       initialLeadRef: route.leadRef,
+      initialTrafficCoverage: route.trafficCoverage,
     }),
   },
   settings: {
     section: "settings",
     Component: lazyNamed(() => import("../features/settings/SettingsPage.jsx"), "SettingsPage"),
-    props: () => ({}),
+    props: (route) => ({
+      key: `${route.tab || "profiles"}-${route.screen || "list"}-${route.id || ""}-${route.providerId || ""}-${route.modelName || ""}`,
+      section: route.tab || "profiles",
+      screen: route.screen || "list",
+      itemId: route.id,
+      initialProviderId: route.providerId,
+      initialModel: route.modelName,
+    }),
   },
   "scan-policy": {
     section: "scan-policy",
     Component: lazyNamed(() => import("../features/settings/ScanPolicyPage.jsx"), "ScanPolicyPage"),
-    props: () => ({}),
-  },
-  "external-integrations": {
-    section: "external-integrations",
-    Component: lazyNamed(
-      () => import("../features/settings/ExternalIntegrationsPage.jsx"),
-      "ExternalIntegrationsPage",
-    ),
-    props: () => ({}),
-  },
-  debug: {
-    section: "debug",
-    Component: lazyNamed(() => import("../features/settings/DebugPage.jsx"), "DebugPage"),
-    props: (_route, preferences) => ({
+    props: (route, preferences) => ({
+      key: `${route.tab || "global"}/${route.subTab || ""}`,
+      initialTab: route.tab || "global",
+      initialSubTab: route.subTab,
       showUsername: preferences.showUsername,
       setShowUsername: preferences.setShowUsername,
-      showApplications: preferences.showApplications,
-      setShowApplications: preferences.setShowApplications,
+      showDeepScan: preferences.showDeepScan,
+      setShowDeepScan: preferences.setShowDeepScan,
+      showSystems: preferences.showSystems,
+      setShowSystems: preferences.setShowSystems,
+      showTeamScan: preferences.showTeamScan,
+      setShowTeamScan: preferences.setShowTeamScan,
+      showSastDeepScan: preferences.showSastDeepScan,
+      setShowSastDeepScan: preferences.setShowSastDeepScan,
       username: preferences.username,
       reportingDebugCfg: preferences.reportingDebugCfg,
       setReportingDebugCfg: preferences.setReportingDebugCfg,
     }),
+  },
+  extensions: {
+    section: "extensions",
+    Component: lazyNamed(
+      () => import("../features/extensions/ExtensionsPage.jsx"),
+      "ExtensionsPage",
+    ),
+    props: (_route, preferences) => ({
+      onExtensionUpdated: (extension) => {
+        const cfg = { panel_enabled: extension.enabled && extension.status === "loaded" };
+        if (extension.id === "aespa.benchmarking") preferences.setBenchmarkLabCfg(cfg);
+        if (extension.id === PLAN_USAGE_EXTENSION_ID) preferences.setPlanUsageCfg(cfg);
+      },
+    }),
+  },
+  "extension-settings": {
+    section: "extensions",
+    Component: lazyNamed(
+      () => import("../features/extensions/ExtensionSettingsPage.jsx"),
+      "ExtensionSettingsPage",
+    ),
+    props: (route) => ({ key: route.extensionId, extensionId: route.extensionId }),
   },
   "reporting-debug": {
     section: "reporting-debug",
@@ -225,6 +254,46 @@ export const routes = {
       "ReportingDebugPage",
     ),
     props: () => ({}),
+  },
+  "benchmark-lab": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkLabPage.jsx"),
+      "BenchmarkLabPage",
+    ),
+    props: (route) => ({ initialResultId: route.id }),
+  },
+  "benchmark-scoring-guide": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkScoringGuide.jsx"),
+      "BenchmarkScoringGuide",
+    ),
+    props: () => ({}),
+  },
+  "benchmark-evaluation-new": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkEvaluationForm.jsx"),
+      "BenchmarkEvaluationForm",
+    ),
+    props: () => ({ key: "new" }),
+  },
+  "benchmark-evaluation-detail": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkEvaluationDetail.jsx"),
+      "BenchmarkEvaluationDetail",
+    ),
+    props: (route) => ({ key: route.id, evaluationId: route.id, initialTab: route.tab }),
+  },
+  "benchmark-comparison-detail": {
+    section: "benchmark-lab",
+    Component: lazyNamed(
+      () => import("../features/benchmark-lab/BenchmarkComparisonDetail.jsx"),
+      "BenchmarkComparisonDetail",
+    ),
+    props: (route) => ({ key: route.id, comparisonId: route.id }),
   },
   "alice-popout": {
     section: "alice-popout",

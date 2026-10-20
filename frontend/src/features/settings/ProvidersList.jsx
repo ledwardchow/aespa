@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { PROVIDER_DEFAULT_BASE_URLS, API_FORMAT_LABELS } from "./providerMetadata.js";
 
-export function ProvidersList({ visible, providers, busyId, onEdit, onDeleteProvider }) {
+export function ProvidersList({ visible, providers, models, busyId, onEdit, onDeleteProvider }) {
   const [providerSort, setProviderSort] = useState({ field: "name", dir: "asc" });
   const toggleSort = (setter, field) => {
     setter((s) => ({
@@ -17,6 +17,14 @@ export function ProvidersList({ visible, providers, busyId, onEdit, onDeleteProv
       </span>
     );
   };
+  const configuredModelCounts = useMemo(
+    () =>
+      (models || []).reduce((counts, model) => {
+        counts.set(model.provider_id, (counts.get(model.provider_id) || 0) + 1);
+        return counts;
+      }, new Map()),
+    [models],
+  );
   const sortedProviders = useMemo(() => {
     if (!providers) return [];
     const { field, dir } = providerSort;
@@ -29,12 +37,9 @@ export function ProvidersList({ visible, providers, busyId, onEdit, onDeleteProv
       } else if (field === "base_url_display") {
         valA = a.base_url || PROVIDER_DEFAULT_BASE_URLS[a.api_format] || "";
         valB = b.base_url || PROVIDER_DEFAULT_BASE_URLS[b.api_format] || "";
-      } else if (field === "models_display") {
-        valA = (a.models || []).join(", ");
-        valB = (b.models || []).join(", ");
-      } else if (field === "limits") {
-        valA = (a.max_tpm || 0) * 1000000 + (a.max_rpm || 0);
-        valB = (b.max_tpm || 0) * 1000000 + (b.max_rpm || 0);
+      } else if (field === "configured_model_count") {
+        valA = configuredModelCounts.get(a.id) || 0;
+        valB = configuredModelCounts.get(b.id) || 0;
       }
       if (valA == null) valA = "";
       if (valB == null) valB = "";
@@ -47,7 +52,7 @@ export function ProvidersList({ visible, providers, busyId, onEdit, onDeleteProv
             });
       return dir === "asc" ? cmp : -cmp;
     });
-  }, [providers, providerSort]);
+  }, [providers, configuredModelCounts, providerSort]);
   if (!visible) return null;
   return (
     <div className="settings-list settings-list-providers">
@@ -61,11 +66,11 @@ export function ProvidersList({ visible, providers, busyId, onEdit, onDeleteProv
         <div className="sortable" onClick={() => toggleSort(setProviderSort, "base_url_display")}>
           Base URL {sortArrow(providerSort, "base_url_display")}
         </div>
-        <div className="sortable" onClick={() => toggleSort(setProviderSort, "models_display")}>
-          Models {sortArrow(providerSort, "models_display")}
-        </div>
-        <div className="sortable" onClick={() => toggleSort(setProviderSort, "limits")}>
-          Limits {sortArrow(providerSort, "limits")}
+        <div
+          className="sortable"
+          onClick={() => toggleSort(setProviderSort, "configured_model_count")}
+        >
+          Configured models {sortArrow(providerSort, "configured_model_count")}
         </div>
         <div></div>
       </div>
@@ -73,45 +78,36 @@ export function ProvidersList({ visible, providers, busyId, onEdit, onDeleteProv
         <div className="settings-list-row" key={p.id}>
           <div>
             <strong>{p.name}</strong>
+            {p.extension_id && (
+              <span className="settings-extension-label" title={`Stored in ${p.extension_name}`}>
+                Extension storage
+              </span>
+            )}
           </div>
           <div>{API_FORMAT_LABELS[p.api_format] || p.api_format}</div>
           <div className="mono">
             {p.base_url || PROVIDER_DEFAULT_BASE_URLS[p.api_format] || "(must be set)"}
           </div>
-          <div className="mono">{(p.models || []).join(", ")}</div>
-          <div>
-            {p.max_tpm || p.max_rpm ? (
-              <>
-                {p.max_tpm ? <div>{Number(p.max_tpm).toLocaleString()} TPM</div> : ""}
-                {p.max_rpm ? (
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: "var(--muted)",
-                      marginTop: 1,
-                    }}
-                  >
-                    {Number(p.max_rpm).toLocaleString()} RPM
-                  </div>
-                ) : (
-                  ""
-                )}
-              </>
-            ) : (
-              <span className="subtle">Unlimited</span>
-            )}
-          </div>
+          <div>{configuredModelCounts.get(p.id) || 0}</div>
           <div className="row settings-list-actions">
-            <button className="btn sm" disabled={busyId === p.id} onClick={() => onEdit(p)}>
-              Edit
-            </button>
-            <button
-              className="btn danger-outline sm"
-              disabled={busyId === p.id}
-              onClick={() => onDeleteProvider(p)}
-            >
-              Delete
-            </button>
+            {p.extension_id ? (
+              <span className="subtle" title="Manage this provider in its extension">
+                Managed by extension
+              </span>
+            ) : (
+              <>
+                <button className="btn sm" disabled={busyId === p.id} onClick={() => onEdit(p)}>
+                  Edit
+                </button>
+                <button
+                  className="btn danger-outline sm"
+                  disabled={busyId === p.id}
+                  onClick={() => onDeleteProvider(p)}
+                >
+                  Delete
+                </button>
+              </>
+            )}
           </div>
         </div>
       ))}

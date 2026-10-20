@@ -21,11 +21,11 @@ export function FindingReferenceLink({
   finding_source,
   origin,
   validated_by,
-  runReference,
+  runReference = undefined,
   href,
   className = "",
   kind = "Finding",
-  onClick,
+  onClick = undefined,
 }) {
   const [active, setActive] = useState(false);
   const ref = reference || "—";

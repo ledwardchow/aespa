@@ -6,13 +6,19 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from aespa.models import (
+    ApiTestRun,
+    AssessmentCampaign,
     LLMConfig,
+    LLMProfile,
     LLMProviderConfig,
+    SastRun,
+    TestRun,
 )
 from aespa.schemas import (
     LLMProviderConfigIn,
     LLMProviderConfigOut,
 )
+from aespa.services.model_capabilities import documented_model_capability
 from aespa.services.settings_values import (
     CONTEXT_WINDOW_FALLBACK,
     _json_dumps,
@@ -28,7 +34,20 @@ def _provider_models(provider: LLMProviderConfig) -> list[str]:
 
 def _provider_capabilities(provider: LLMProviderConfig) -> dict[str, dict]:
     value = _json_loads(getattr(provider, "model_capabilities_json", "{}"), {})
-    return value if isinstance(value, dict) else {}
+    capabilities = value if isinstance(value, dict) else {}
+    if provider.api_format != "openai_chatgpt_plan":
+        return capabilities
+    return {
+        model: {
+            **(
+                capabilities.get(model)
+                if isinstance(capabilities.get(model), dict)
+                else {}
+            ),
+            **(documented_model_capability(provider.api_format, model) or {}),
+        }
+        for model in _provider_models(provider)
+    }
 
 
 def _context_window_from_capability(value: object) -> int | None:
@@ -78,12 +97,12 @@ def _provider_out(provider: LLMProviderConfig) -> LLMProviderConfigOut:
         base_url=provider.base_url,
         username=provider.username,
         project_id=provider.project_id,
+        aws_profile=provider.aws_profile,
+        location=provider.location,
         models=_provider_models(provider),
         model_capabilities=_provider_capabilities(provider),
         has_api_key=bool(provider.api_key and provider.api_key.strip()),
         api_key=None,
-        max_tpm=provider.max_tpm,
-        max_rpm=provider.max_rpm,
         updated_at=provider.updated_at,
     )
 
@@ -136,42 +155,251 @@ def _apply_llm_provider(
     session: Session, provider: LLMProviderConfig, payload: LLMProviderConfigIn
 ) -> LLMProviderConfigOut:
     _ensure_unique_llm_provider_name(session, payload.name, provider.id)
+    _reconcile_provider_model_configs(session, provider, payload.models)
     provider.name = payload.name
     provider.api_format = payload.api_format
-    if payload.api_format in {"factory_droid", "openai_codex"}:
+    if payload.api_format in {
+        "claude_cli",
+        "factory_droid",
+        "openai_codex",
+        "openai_chatgpt_plan",
+        "google_vertex",
+    }:
         provider.api_key = None
     elif payload.api_key is not None:
         key_str = payload.api_key.strip()
         provider.api_key = key_str if key_str else None
     provider.base_url = (
         None
-        if payload.api_format in {"factory_droid", "openai_codex"}
+        if payload.api_format
+        in {
+            "claude_cli",
+            "factory_droid",
+            "openai_codex",
+            "openai_chatgpt_plan",
+            "google_vertex",
+        }
         else payload.base_url
     )
     username = (payload.username or "").strip()
     provider.username = (
-        username or None if payload.api_format == "github_copilot" else None
+        username or None
+        if payload.api_format in {"github_copilot", "openai_chatgpt_plan"}
+        else None
     )
     provider.project_id = (
         None
-        if payload.api_format in {"factory_droid", "openai_codex"}
+        if payload.api_format
+        in {"claude_cli", "factory_droid", "openai_codex", "openai_chatgpt_plan"}
         else payload.project_id
+    )
+    provider.aws_profile = (
+        (payload.aws_profile or "").strip() or None
+        if payload.api_format in {"bedrock", "bedrock_mantle"}
+        else None
+    )
+    provider.location = (
+        payload.location if payload.api_format == "google_vertex" else None
     )
     provider.models_json = _json_dumps(payload.models)
     provider.model_capabilities_json = _json_dumps(
         {
-            model: payload.model_capabilities.get(model, {})
+            model: {
+                **(payload.model_capabilities.get(model) or {}),
+                **(documented_model_capability(payload.api_format, model) or {}),
+            }
             for model in payload.models
             if model in payload.model_capabilities
+            or documented_model_capability(payload.api_format, model)
         }
     )
-    provider.max_tpm = payload.max_tpm
-    provider.max_rpm = payload.max_rpm
     provider.updated_at = _utcnow()
     session.add(provider)
+    session.flush()
+
+    if provider.api_format == "openai_chatgpt_plan":
+        _sync_chatgpt_plan_models(session, provider)
+    else:
+        # Automatic model settings follow refreshed provider metadata.
+        for cfg in session.exec(
+            select(LLMConfig).where(LLMConfig.provider_id == provider.id)
+        ).all():
+            if cfg.context_limit_source == "manual":
+                continue
+            detected, source = detect_context_window(provider, cfg.model)
+            if source != "fallback":
+                cfg.max_context_tokens = detected
+                cfg.context_limit_source = source
+                cfg.updated_at = _utcnow()
+                session.add(cfg)
     session.commit()
     session.refresh(provider)
     return _provider_out(provider)
+
+
+def _sync_chatgpt_plan_models(
+    session: Session,
+    provider: LLMProviderConfig,
+    configured_models: list[LLMConfig] | None = None,
+) -> bool:
+    """Fill known model defaults and create scan models for a ChatGPT account."""
+    if configured_models is None:
+        configured_models = session.exec(
+            select(LLMConfig).where(LLMConfig.provider_id == provider.id)
+        ).all()
+    capabilities = _provider_capabilities(provider)
+    changed = False
+    existing = {cfg.model for cfg in configured_models}
+    for cfg in configured_models:
+        capability = capabilities.get(cfg.model, {})
+        updated = False
+        if cfg.context_limit_source != "manual":
+            context, source = detect_context_window(provider, cfg.model)
+            if source != "fallback" and (
+                cfg.max_context_tokens != context or cfg.context_limit_source != source
+            ):
+                cfg.max_context_tokens = context
+                cfg.context_limit_source = source
+                updated = True
+        if cfg.username != provider.username:
+            cfg.username = provider.username
+            updated = True
+        output_limit = capability.get("max_output_tokens")
+        legacy_output_budget = cfg.max_tokens == 16384
+        if (
+            legacy_output_budget
+            and isinstance(output_limit, int)
+            and cfg.max_context_tokens > output_limit + 1024
+        ):
+            cfg.max_tokens = output_limit
+            updated = True
+        preferred_effort = capability.get("default_effort")
+        if preferred_effort and (
+            cfg.reasoning_effort is None
+            or (
+                legacy_output_budget
+                and cfg.model.endswith("-luna")
+                and cfg.reasoning_effort == "medium"
+            )
+        ):
+            cfg.reasoning_effort = preferred_effort
+            updated = True
+        if updated:
+            cfg.updated_at = _utcnow()
+            session.add(cfg)
+            changed = True
+    for model in _provider_models(provider):
+        if model in existing:
+            continue
+        capability = capabilities.get(model, {})
+        context, source = detect_context_window(provider, model)
+        session.add(
+            LLMConfig(
+                name=f"{provider.name}/{model}",
+                provider_id=provider.id,
+                provider=provider.api_format,
+                username=provider.username,
+                model=model,
+                max_tokens=capability.get("max_output_tokens", 16384),
+                max_context_tokens=context,
+                context_limit_source=source,
+                reasoning_effort=capability.get("default_effort"),
+            )
+        )
+        existing.add(model)
+        changed = True
+    return changed
+
+
+def repair_chatgpt_plan_models(session: Session) -> None:
+    """Bring saved ChatGPT models up to date when the app starts."""
+    changed = False
+    providers = session.exec(
+        select(LLMProviderConfig).where(
+            LLMProviderConfig.api_format == "openai_chatgpt_plan"
+        )
+    ).all()
+    for provider in providers:
+        capabilities = _provider_capabilities(provider)
+        if capabilities != _json_loads(provider.model_capabilities_json, {}):
+            provider.model_capabilities_json = _json_dumps(capabilities)
+            session.add(provider)
+            changed = True
+        changed = _sync_chatgpt_plan_models(session, provider) or changed
+    if changed:
+        session.commit()
+
+
+def _reconcile_provider_model_configs(
+    session: Session, provider: LLMProviderConfig, requested_models: list[str]
+) -> None:
+    if provider.id is None:
+        return
+    requested = set(requested_models)
+    removed_configs = [
+        config
+        for config in session.exec(
+            select(LLMConfig).where(LLMConfig.provider_id == provider.id)
+        ).all()
+        if config.model not in requested
+    ]
+    if not removed_configs:
+        return
+
+    profiles = session.exec(select(LLMProfile)).all()
+    blocked: list[tuple[LLMConfig, list[str]]] = []
+    for config in removed_configs:
+        profile_names = []
+        for profile in profiles:
+            role_models = _json_loads(profile.role_models_json, {})
+            if profile.default_model_id == config.id or any(
+                str(model_id) == str(config.id) for model_id in role_models.values()
+            ):
+                profile_names.append(profile.name)
+        if profile_names:
+            blocked.append((config, sorted(set(profile_names), key=str.casefold)))
+
+    if blocked:
+        details = "; ".join(
+            f'"{config.model}" is used by {", ".join(profile_names)}'
+            for config, profile_names in blocked
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot remove provider model names because {details}. "
+                "Update those scan profiles first."
+            ),
+        )
+
+    removed_ids = {config.id for config in removed_configs if config.id is not None}
+    if any(config.is_active for config in removed_configs):
+        replacement = next(
+            (
+                config
+                for config in session.exec(
+                    select(LLMConfig).order_by(
+                        LLMConfig.is_active.desc(), LLMConfig.updated_at.desc()
+                    )
+                ).all()
+                if config.id not in removed_ids
+            ),
+            None,
+        )
+        if replacement is not None:
+            replacement.is_active = True
+            session.add(replacement)
+
+    for config in removed_configs:
+        if config.id is None:
+            continue
+        for run_type in (TestRun, ApiTestRun, SastRun, AssessmentCampaign):
+            for run in session.exec(
+                select(run_type).where(run_type.llm_config_id == config.id)
+            ).all():
+                run.llm_config_id = None
+                session.add(run)
+        session.delete(config)
 
 
 def _ensure_unique_llm_provider_name(

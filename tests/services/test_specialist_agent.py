@@ -48,49 +48,22 @@ class _SpecialistConfig:
 # ---------------------------------------------------------------------------
 
 
-def test_should_dispatch_returns_false_when_disabled():
-    cfg = _SpecialistConfig(enabled=False)
-    assert _should_dispatch_specialist("idor", 10, cfg) is False
-
-
-def test_should_dispatch_returns_false_when_class_disabled():
-    cfg = _SpecialistConfig(dispatch_idor=False)
-    assert _should_dispatch_specialist("idor", 10, cfg) is False
-
-
-def test_should_dispatch_returns_false_for_cors_when_disabled_by_default():
-    cfg = _SpecialistConfig()  # dispatch_cors defaults to False
-    assert _should_dispatch_specialist("cors", 10, cfg) is False
-
-
-def test_should_dispatch_returns_false_priority_too_low():
-    cfg = _SpecialistConfig(min_priority=7)
-    assert _should_dispatch_specialist("idor", 5, cfg) is False
-
-
-def test_should_dispatch_returns_false_priority_equal_to_min():
-    cfg = _SpecialistConfig(min_priority=7)
-    # priority == min_priority should be allowed (>=)
-    assert _should_dispatch_specialist("idor", 7, cfg) is True
-
-
-def test_should_dispatch_returns_true_for_enabled_class():
-    cfg = _SpecialistConfig()
-    assert _should_dispatch_specialist("xss", 8, cfg) is True
-
-
-def test_should_dispatch_returns_false_unknown_class():
-    cfg = _SpecialistConfig()
-    assert _should_dispatch_specialist("not_a_class", 10, cfg) is False
-
-
-def test_should_dispatch_returns_false_when_max_concurrent_zero():
-    cfg = _SpecialistConfig(max_concurrent=0)
-    assert _should_dispatch_specialist("idor", 10, cfg) is False
-
-
-def test_should_dispatch_returns_false_none_config():
-    assert _should_dispatch_specialist("idor", 10, None) is False
+def test_should_dispatch_checks_config_class_and_priority():
+    cases = [
+        ("disabled", "idor", 10, _SpecialistConfig(enabled=False), False),
+        ("class disabled", "idor", 10, _SpecialistConfig(dispatch_idor=False), False),
+        ("default CORS", "cors", 10, _SpecialistConfig(), False),
+        ("low priority", "idor", 5, _SpecialistConfig(min_priority=7), False),
+        ("priority boundary", "idor", 7, _SpecialistConfig(min_priority=7), True),
+        ("enabled class", "xss", 8, _SpecialistConfig(), True),
+        ("unknown class", "not_a_class", 10, _SpecialistConfig(), False),
+        ("zero capacity", "idor", 10, _SpecialistConfig(max_concurrent=0), False),
+        ("missing config", "idor", 10, None, False),
+    ]
+    for label, attack_class, priority, config, expected in cases:
+        assert (
+            _should_dispatch_specialist(attack_class, priority, config) is expected
+        ), label
 
 
 # ---------------------------------------------------------------------------
@@ -98,29 +71,16 @@ def test_should_dispatch_returns_false_none_config():
 # ---------------------------------------------------------------------------
 
 
-def test_at_capacity_false_when_none_running(tmp_path):
+def test_at_capacity_handles_empty_below_and_at_limit():
     run_id = 99991
     _specialist_running.pop(run_id, None)
     cfg = _SpecialistConfig(max_concurrent=5)
-    assert _specialist_at_capacity(run_id, cfg) is False
-
-
-def test_at_capacity_true_when_at_limit():
-    run_id = 99992
-    cfg = _SpecialistConfig(max_concurrent=2)
-    _specialist_running[run_id] = 2
-    try:
-        assert _specialist_at_capacity(run_id, cfg) is True
-    finally:
-        _specialist_running.pop(run_id, None)
-
-
-def test_at_capacity_false_below_limit():
-    run_id = 99993
-    cfg = _SpecialistConfig(max_concurrent=5)
-    _specialist_running[run_id] = 3
     try:
         assert _specialist_at_capacity(run_id, cfg) is False
+        _specialist_running[run_id] = 3
+        assert _specialist_at_capacity(run_id, cfg) is False
+        _specialist_running[run_id] = 5
+        assert _specialist_at_capacity(run_id, cfg) is True
     finally:
         _specialist_running.pop(run_id, None)
 
@@ -133,19 +93,14 @@ def test_at_capacity_false_below_limit():
 def test_next_specialist_agent_id_increments():
     run_id = 99994
     _specialist_seq.pop(run_id, None)
-    id1 = _next_specialist_agent_id(run_id, "idor")
-    id2 = _next_specialist_agent_id(run_id, "xss")
-    assert id1 == "specialist-idor-1"
-    assert id2 == "specialist-xss-2"
-    _specialist_seq.pop(run_id, None)
-
-
-def test_next_specialist_agent_id_format():
-    run_id = 99995
-    _specialist_seq.pop(run_id, None)
-    agent_id = _next_specialist_agent_id(run_id, "auth_bypass")
-    assert agent_id == "specialist-auth_bypass-1"
-    _specialist_seq.pop(run_id, None)
+    try:
+        assert (
+            _next_specialist_agent_id(run_id, "auth_bypass")
+            == "specialist-auth_bypass-1"
+        )
+        assert _next_specialist_agent_id(run_id, "xss") == "specialist-xss-2"
+    finally:
+        _specialist_seq.pop(run_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -219,16 +174,10 @@ def test_specialist_config_api_put_persists(client):
     assert resp2.json()["max_concurrent"] == 3
 
 
-def test_specialist_config_api_put_validates_max_concurrent(client):
-    payload = {"max_concurrent": 25}  # above max of 20
-    resp = client.put("/api/settings/specialist-agent-config", json=payload)
-    assert resp.status_code == 422
-
-
-def test_specialist_config_api_put_validates_min_priority(client):
-    payload = {"min_priority": 0}  # below min of 1
-    resp = client.put("/api/settings/specialist-agent-config", json=payload)
-    assert resp.status_code == 422
+def test_specialist_config_api_rejects_invalid_limits(client):
+    for payload in ({"max_concurrent": 25}, {"min_priority": 0}):
+        resp = client.put("/api/settings/specialist-agent-config", json=payload)
+        assert resp.status_code == 422, payload
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +292,7 @@ def test_automatic_candidate_requires_database_error_for_sqli():
 def test_handoff_reserves_scope_and_delivers_completion(isolated_db_engine):
     from sqlmodel import Session
 
-    from aespa.models import RunIdentity
+    from aespa.models import CrawledPage, RunIdentity
     from aespa.services.specialist_handoffs import (
         consume_feedback,
         create_or_get_handoff,
@@ -357,12 +306,22 @@ def test_handoff_reserves_scope_and_delivers_completion(isolated_db_engine):
         session.commit()
         session.refresh(identity)
         run_id = identity.id
+        page = CrawledPage(
+            test_run_id=run_id,
+            url="https://target.test/search",
+            status="crawled",
+            in_scope=True,
+        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
 
     handoff, created = create_or_get_handoff(
         run_id=run_id,
         run_kind="web",
         attack_class="SQL Injection",
         target_url="https://target.test/search?q=one",
+        page_id=page.id,
         parameter="q",
         session_label=None,
         priority=8,
@@ -372,6 +331,16 @@ def test_handoff_reserves_scope_and_delivers_completion(isolated_db_engine):
     )
 
     assert created is True
+    assert handoff.page_id == page.id
+    same_scope = find_active_conflict(
+        run_id,
+        run_kind="web",
+        attack_class="sqli",
+        target_url="https://target.test/search?q=one",
+        parameter="q",
+    )
+    assert same_scope is not None
+    assert same_scope.id == handoff.id
     assert (
         find_active_conflict(
             run_id,
@@ -379,8 +348,8 @@ def test_handoff_reserves_scope_and_delivers_completion(isolated_db_engine):
             attack_class="sqli",
             target_url="https://target.test/search?q=two",
             parameter="q",
-        ).id
-        == handoff.id
+        )
+        is None
     )
 
     update_handoff(handoff.id, status="completed", outcome="No SQL injection found")
@@ -425,6 +394,67 @@ def test_missing_priority_uses_configured_default_and_queues(isolated_db_engine)
         )
         assert decision["status"] == "queued"
         assert len(_specialist_pending[run_id]) == 1
+    finally:
+        _specialist_running.pop(run_id, None)
+        _specialist_pending.pop(run_id, None)
+
+
+def test_specialist_dispatch_keeps_query_variant_separate_from_crawled_page(
+    isolated_db_engine,
+):
+    from sqlmodel import Session
+
+    from aespa.models import CrawledPage, RunIdentity, SpecialistHandoff
+    from aespa.services.scanner import (
+        _schedule_specialist_agent,
+        _specialist_pending,
+    )
+
+    with Session(isolated_db_engine) as session:
+        identity = RunIdentity(kind="web")
+        session.add(identity)
+        session.commit()
+        session.refresh(identity)
+        page = CrawledPage(
+            test_run_id=identity.id,
+            url="https://target.test/search?q=baseline",
+            status="crawled",
+            in_scope=True,
+        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+        run_id = identity.id
+        page_id = page.id
+
+    config = _SpecialistConfig(max_concurrent=1)
+    _specialist_running[run_id] = 1
+    try:
+        decision = _schedule_specialist_agent(
+            run_id=run_id,
+            dispatch={
+                "attack_class": "sqli",
+                "target_url": "https://target.test/search?q=%27",
+                "rationale": "Database error",
+                "priority": 9,
+            },
+            session_vault={},
+            llm_cfg=None,
+            base_url="https://target.test",
+            scanner_policy=None,
+            specialist_config=config,
+            site_id=1,
+        )
+
+        assert decision["status"] == "queued"
+        assert _specialist_pending[run_id][0]["target_page_id"] is None
+        with Session(isolated_db_engine) as session:
+            handoff = session.get(SpecialistHandoff, decision["handoff_id"])
+            assert handoff.page_id is None
+            assert handoff.target_url == "https://target.test/search?q=%27"
+            assert session.get(CrawledPage, page_id).url == (
+                "https://target.test/search?q=baseline"
+            )
     finally:
         _specialist_running.pop(run_id, None)
         _specialist_pending.pop(run_id, None)

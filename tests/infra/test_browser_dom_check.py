@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from aespa.services.scanner import _run_thinking_browser_action
 
 
 class _Locator:
-    def __init__(
-        self, *, count: int = 1, text: str = "", attributes=None, dom=None
-    ):
+    def __init__(self, *, count: int = 1, text: str = "", attributes=None, dom=None):
         self._count = count
         self._text = text
         self._attributes = attributes or {}
@@ -239,44 +239,38 @@ class _Policy:
         self.request_timeout_s = 10.0
 
 
-def test_missing_locator_is_a_hard_failure_by_default():
+@pytest.mark.parametrize(
+    ("op", "policy", "expected"),
+    [
+        pytest.param(
+            "click",
+            None,
+            "click failed: missing locator (requires selector, testid, or role+name)",
+            id="strict_by_default",
+        ),
+        pytest.param(
+            "fill",
+            _Policy(strict_locator_enforcement=True),
+            "fill failed: missing locator (requires selector, testid, or role+name)",
+            id="strict_policy",
+        ),
+        pytest.param(
+            "click",
+            _Policy(strict_locator_enforcement=False),
+            "click skipped: missing locator",
+            id="strict_mode_disabled",
+        ),
+    ],
+)
+def test_missing_locator_handling(op, policy, expected):
+    kwargs = {} if policy is None else {"scanner_policy": policy}
     result = asyncio.run(
         _run_thinking_browser_action(
             _Page(),
-            {"steps": [{"op": "click", "value": "no locator hint given"}]},
+            {"steps": [{"op": op, "value": "no locator hint given"}]},
             "https://target.local",
+            **kwargs,
         )
     )
 
-    assert result["action_log"] == [
-        "click failed: missing locator (requires selector, testid, or role+name)"
-    ]
-    assert "failed:" in result["action_log"][0]
-
-
-def test_missing_locator_is_a_hard_failure_for_fill_with_explicit_strict_policy():
-    result = asyncio.run(
-        _run_thinking_browser_action(
-            _Page(),
-            {"steps": [{"op": "fill", "value": "hello"}]},
-            "https://target.local",
-            scanner_policy=_Policy(strict_locator_enforcement=True),
-        )
-    )
-
-    assert result["action_log"] == [
-        "fill failed: missing locator (requires selector, testid, or role+name)"
-    ]
-
-
-def test_missing_locator_falls_back_to_skip_when_strict_mode_disabled():
-    result = asyncio.run(
-        _run_thinking_browser_action(
-            _Page(),
-            {"steps": [{"op": "click", "value": "no locator hint given"}]},
-            "https://target.local",
-            scanner_policy=_Policy(strict_locator_enforcement=False),
-        )
-    )
-
-    assert result["action_log"] == ["click skipped: missing locator"]
+    assert result["action_log"] == [expected]

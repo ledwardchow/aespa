@@ -103,10 +103,11 @@ export function TrafficTable({
           {header("Time", "created_at", 1, "tr-ts")}
           {header("Source", "source", 2)}
           {header("User", "username", 3)}
-          {header("Method", "method", 4)}
-          {header("Status", "status", 5)}
-          {header("URL", "url", 6)}
-          {header("Duration", "duration_ms", 7, "tr-dur")}
+          {header("Purpose", "purpose", 4, "tr-purpose")}
+          {header("Method", "method", 5)}
+          {header("Status", "status", 6)}
+          {header("URL", "url", 7)}
+          {header("Duration", "duration_ms", 8, "tr-dur")}
         </tr>
       </thead>
       <tbody>
@@ -122,6 +123,9 @@ export function TrafficTable({
               <span className={"src-badge src-" + entry.source}>{entry.source}</span>
             </td>
             <td className="tr-user">{entry.username || "-"}</td>
+            <td className="tr-purpose" title={entry.purpose || ""}>
+              {entry.purpose || "-"}
+            </td>
             <td className="tr-method">{entry.method}</td>
             <td>
               <span className={"status-pill " + statusClass(entry.status)}>
@@ -245,11 +249,12 @@ export function TrafficDetail({ entry, onClose }) {
     : null;
   return (
     <div className="traffic-detail-wrap" ref={detailWrapRef} style={detailHeight}>
-      {executionLabel && (
+      {(entry.purpose || executionLabel || entry.owasp_category) && (
         <div className="traffic-provenance">
-          {executionLabel}
-          {entry.owasp_category ? ` · ${entry.owasp_category}` : ""}
-          {entry.test_class ? ` · ${entry.test_class}` : ""}
+          {entry.purpose ? <strong>Purpose: {entry.purpose}</strong> : "Purpose: Unspecified"}
+          {executionLabel ? ` · ${executionLabel}` : ""}
+          {!entry.purpose && entry.owasp_category ? ` · ${entry.owasp_category}` : ""}
+          {!entry.purpose && entry.test_class ? ` · ${entry.test_class}` : ""}
         </div>
       )}
       <div

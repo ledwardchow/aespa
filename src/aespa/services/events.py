@@ -8,9 +8,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import functools
 import json
 import logging
-from typing import AsyncGenerator, Iterator
+from typing import AsyncGenerator, Callable, Iterator
 
 agent_activity_log = logging.getLogger("aespa.agent.activity")
 # This feed is enabled by the interactive console. Keep ordinary server logging
@@ -37,6 +38,9 @@ _queues: dict[tuple[str, int], list[asyncio.Queue]] = {}
 _run_kind_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "aespa_run_kind", default=None
 )
+_agent_ctx: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "aespa_activity_agent", default=None
+)
 
 
 @contextlib.contextmanager
@@ -49,6 +53,26 @@ def run_kind_scope(kind: str) -> Iterator[None]:
         yield
     finally:
         _run_kind_ctx.reset(token)
+
+
+@contextlib.contextmanager
+def agent_scope(agent_id: str, role: str) -> Iterator[None]:
+    token = _agent_ctx.set((agent_id, role))
+    try:
+        yield
+    finally:
+        _agent_ctx.reset(token)
+
+
+def scoped_agent(fn: Callable) -> Callable:
+    """Run a SAST worker with its identity attached to phase events."""
+
+    @functools.wraps(fn)
+    async def wrapped(*args, agent_id: str, role: str, **kwargs):
+        with agent_scope(agent_id, role):
+            return await fn(*args, **kwargs)
+
+    return wrapped
 
 
 def _run_kind_for(run_id: int, event: dict) -> str:
@@ -65,11 +89,23 @@ def emit(run_id: int, event: dict) -> None:
     activity log survives page navigation.
     """
     run_kind = _run_kind_for(run_id, event)
-    for q in _queues.get((run_kind, run_id), []):
-        try:
-            q.put_nowait(event)
-        except asyncio.QueueFull:
-            pass  # slow client — drop the event rather than block
+    if run_kind == "sast" and event.get("type") == "scanner_phase":
+        agent_id, role = _agent_ctx.get() or ("system", "System")
+        event = {
+            **event,
+            "agent_id": event.get("agent_id") or agent_id,
+            "role": event.get("role") or role,
+        }
+    if not event.get("_persist_only"):
+        for q in _queues.get((run_kind, run_id), []):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass  # slow client — drop the event rather than block
+
+    from aespa.services import run_lifecycle
+
+    run_lifecycle.publish(run_id, run_kind, str(event.get("type") or ""))
 
     if event.get("type") == "scanner_phase":
         _persist_phase_event(run_id, event)
@@ -109,6 +145,15 @@ def _persist_phase_event(run_id: int, event: dict) -> None:
         from aespa.models import ScanLog
 
         data = event.get("data")
+        if _run_kind_for(run_id, event) == "sast":
+            agent = {
+                "agent_id": event.get("agent_id"),
+                "role": event.get("role"),
+            }
+            if isinstance(data, dict):
+                data = {**data, "_activity_agent": agent}
+            else:
+                data = {"_event_data": data, "_activity_agent": agent}
         entry = ScanLog(
             test_run_id=run_id,
             run_kind=_run_kind_for(run_id, event),

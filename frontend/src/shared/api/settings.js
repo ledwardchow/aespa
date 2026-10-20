@@ -31,6 +31,8 @@ export const deleteLLMProfile = (id) =>
 
 export const listLLMProviders = () => req("/api/settings/llm/providers");
 
+export const listExtensionLLMCatalog = () => req("/api/settings/llm/extension-catalog");
+
 export const createLLMProvider = (b) =>
   req("/api/settings/llm/providers", { method: "POST", body: b });
 
@@ -64,6 +66,23 @@ export const cancelCodexLogin = (b) =>
 
 export const logoutCodex = () => req("/api/settings/llm/codex/logout", { method: "POST" });
 
+export const getChatGPTPlanStatus = () => req("/api/settings/llm/chatgpt-plan/status");
+export const checkChatGPTPlanAccess = (client_id, force = false) =>
+  req("/api/settings/llm/chatgpt-plan/check-access", {
+    method: "POST",
+    body: { client_id, force },
+  });
+export const startChatGPTPlanLogin = (client_id) =>
+  req("/api/settings/llm/chatgpt-plan/login", {
+    method: "POST",
+    body: client_id ? { client_id } : {},
+  });
+export const getChatGPTPlanLogin = (id) => req(`/api/settings/llm/chatgpt-plan/login/${id}`);
+export const selectChatGPTPlanAccount = (client_id) =>
+  req("/api/settings/llm/chatgpt-plan/select", { method: "POST", body: { client_id } });
+export const logoutChatGPTPlan = (client_id) =>
+  req("/api/settings/llm/chatgpt-plan/logout", { method: "POST", body: { client_id } });
+
 export const listCopilotAccounts = () => req("/api/settings/llm/copilot/accounts");
 
 export const startCopilotLogin = () => req("/api/settings/llm/copilot/login", { method: "POST" });
@@ -77,6 +96,16 @@ export const getScannerPolicy = () => req("/api/settings/scanner-policy");
 
 export const upsertScannerPolicy = (b) =>
   req("/api/settings/scanner-policy", { method: "PUT", body: b });
+
+export const setOpenAIRefusalRecovery = (enabled) =>
+  req("/api/settings/scanner-policy/openai-refusal-recovery", {
+    method: "PUT",
+    body: { enabled },
+  });
+
+export const getRetireListStatus = () => req("/api/settings/retire-list");
+
+export const refreshRetireList = () => req("/api/settings/retire-list/refresh", { method: "POST" });
 
 export const getCodeExecutionConfig = () => req("/api/settings/code-execution");
 
@@ -95,14 +124,6 @@ export const getComponentMapperConfig = () => req("/api/settings/component-mappe
 export const upsertComponentMapperConfig = (b) =>
   req("/api/settings/component-mapper-config", { method: "PUT", body: b });
 
-export const getBurpRestApiConfig = () => req("/api/settings/burp-rest-api");
-
-export const upsertBurpRestApiConfig = (b) =>
-  req("/api/settings/burp-rest-api", { method: "PUT", body: b });
-
-export const testBurpConnection = () =>
-  req("/api/settings/burp-rest-api/test-connection", { method: "POST" });
-
 export const getUpstreamProxy = () => req("/api/settings/upstream-proxy");
 
 export const upsertUpstreamProxy = (b) =>
@@ -112,6 +133,11 @@ export const getSpecialistAgentConfig = () => req("/api/settings/specialist-agen
 
 export const upsertSpecialistAgentConfig = (b) =>
   req("/api/settings/specialist-agent-config", { method: "PUT", body: b });
+
+export const getDeepScanConfig = () => req("/api/settings/deep-scan-config");
+
+export const upsertDeepScanConfig = (b) =>
+  req("/api/settings/deep-scan-config", { method: "PUT", body: b });
 
 export const getAdversarialValidatorConfig = () =>
   req("/api/settings/adversarial-validator-config");

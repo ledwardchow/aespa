@@ -324,13 +324,16 @@ class _Broker:
     run_id: int
     execution_id: int
     agent_id: str
+    agent_name: str
     agent_step: int
+    purpose: str
     session_vault: dict[str, dict]
     scanner_policy: Any
     scope_check: Callable[[str], str | None]
     max_requests: int
     max_concurrent: int
     post_probe_fn: Callable | None = None
+    default_owasp_category: str = ""
     attempt_count: int = 0
     request_count: int = 0
     denied_count: int = 0
@@ -446,12 +449,17 @@ class _Broker:
             **headers,
         }
         cookies = (selected or {}).get("cookies") or {}
+        from aespa.services import traffic as traffic_svc
+
         provenance = {
             "code_execution_id": self.execution_id,
             "batch_id": batch_id,
             "batch_index": batch_index,
             "agent_id": self.agent_id,
             "agent_step": self.agent_step,
+            "purpose": traffic_svc.request_purpose(
+                spec, self.purpose, agent_name=self.agent_name
+            ),
             "owasp_category": spec.get("owasp_category"),
             "test_class": spec.get("test_class"),
             "obligation_id": spec.get("obligation_id"),
@@ -470,7 +478,6 @@ class _Broker:
                 headers=merged_headers,
                 timeout=float(getattr(self.scanner_policy, "request_timeout_s", 10)),
                 follow_redirects=False,
-                verify=False,
                 source="python",
                 provenance=provenance,
             ) as client:
@@ -535,18 +542,21 @@ class _Broker:
                     if key.lower()
                     not in {"set-cookie", "authorization", "proxy-authenticate"}
                 }
-                if self.post_probe_fn and spec.get("owasp_category"):
+                probe_category = str(
+                    spec.get("owasp_category") or self.default_owasp_category
+                )
+                if self.post_probe_fn and probe_category:
                     try:
                         self.post_probe_fn(
                             url,
                             method,
-                            str(spec.get("owasp_category")),
+                            probe_category,
                             test_class=str(spec.get("test_class") or "") or None,
                             response_status=response.status_code,
                             page_id=spec.get("page_id"),
                         )
                     except TypeError:
-                        self.post_probe_fn(url, method, str(spec.get("owasp_category")))
+                        self.post_probe_fn(url, method, probe_category)
                 return {
                     "ok": True,
                     "status_code": response.status_code,
@@ -715,6 +725,7 @@ async def execute_agent_python(
     scanner_policy,
     scope_check_fn: Callable[[str], str | None],
     post_probe_fn: Callable | None = None,
+    default_owasp_category: str = "",
     requested_timeout_s: int | None = None,
 ) -> str:
     if not code.strip():
@@ -788,13 +799,18 @@ async def execute_agent_python(
         run_id=run_id,
         execution_id=execution_id,
         agent_id=agent_id,
+        agent_name="ALICE"
+        if agent_role == "alice"
+        else agent_role.replace("_", " ").title(),
         agent_step=agent_step,
+        purpose=purpose,
         session_vault=session_vault,
         scanner_policy=scanner_policy,
         scope_check=scope_check_fn,
         max_requests=config.max_requests_per_execution,
         max_concurrent=config.max_concurrent_requests,
         post_probe_fn=post_probe_fn,
+        default_owasp_category=default_owasp_category,
     )
     config.timeout_s = effective_timeout
     status = "failed"

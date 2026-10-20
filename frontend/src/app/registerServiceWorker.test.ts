@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { registerServiceWorker } from "./registerServiceWorker";
+import { recoverFromPreloadError, registerServiceWorker } from "./registerServiceWorker";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -22,4 +22,33 @@ test("production registers the existing worker after the document loads", () => 
   registerServiceWorker();
   window.dispatchEvent(new Event("load"));
   expect(register).toHaveBeenCalledWith("/sw.js");
+});
+
+test("a failed lazy route reloads once to pick up the current entry script", () => {
+  const storage = new Map<string, string>();
+  const sessionStorage: Storage = {
+    get length() {
+      return storage.size;
+    },
+    clear: () => storage.clear(),
+    getItem: (key) => storage.get(key) ?? null,
+    key: (index) => Array.from(storage.keys())[index] ?? null,
+    removeItem: (key) => {
+      storage.delete(key);
+    },
+    setItem: (key, value) => {
+      storage.set(key, value);
+    },
+  };
+  const reload = vi.fn();
+  const firstEvent = new Event("vite:preloadError", { cancelable: true });
+
+  recoverFromPreloadError(firstEvent, { storage: sessionStorage, reload });
+  recoverFromPreloadError(new Event("vite:preloadError", { cancelable: true }), {
+    storage: sessionStorage,
+    reload,
+  });
+
+  expect(firstEvent.defaultPrevented).toBe(true);
+  expect(reload).toHaveBeenCalledTimes(1);
 });

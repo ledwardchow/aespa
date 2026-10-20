@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel
 
 from aespa.main import create_app
+from tests.auth import authenticate_client
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -58,24 +59,15 @@ def test_create_run_auto_name(client):
     assert data["name"]  # auto-generated
 
 
-def test_create_run_coverage_mode(client):
+@pytest.mark.parametrize("coverage_mode", ["enforce", "standard"])
+def test_create_run_coverage_mode(client, coverage_mode):
     cid = _make_collection(client)
     r = client.post(
         f"/api/api-collections/{cid}/test-runs",
-        json={"name": "Enforce run", "coverage_mode": "enforce"},
+        json={"name": "Coverage run", "coverage_mode": coverage_mode},
     )
     assert r.status_code == 201
-    assert r.json()["coverage_mode"] == "enforce"
-
-
-def test_create_run_standard_coverage_mode(client):
-    cid = _make_collection(client)
-    r = client.post(
-        f"/api/api-collections/{cid}/test-runs",
-        json={"name": "Standard run", "coverage_mode": "standard"},
-    )
-    assert r.status_code == 201
-    assert r.json()["coverage_mode"] == "standard"
+    assert r.json()["coverage_mode"] == coverage_mode
 
 
 def test_validate_api_scanner_sessions_route(client, monkeypatch):
@@ -133,8 +125,17 @@ def test_get_api_scan_run(client):
     assert r.json()["id"] == run["id"]
 
 
-def test_get_run_404(client):
-    r = client.get("/api/api-test-runs/9999")
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/api-test-runs/9999",
+        "/api/api-test-runs/9999/alice/sessions",
+        "/api/api-test-runs/9999/agent-log",
+        "/api/api-test-runs/9999/events",
+    ],
+)
+def test_missing_run_endpoints_return_404(client, path):
+    r = client.get(path)
     assert r.status_code == 404
 
 
@@ -206,6 +207,24 @@ def test_update_api_finding_edits_status_severity_and_text(client):
     assert data["severity"] == "low"
     assert data["title"] == "Edited API finding"
     assert data["owasp_api_category"] == "API5"
+
+
+def test_delete_api_findings_by_title_keeps_other_findings(client):
+    cid = _make_collection(client)
+    run = _make_run(client, cid)
+    _import_finding(client, run["id"], "Leaky finding")
+    _import_finding(client, run["id"], "Other finding")
+
+    r = client.delete(
+        f"/api/api-test-runs/{run['id']}/findings", params={"title": "Leaky finding"}
+    )
+    assert r.status_code == 204
+
+    titles = [
+        f["title"]
+        for f in client.get(f"/api/api-test-runs/{run['id']}/findings").json()
+    ]
+    assert titles == ["Other finding"]
 
 
 def test_update_api_finding_unknown_id_404(client):
@@ -304,11 +323,6 @@ def test_alice_sessions_save_and_reload(client):
     )
 
 
-def test_alice_sessions_404(client):
-    r = client.get("/api/api-test-runs/9999/alice/sessions")
-    assert r.status_code == 404
-
-
 def test_alice_status_endpoint(client):
     cid = _make_collection(client)
     run = _make_run(client, cid)
@@ -327,24 +341,13 @@ def test_agent_log_empty(client):
     assert r.json() == []
 
 
-def test_agent_log_404(client):
-    r = client.get("/api/api-test-runs/9999/agent-log")
-    assert r.status_code == 404
-
-
-def test_agent_log_pagination_returns_newest_page_and_loads_older_rows():
+def test_agent_log_pagination_returns_newest_page_and_loads_older_rows(engine):
     """The status log can page through every row without a huge response."""
     from aespa import db as db_mod
     from aespa import models
     from aespa.db import get_session, set_engine
 
     previous_engine = db_mod._engine
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
     try:
         with Session(engine) as session:
             collection = models.ApiCollection(name="C", base_url="https://example.com")
@@ -380,6 +383,7 @@ def test_agent_log_pagination_returns_newest_page_and_loads_older_rows():
 
         app.dependency_overrides[get_session] = _override_session
         with TestClient(app, raise_server_exceptions=True) as client:
+            authenticate_client(client, app)
             all_rows = client.get(f"/api/api-test-runs/{run_id}/agent-log")
             newest = client.get(f"/api/api-test-runs/{run_id}/agent-log?limit=200")
             older = client.get(
@@ -408,35 +412,19 @@ def test_agent_log_pagination_returns_newest_page_and_loads_older_rows():
         engine.dispose()
 
 
-# ── Events alias (streaming) ───────────────────────────────────────────────────
-
-
-def test_events_endpoint_404(client):
-    r = client.get("/api/api-test-runs/9999/events")
-    assert r.status_code == 404
-
-
 # ── Regression: API and web findings must not cross the shared id space ─────────
 
 
-def test_api_and_web_findings_do_not_cross():
+def test_api_and_web_findings_do_not_cross(engine):
     """Web and API runs use one global id namespace and keep separate findings.
 
     API findings use api_test_run_id with test_run_id left NULL.
     """
-    from sqlalchemy.pool import StaticPool
-    from sqlmodel import Session, SQLModel, create_engine
+    from sqlmodel import Session
 
     from aespa import models
     from aespa.db import get_session
     from aespa.main import create_app
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
 
     with Session(engine) as s:
         site = models.Site(name="S", base_url="https://example.com")
@@ -490,6 +478,7 @@ def test_api_and_web_findings_do_not_cross():
     app.dependency_overrides[get_session] = _override_session
 
     with TestClient(app, raise_server_exceptions=True) as c:
+        authenticate_client(c, app)
         web = c.get(f"/api/test-runs/{web_run_id}/findings")
         api = c.get(f"/api/api-test-runs/{api_run_id}/findings")
         assert web.status_code == 200
@@ -498,9 +487,6 @@ def test_api_and_web_findings_do_not_cross():
         assert [f["title"] for f in api.json()] == ["API FINDING"]
         # The API finding serialises fine even with a NULL test_run_id.
         assert api.json()[0]["test_run_id"] is None
-
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
 
 
 # ── Regression: API log rows must not be mis-tagged when ids collide ─────────────
@@ -556,13 +542,12 @@ def test_run_kind_scope_snapshotted_by_child_task():
     assert captured["kind"] == "api"
 
 
-def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
+def test_api_agent_and_scan_log_tagged_api_despite_sast_collision(engine):
     """End-to-end persistence regression for issue #169.  An API run whose id
     collides with a SAST run must still have its agent_log / scan_log rows written
     with run_kind='api' (driven by run_kind_scope('api')), so the API agent-log
     endpoint returns them."""
-    from sqlalchemy.pool import StaticPool
-    from sqlmodel import Session, SQLModel, create_engine, select
+    from sqlmodel import Session, SQLModel, select
 
     from aespa import db as db_mod
     from aespa import models
@@ -571,12 +556,6 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
     from aespa.services import events as events_svc
 
     prev_engine = db_mod._engine
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
     set_engine(engine)  # events persistence uses get_engine() directly
 
     with Session(engine) as s:
@@ -632,6 +611,7 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
         app = create_app()
         app.dependency_overrides[get_session] = _override_session
         with TestClient(app, raise_server_exceptions=True) as c:
+            authenticate_client(c, app)
             r = c.get(f"/api/api-test-runs/{api_run_id}/agent-log")
             assert r.status_code == 200
             assert [row["current_task"] for row in r.json()] == ["Step 1: GET /api/x"]
@@ -644,21 +624,13 @@ def test_api_agent_and_scan_log_tagged_api_despite_sast_collision():
 # ── ALICE Collision isolation tests ──────────────────────────────────────────
 
 
-def test_alice_sessions_do_not_cross_colliding_ids():
+def test_alice_sessions_do_not_cross_colliding_ids(engine):
     """Verify that ALICE sessions for web and API scans with colliding IDs do not overlap."""
-    from sqlalchemy.pool import StaticPool
-    from sqlmodel import Session, SQLModel, create_engine, select
+    from sqlmodel import Session, select
 
     from aespa import models
     from aespa.db import get_session
     from aespa.main import create_app
-
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
 
     with Session(engine) as s:
         site = models.Site(name="S", base_url="https://example.com")
@@ -690,6 +662,7 @@ def test_alice_sessions_do_not_cross_colliding_ids():
     app.dependency_overrides[get_session] = _override_session
 
     with TestClient(app, raise_server_exceptions=True) as c:
+        authenticate_client(c, app)
         # PUT web scan Alice session
         web_payload = {
             "chats": [
@@ -771,9 +744,6 @@ def test_alice_sessions_do_not_cross_colliding_ids():
         with Session(engine) as s:
             assert s.exec(select(models.AliceChatSession)).all() == []
 
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
-
 
 def test_alice_tasks_do_not_cross_colliding_ids():
     """Verify that background tasks for web and API scans with colliding IDs do not overlap in registry."""
@@ -825,5 +795,5 @@ def test_alice_tasks_do_not_cross_colliding_ids():
         asyncio.run(alice_tasks.stop(1, run_type="api"))
     finally:
         at_mod._run = orig_run
-        alice_tasks._registry.pop(("site", 1), None)
-        alice_tasks._registry.pop(("api", 1), None)
+        alice_tasks._registry.pop(("site", 1, "tab-web"), None)
+        alice_tasks._registry.pop(("api", 1, "tab-api"), None)

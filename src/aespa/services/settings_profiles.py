@@ -19,7 +19,9 @@ from aespa.schemas import (
     LLMProfileOut,
 )
 from aespa.services.model_capabilities import (
+    has_effort_list,
     validate_effort,
+    validate_service_tier,
 )
 from aespa.services.settings_providers import (
     _provider_capabilities,
@@ -56,18 +58,35 @@ def get_llm_profile(session: Session, profile_id: int) -> LLMConfig:
     return cfg
 
 
-def create_llm_profile(session: Session, payload: LLMConfigIn) -> LLMConfig:
+def create_llm_profile(
+    session: Session,
+    payload: LLMConfigIn,
+    discovered_capability: dict | None = None,
+) -> LLMConfig:
     cfg = LLMConfig()
     return _apply_llm_config(
-        session, cfg, payload, activate=(len(list_llm_profiles(session)) == 0)
+        session,
+        cfg,
+        payload,
+        activate=(len(list_llm_profiles(session)) == 0),
+        discovered_capability=discovered_capability,
     )
 
 
 def update_llm_profile(
-    session: Session, profile_id: int, payload: LLMConfigIn
+    session: Session,
+    profile_id: int,
+    payload: LLMConfigIn,
+    discovered_capability: dict | None = None,
 ) -> LLMConfig:
     cfg = get_llm_profile(session, profile_id)
-    return _apply_llm_config(session, cfg, payload, activate=cfg.is_active)
+    return _apply_llm_config(
+        session,
+        cfg,
+        payload,
+        activate=cfg.is_active,
+        discovered_capability=discovered_capability,
+    )
 
 
 def activate_llm_profile(session: Session, profile_id: int) -> LLMConfig:
@@ -127,29 +146,84 @@ def delete_llm_profile(session: Session, profile_id: int) -> None:
 
 
 def list_scan_profiles(session: Session) -> list[LLMProfile]:
+    available = _sync_extension_profiles(session)
     return list(
-        session.exec(select(LLMProfile).order_by(LLMProfile.updated_at.desc())).all()
+        profile
+        for profile in session.exec(
+            select(LLMProfile).order_by(LLMProfile.updated_at.desc())
+        ).all()
+        if profile.extension_ref is None or profile.extension_ref in available
     )
+
+
+def extension_profile_items() -> dict[str, dict]:
+    from aespa.extensions import get_extension_manager
+
+    return {
+        item["id"]: item
+        for item in get_extension_manager().llm_catalog_items()["profiles"]
+    }
+
+
+def _sync_extension_profiles(session: Session) -> dict[str, dict]:
+    """Keep only stable core identity rows; definitions stay in extension storage."""
+    items = extension_profile_items()
+    existing = {
+        profile.extension_ref: profile
+        for profile in session.exec(
+            select(LLMProfile).where(LLMProfile.extension_ref != None)  # noqa: E711
+        ).all()
+    }
+    changed = False
+    for ref, item in items.items():
+        profile = existing.get(ref)
+        if profile is None:
+            profile = LLMProfile(extension_ref=ref, name=item["name"])
+            session.add(profile)
+            changed = True
+        elif profile.name != item["name"]:
+            profile.name = item["name"]
+            profile.updated_at = _utcnow()
+            session.add(profile)
+            changed = True
+    if changed:
+        session.commit()
+    return items
 
 
 def get_scan_profile(session: Session, profile_id: int) -> LLMProfile:
     prof = session.get(LLMProfile, profile_id)
     if prof is None:
         raise HTTPException(status_code=404, detail="Scan profile not found")
+    if prof.extension_ref and prof.extension_ref not in extension_profile_items():
+        raise HTTPException(
+            status_code=409, detail="Extension scan profile is unavailable"
+        )
     return prof
 
 
 def create_scan_profile(session: Session, payload: LLMProfileIn) -> LLMProfile:
     prof = LLMProfile()
     return _apply_scan_profile(
-        session, prof, payload, activate=(len(list_scan_profiles(session)) == 0)
+        session, prof, payload, activate=(get_active_profile_id(session) is None)
     )
+
+
+def get_active_profile_id(session: Session) -> int | None:
+    active = session.exec(
+        select(LLMProfile).where(LLMProfile.is_active == True)  # noqa: E712
+    ).first()
+    return active.id if active else None
 
 
 def update_scan_profile(
     session: Session, profile_id: int, payload: LLMProfileIn
 ) -> LLMProfile:
     prof = get_scan_profile(session, profile_id)
+    if prof.extension_ref:
+        raise HTTPException(
+            status_code=409, detail="Manage this profile in its extension"
+        )
     return _apply_scan_profile(session, prof, payload, activate=prof.is_active)
 
 
@@ -165,6 +239,10 @@ def activate_scan_profile(session: Session, profile_id: int) -> LLMProfile:
 
 def delete_scan_profile(session: Session, profile_id: int) -> None:
     prof = get_scan_profile(session, profile_id)
+    if prof.extension_ref:
+        raise HTTPException(
+            status_code=409, detail="Manage this profile in its extension"
+        )
     was_active = prof.is_active
 
     # A profile can be selected explicitly on any run type (or campaign). The
@@ -180,9 +258,7 @@ def delete_scan_profile(session: Session, profile_id: int) -> None:
     session.delete(prof)
     session.commit()
     if was_active:
-        replacement = session.exec(
-            select(LLMProfile).order_by(LLMProfile.updated_at.desc())
-        ).first()
+        replacement = next(iter(list_scan_profiles(session)), None)
         if replacement is not None:
             activate_scan_profile(session, replacement.id)
 
@@ -232,13 +308,35 @@ def _ensure_unique_scan_profile_name(
 ) -> None:
     normalized = name.strip().casefold()
     for p in session.exec(select(LLMProfile)).all():
-        if p.id != current_id and p.name.strip().casefold() == normalized:
+        if (
+            p.extension_ref is None
+            and p.id != current_id
+            and p.name.strip().casefold() == normalized
+        ):
             raise HTTPException(
                 status_code=409, detail="A profile with that name already exists"
             )
 
 
 def llm_profile_out(session: Session, prof: LLMProfile) -> LLMProfileOut:
+    if prof.extension_ref:
+        item = extension_profile_items().get(prof.extension_ref)
+        if item is None:
+            raise HTTPException(
+                status_code=409, detail="Extension scan profile is unavailable"
+            )
+        return LLMProfileOut(
+            id=prof.id,
+            name=item["name"],
+            is_active=prof.is_active,
+            extension_id=item["extension_id"],
+            extension_name=item["extension_name"],
+            default_model_id=item["default_model_id"],
+            default_model_name=item["default_model_name"],
+            role_models=item["role_models"],
+            role_model_names=item["role_model_names"],
+            updated_at=prof.updated_at,
+        )
     role_models = {
         k: int(v)
         for k, v in _json_loads(prof.role_models_json, {}).items()
@@ -264,8 +362,18 @@ def llm_profile_out(session: Session, prof: LLMProfile) -> LLMProfileOut:
 
 
 def _apply_llm_config(
-    session: Session, cfg: LLMConfig, payload: LLMConfigIn, activate: bool
+    session: Session,
+    cfg: LLMConfig,
+    payload: LLMConfigIn,
+    activate: bool,
+    discovered_capability: dict | None = None,
 ) -> LLMConfig:
+    """Apply a model profile.
+
+    ``discovered_capability`` holds levels found by a live lookup.  It is used
+    only when the provider has no saved levels for the model, matching the
+    levels the model form offered.
+    """
     provider = get_llm_provider(session, payload.provider_id)
     if payload.model not in _provider_models(provider):
         raise HTTPException(
@@ -287,16 +395,50 @@ def _apply_llm_config(
     cfg.base_url = provider.base_url
     cfg.username = provider.username
     cfg.project_id = provider.project_id
+    cfg.aws_profile = provider.aws_profile
+    cfg.location = provider.location
     cfg.model = payload.model
-    cfg.max_tokens = payload.max_tokens
+    cfg.max_tpm = payload.max_tpm
+    cfg.max_rpm = payload.max_rpm
+    capability = _provider_capabilities(provider).get(payload.model)
+    output_budget = payload.max_tokens
+    if provider.api_format == "openai_chatgpt_plan" and isinstance(capability, dict):
+        output_limit = capability.get("max_output_tokens")
+        if isinstance(output_limit, int):
+            if "max_tokens" not in payload.model_fields_set:
+                output_budget = output_limit
+            if output_budget > output_limit:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"The output budget for this model cannot exceed {output_limit} tokens",
+                )
+    cfg.max_tokens = output_budget
     if payload.max_context_tokens is None:
         cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
             provider, payload.model
         )
+        if (
+            cfg.context_limit_source == "fallback"
+            and payload.detected_context_tokens is not None
+        ):
+            cfg.max_context_tokens = payload.detected_context_tokens
+            cfg.context_limit_source = "discovered"
     else:
+        if provider.api_format == "openai_chatgpt_plan" and isinstance(
+            capability, dict
+        ):
+            documented_context = capability.get("context_window_tokens")
+            if (
+                isinstance(documented_context, int)
+                and payload.max_context_tokens > documented_context
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"The context window for this model cannot exceed {documented_context} tokens",
+                )
         cfg.max_context_tokens = payload.max_context_tokens
         cfg.context_limit_source = "manual"
-    if cfg.max_context_tokens <= payload.max_tokens + 1024:
+    if cfg.max_context_tokens <= output_budget + 1024:
         raise HTTPException(
             status_code=422,
             detail="The model context window must leave at least 1024 tokens for input",
@@ -304,12 +446,40 @@ def _apply_llm_config(
     cfg.temperature = payload.temperature
     cfg.use_vision = payload.use_vision
     cfg.force_tool_choice = payload.force_tool_choice
-    capability = _provider_capabilities(provider).get(payload.model)
+    effort = payload.reasoning_effort
+    if (
+        provider.api_format == "openai_chatgpt_plan"
+        and "reasoning_effort" not in payload.model_fields_set
+        and isinstance(capability, dict)
+    ):
+        effort = capability.get("default_effort")
+    effort_capability = capability
+    if not has_effort_list(capability) and discovered_capability is not None:
+        effort_capability = discovered_capability
     try:
-        cfg.reasoning_effort = validate_effort(capability, payload.reasoning_effort)
+        cfg.reasoning_effort = validate_effort(effort_capability, effort)
+        cfg.service_tier = validate_service_tier(
+            provider.api_format, capability, payload.service_tier
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     cfg.updated_at = _utcnow()
+
+    # Limits belong to the provider/model pair. Duplicate saved configurations
+    # share one limiter, so keep their persisted values consistent as well.
+    peer_models = session.exec(
+        select(LLMConfig).where(
+            LLMConfig.provider_id == payload.provider_id,
+            LLMConfig.model == payload.model,
+        )
+    ).all()
+    for peer in peer_models:
+        if peer.id == cfg.id:
+            continue
+        peer.max_tpm = payload.max_tpm
+        peer.max_rpm = payload.max_rpm
+        peer.updated_at = cfg.updated_at
+        session.add(peer)
 
     if cfg.is_active:
         for profile in session.exec(select(LLMConfig)).all():

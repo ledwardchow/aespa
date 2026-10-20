@@ -4,18 +4,19 @@ import json
 
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
 from aespa import models
 from aespa.db import get_session
 from aespa.models import (
-    Application,
     AssessmentCampaign,
+    ScanLog,
     ScannerSession,
+    System,
     TargetIntelItem,
     TestRun,
 )
+from tests.auth import authenticate_client
 
 
 def _make_site(client: TestClient, **kw):
@@ -83,6 +84,68 @@ def test_run_summary_exposes_safe_auth_mode_metadata(client: TestClient):
     assert "totp_seed" not in credentials["code@example.com"]
 
 
+def test_run_summary_reports_when_scan_mode_is_locked(client: TestClient, db_session):
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    db_session.add(
+        ScanLog(
+            test_run_id=run["id"],
+            run_kind="web",
+            phase="scan_started",
+            status="start",
+        )
+    )
+    db_session.commit()
+
+    detail = client.get(f"/api/test-runs/{run['id']}").json()
+
+    assert detail["scan_mode_locked"] is True
+
+
+def test_workflow_notes_acknowledge_attempts_before_latest_scan_start(
+    client: TestClient, db_session
+):
+    site = _make_site(client)
+    run_id = _make_run(client, site["id"]).json()["id"]
+    other_run_id = _make_run(client, site["id"]).json()["id"]
+
+    def add_log(phase: str, run: int = run_id) -> int:
+        log = ScanLog(
+            test_run_id=run,
+            run_kind="web",
+            phase=phase,
+            data_json=json.dumps(
+                {
+                    "note": {
+                        "name": "Checkout",
+                        "status": "needs_input",
+                        "needs_input": True,
+                    }
+                }
+            )
+            if phase == "crawl_note"
+            else None,
+        )
+        db_session.add(log)
+        db_session.flush()
+        return log.id
+
+    before_ids = [add_log("crawl_note") for _ in range(5)]
+    add_log("scan_started", other_run_id)
+    db_session.commit()
+    before_scan = client.get(f"/api/test-runs/{run_id}/crawl/workflows").json()["notes"]
+    assert [note["acknowledged"] for note in before_scan] == [False] * 5
+
+    add_log("scan_started")
+    after_id = add_log("crawl_note")
+    db_session.commit()
+    notes = client.get(f"/api/test-runs/{run_id}/crawl/workflows").json()["notes"]
+
+    assert [note["id"] for note in notes] == [*before_ids, after_id]
+    assert [note["acknowledged"] for note in notes] == [True] * 5 + [False]
+    assert [note["needs_input"] for note in notes] == [True] * 6
+
+
 def test_create_run_defaults_to_500_pages(client: TestClient):
     site = _make_site(client)
     response = client.post(f"/api/sites/{site['id']}/test-runs", json={})
@@ -101,6 +164,38 @@ def test_crawl_status_uses_crawler_task_state(client: TestClient, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"running": True}
+
+
+def test_start_crawl_then_pentest_saves_mode_and_schedules_handoff(
+    client: TestClient, monkeypatch
+):
+    from aespa.services import web_runs_service as test_runs_api
+
+    site = _make_site(client)
+    run = _make_run(client, site["id"]).json()
+    crawl_task = object()
+    scheduled = []
+
+    async def fake_start_crawl(run_id):
+        assert run_id == run["id"]
+        return crawl_task
+
+    monkeypatch.setattr(test_runs_api, "get_llm_config_for_run", lambda *_: object())
+    monkeypatch.setattr(test_runs_api.crawler_svc, "start_crawl", fake_start_crawl)
+    monkeypatch.setattr(
+        test_runs_api.crawl_then_pentest,
+        "schedule",
+        lambda run_id, task: scheduled.append((run_id, task)),
+    )
+
+    response = client.post(
+        f"/api/test-runs/{run['id']}/start",
+        json={"start_pentest_after_crawl": True, "coverage_mode": "standard"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["coverage_mode"] == "standard"
+    assert scheduled == [(run["id"], crawl_task)]
 
 
 def test_create_run_custom_name(client: TestClient):
@@ -150,6 +245,15 @@ def test_create_run_auto_increments(client: TestClient):
     _make_run(client, site["id"])
     r2 = _make_run(client, site["id"])
     assert r2.json()["name"] == "Run #2"
+
+
+def test_auto_name_skips_names_freed_by_deleted_runs(client: TestClient):
+    site = _make_site(client)
+    first = _make_run(client, site["id"]).json()
+    _make_run(client, site["id"])
+    assert client.delete(f"/api/test-runs/{first['id']}").status_code == 204
+
+    assert _make_run(client, site["id"]).json()["name"] == "Run #3"
 
 
 def test_list_runs(client: TestClient):
@@ -260,11 +364,11 @@ def test_list_active_jobs_includes_active_campaign_scan(
     client: TestClient, isolated_db_engine
 ):
     with Session(isolated_db_engine) as session:
-        application = Application(name="Checkout")
-        session.add(application)
+        system = System(name="Checkout")
+        session.add(system)
         session.flush()
         campaign = AssessmentCampaign(
-            application_id=application.id,
+            system_id=system.id,
             name="Release validation",
             status="dast_running",
         )
@@ -273,7 +377,7 @@ def test_list_active_jobs_includes_active_campaign_scan(
         session.refresh(campaign)
 
         campaign_id = campaign.id
-        application_id = application.id
+        system_id = system.id
 
     response = client.get("/api/test-runs/active")
 
@@ -281,8 +385,8 @@ def test_list_active_jobs_includes_active_campaign_scan(
     campaign_jobs = [job for job in response.json() if job["run_type"] == "campaign"]
     assert len(campaign_jobs) == 1
     assert campaign_jobs[0]["run_id"] == campaign_id
-    assert campaign_jobs[0]["application_id"] == application_id
-    assert campaign_jobs[0]["application_name"] == "Checkout"
+    assert campaign_jobs[0]["system_id"] == system_id
+    assert campaign_jobs[0]["system_name"] == "Checkout"
     assert campaign_jobs[0]["job_type"] == "Campaign Scan"
     assert campaign_jobs[0]["status"] == "dast_running"
 
@@ -323,6 +427,7 @@ def test_delete_web_run_cascades_all_owned_rows_and_preserves_api_collision(
 
         web_finding = models.ScanFinding(
             test_run_id=web_id,
+            page_id=page.id,
             owasp_category="A01",
             severity="high",
             title="Web finding",
@@ -342,6 +447,7 @@ def test_delete_web_run_cascades_all_owned_rows_and_preserves_api_collision(
 
         web_traffic = models.TrafficEntry(
             test_run_id=web_id,
+            page_id=page.id,
             source="test",
             method="GET",
             url="https://target.local/",
@@ -412,6 +518,7 @@ def test_delete_web_run_cascades_all_owned_rows_and_preserves_api_collision(
         session.add(
             models.TargetIntelItem(
                 test_run_id=web_id,
+                page_id=page.id,
                 kind="endpoint",
                 key="/accounts",
                 value="https://target.local/accounts",
@@ -814,118 +921,147 @@ def test_update_finding_unknown_id_404(client: TestClient):
     assert r.status_code == 404
 
 
-def test_get_scanner_sessions_redacts_auth_material():
+def test_get_scanner_sessions_redacts_auth_material(engine):
     from aespa.api import test_runs as test_runs_api
     from aespa.models import Site, TestRun
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
 
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
+        run = TestRun(site_id=site.id, name="Run #1")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
 
-            run = TestRun(site_id=site.id, name="Run #1")
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-
-            session.add(
-                ScannerSession(
-                    test_run_id=run.id,
-                    label="configured_primary",
-                    kind="mixed",
-                    account_label="Primary administrator",
-                    username="alice",
-                    credential_id=3,
-                    source="test",
-                    cookies_json='{"sid":"secret-cookie"}',
-                    extra_headers_json='{"Authorization":"Bearer secret-token"}',
-                    session_metadata='{"login_url":"https://target.local/login","password":"generated-secret"}',
-                    token_hint="secret...token",
-                )
+        session.add(
+            ScannerSession(
+                test_run_id=run.id,
+                label="configured_primary",
+                kind="mixed",
+                account_label="Primary administrator",
+                username="alice",
+                credential_id=3,
+                source="test",
+                cookies_json='{"sid":"secret-cookie"}',
+                extra_headers_json='{"Authorization":"Bearer secret-token"}',
+                session_metadata='{"login_url":"https://target.local/login","password":"generated-secret"}',
+                token_hint="secret...token",
             )
-            session.commit()
+        )
+        session.commit()
 
-            summary = test_runs_api.get_scanner_sessions(run.id, session=session)
+        summary = test_runs_api.get_scanner_sessions(run.id, session=session)
 
-        assert summary.counts["total"] == 1
-        item = summary.sessions[0]
-        assert item.label == "configured_primary"
-        assert item.account_label == "Primary administrator"
-        assert item.username == "alice"
-        assert item.cookie_names == ["sid"]
-        assert item.header_names == ["Authorization"]
-        assert item.session_metadata["login_url"] == "https://target.local/login"
-        assert item.session_metadata["password"] == "[REDACTED]"
-        assert "secret-cookie" not in item.model_dump_json()
-        assert "secret-token" not in item.model_dump_json()
-        assert "generated-secret" not in item.model_dump_json()
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    assert summary.counts["total"] == 1
+    item = summary.sessions[0]
+    assert item.label == "configured_primary"
+    assert item.account_label == "Primary administrator"
+    assert item.username == "alice"
+    assert item.cookie_names == ["sid"]
+    assert item.header_names == ["Authorization"]
+    assert item.session_metadata["login_url"] == "https://target.local/login"
+    assert item.session_metadata["password"] == "[REDACTED]"
+    assert "secret-cookie" not in item.model_dump_json()
+    assert "secret-token" not in item.model_dump_json()
+    assert "generated-secret" not in item.model_dump_json()
 
 
-def test_update_scanner_session_renames_and_deactivates():
+def test_get_graph_recovers_dynamic_scan_links_from_saved_traffic(engine):
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import CrawledPage, Site, TestRun, TrafficEntry
+
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+
+        run = TestRun(site_id=site.id, name="Dynamic graph recovery")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        source_page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/account",
+            title="Account",
+        )
+        dynamic_page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/api/preferences",
+            title="Dynamic API route",
+            llm_context="Discovered during Dynamic Scan.",
+            state_kind="api",
+        )
+        session.add_all([source_page, dynamic_page])
+        session.commit()
+        session.refresh(source_page)
+        session.refresh(dynamic_page)
+        session.add(
+            TrafficEntry(
+                test_run_id=run.id,
+                source="httpx",
+                method="GET",
+                url=dynamic_page.url,
+                status=200,
+                page_id=source_page.id,
+            )
+        )
+        session.commit()
+
+        graph = test_runs_api.get_graph(run.id, session=session)
+
+    recovered = [link for link in graph.links if link.action_kind == "dynamic_request"]
+    assert len(recovered) == 1
+    assert recovered[0].source == source_page.id
+    assert recovered[0].target == dynamic_page.id
+
+
+def test_update_scanner_session_renames_and_deactivates(engine):
     from aespa.api import test_runs as test_runs_api
     from aespa.models import Site, TestRun
     from aespa.schemas import ScannerSessionUpdate
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
 
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
+        run = TestRun(site_id=site.id, name="Run #1")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
 
-            run = TestRun(site_id=site.id, name="Run #1")
-            session.add(run)
-            session.commit()
-            session.refresh(run)
+        record = ScannerSession(
+            test_run_id=run.id,
+            label="discovered_token",
+            kind="bearer",
+            source="test",
+            extra_headers_json='{"Authorization":"Bearer secret-token"}',
+        )
+        session.add(record)
+        session.commit()
+        session.refresh(record)
 
-            record = ScannerSession(
-                test_run_id=run.id,
-                label="discovered_token",
-                kind="bearer",
-                source="test",
-                extra_headers_json='{"Authorization":"Bearer secret-token"}',
-            )
-            session.add(record)
-            session.commit()
-            session.refresh(record)
+        updated = test_runs_api.update_scanner_session(
+            run.id,
+            record.id,
+            ScannerSessionUpdate(label="Forged Admin", is_active=False),
+            session=session,
+        )
 
-            updated = test_runs_api.update_scanner_session(
-                run.id,
-                record.id,
-                ScannerSessionUpdate(label="Forged Admin", is_active=False),
-                session=session,
-            )
+        summary = test_runs_api.get_scanner_sessions(
+            run.id, include_inactive=True, session=session
+        )
 
-            summary = test_runs_api.get_scanner_sessions(
-                run.id, include_inactive=True, session=session
-            )
-
-        assert updated.label == "forged_admin"
-        assert updated.is_active is False
-        assert summary.counts["inactive"] == 1
-        assert summary.sessions[0].label == "forged_admin"
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    assert updated.label == "forged_admin"
+    assert updated.is_active is False
+    assert summary.counts["inactive"] == 1
+    assert summary.sessions[0].label == "forged_admin"
 
 
 def test_validate_scanner_sessions_route(client: TestClient, monkeypatch):
@@ -1276,117 +1412,157 @@ def test_get_graph_does_not_report_finished_redirects_as_pending(
     assert statuses["https://target.local/dashboard"] == "complete"
 
 
-def test_get_graph_reports_unauthenticated_access():
+def test_get_graph_reports_unauthenticated_access(engine):
     from aespa.api import test_runs as test_runs_api
     from aespa.models import CrawledPage, PageCredentialView, Site, TestRun
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-            run = TestRun(site_id=site.id, name="Run #1")
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-            public_page = CrawledPage(
-                test_run_id=run.id,
-                url="https://target.local/public",
-                accessible_by="[10, 20]",
-            )
-            private_page = CrawledPage(
-                test_run_id=run.id,
-                url="https://target.local/private",
-                accessible_by="[10, 20]",
-            )
-            session.add(public_page)
-            session.add(private_page)
-            session.commit()
-            session.refresh(public_page)
-            session.add(
-                PageCredentialView(
-                    test_run_id=run.id,
-                    page_id=public_page.id,
-                    credential_id=None,
-                    username="unauthenticated",
-                )
-            )
-            session.commit()
-
-            graph = test_runs_api.get_graph(run.id, session=session)
-
-        nodes_by_url = {node.url: node for node in graph.nodes}
-        assert (
-            nodes_by_url["https://target.local/public"].accessible_anonymously is True
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        run = TestRun(site_id=site.id, name="Run #1")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        public_page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/public",
+            accessible_by="[10, 20]",
         )
-        assert (
-            nodes_by_url["https://target.local/private"].accessible_anonymously is False
+        private_page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/private",
+            accessible_by="[10, 20]",
         )
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+        session.add(public_page)
+        session.add(private_page)
+        session.commit()
+        session.refresh(public_page)
+        session.add(
+            PageCredentialView(
+                test_run_id=run.id,
+                page_id=public_page.id,
+                credential_id=None,
+                username="unauthenticated",
+            )
+        )
+        session.commit()
+
+        graph = test_runs_api.get_graph(run.id, session=session)
+
+    nodes_by_url = {node.url: node for node in graph.nodes}
+    assert nodes_by_url["https://target.local/public"].accessible_anonymously is True
+    assert nodes_by_url["https://target.local/private"].accessible_anonymously is False
 
 
-def test_get_graph_hides_404_failures_but_keeps_other_failures(client: TestClient):
+def test_get_graph_hides_failed_crawls(client, engine):
     from aespa.api import test_runs as test_runs_api
     from aespa.models import CrawledPage, Site, TestRun
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
 
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
+        run = TestRun(site_id=site.id, name="Run 1")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
 
-            run = TestRun(site_id=site.id, name="Run 1")
-            session.add(run)
-            session.commit()
-            session.refresh(run)
+        session.add_all(
+            [
+                CrawledPage(
+                    test_run_id=run.id,
+                    url="https://target.local/missing",
+                    depth=1,
+                    status="failed",
+                    error_message="HTTP 404",
+                ),
+                CrawledPage(
+                    test_run_id=run.id,
+                    url="https://target.local/broken",
+                    depth=1,
+                    status="failed",
+                    error_message="Navigation timeout",
+                ),
+            ]
+        )
+        session.commit()
 
-            session.add_all(
-                [
-                    CrawledPage(
-                        test_run_id=run.id,
-                        url="https://target.local/missing",
-                        depth=1,
-                        status="failed",
-                        error_message="HTTP 404",
-                    ),
-                    CrawledPage(
-                        test_run_id=run.id,
-                        url="https://target.local/broken",
-                        depth=1,
-                        status="failed",
-                        error_message="Navigation timeout",
-                    ),
-                ]
-            )
-            session.commit()
+        graph = test_runs_api.get_graph(run.id, session=session)
 
-            graph = test_runs_api.get_graph(run.id, session=session)
+    assert graph.nodes == []
 
-        assert len(graph.nodes) == 1
-        node = graph.nodes[0]
-        assert node.status == "failed"
-        assert node.error_message == "Navigation timeout"
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+
+def test_get_graph_hides_pages_with_only_4xx_responses(engine):
+    from aespa.api import test_runs as test_runs_api
+    from aespa.models import CrawledPage, Site, TestRun, TrafficEntry
+
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+
+        run = TestRun(site_id=site.id, name="Run 1")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        session.add_all(
+            [
+                CrawledPage(
+                    test_run_id=run.id,
+                    url="https://target.local/rejected",
+                ),
+                CrawledPage(
+                    test_run_id=run.id,
+                    url="https://target.local/mixed",
+                ),
+                CrawledPage(
+                    test_run_id=run.id,
+                    url="https://target.local/no-traffic",
+                ),
+                TrafficEntry(
+                    test_run_id=run.id,
+                    source="playwright",
+                    method="GET",
+                    url="https://target.local/rejected",
+                    status=401,
+                ),
+                TrafficEntry(
+                    test_run_id=run.id,
+                    source="playwright",
+                    method="GET",
+                    url="https://target.local/rejected",
+                    status=404,
+                ),
+                TrafficEntry(
+                    test_run_id=run.id,
+                    source="playwright",
+                    method="GET",
+                    url="https://target.local/mixed",
+                    status=403,
+                ),
+                TrafficEntry(
+                    test_run_id=run.id,
+                    source="playwright",
+                    method="GET",
+                    url="https://target.local/mixed",
+                    status=200,
+                ),
+            ]
+        )
+        session.commit()
+
+        graph = test_runs_api.get_graph(run.id, session=session)
+
+    assert {node.url for node in graph.nodes} == {
+        "https://target.local/mixed",
+        "https://target.local/no-traffic",
+    }
 
 
 def test_list_pages_empty(client: TestClient):
@@ -1462,7 +1638,7 @@ def test_export_and_import_crawl_into_new_run(client: TestClient):
 
     imported = client.post(
         f"/api/test-runs/{target['id']}/crawl/import",
-        files={"file": ("crawl.json", json.dumps(archive), "application/json")},
+        files={"file": ("crawl.json", json.dumps(archive), "system/json")},
     )
     assert imported.status_code == 200
     assert imported.json()["status"] == "complete"
@@ -1505,14 +1681,13 @@ def test_import_crawl_rejects_another_site(client: TestClient):
 
     imported = client.post(
         f"/api/test-runs/{target['id']}/crawl/import",
-        files={"file": ("crawl.json", archive.content, "application/json")},
+        files={"file": ("crawl.json", archive.content, "system/json")},
     )
     assert imported.status_code == 400
     assert "different site" in imported.json()["detail"]
 
 
-def test_clear_crawl_resets_run_without_restarting(monkeypatch):
-    from aespa import models as _models  # noqa: F401
+def test_clear_crawl_resets_run_without_restarting(monkeypatch, engine):
     from aespa.main import create_app
     from aespa.models import (
         CrawledPage,
@@ -1525,12 +1700,6 @@ def test_clear_crawl_resets_run_without_restarting(monkeypatch):
     )
     from aespa.services import crawler as crawler_svc
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
     started: list[int] = []
 
     async def fake_start_crawl(run_id: int) -> None:
@@ -1545,97 +1714,90 @@ def test_clear_crawl_resets_run_without_restarting(monkeypatch):
     app = create_app()
     app.dependency_overrides[get_session] = _override_session
 
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-            run = TestRun(
-                site_id=site.id,
-                name="Run #1",
-                status=TestRunStatus.complete,
-                pages_discovered=1,
-                current_url="https://target.local/account",
-            )
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-            page = CrawledPage(test_run_id=run.id, url="https://target.local/account")
-            session.add(page)
-            session.commit()
-            session.refresh(page)
-            session.add(
-                PageLink(
-                    test_run_id=run.id,
-                    source_page_id=page.id,
-                    target_url="https://target.local/next",
-                )
-            )
-            session.add(
-                PageCredentialView(
-                    test_run_id=run.id, page_id=page.id, username="alice"
-                )
-            )
-            session.add(
-                TargetIntelItem(test_run_id=run.id, kind="endpoint", key="/account")
-            )
-            finding = ScanFinding(
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        run = TestRun(
+            site_id=site.id,
+            name="Run #1",
+            status=TestRunStatus.complete,
+            pages_discovered=1,
+            current_url="https://target.local/account",
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        page = CrawledPage(test_run_id=run.id, url="https://target.local/account")
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+        session.add(
+            PageLink(
                 test_run_id=run.id,
-                page_id=page.id,
-                owasp_category="A01",
-                severity="medium",
-                title="Finding",
-                description="Desc",
+                source_page_id=page.id,
+                target_url="https://target.local/next",
             )
-            session.add(finding)
-            session.commit()
-            run_id = run.id
-            finding_id = finding.id
+        )
+        session.add(
+            PageCredentialView(test_run_id=run.id, page_id=page.id, username="alice")
+        )
+        session.add(
+            TargetIntelItem(test_run_id=run.id, kind="endpoint", key="/account")
+        )
+        finding = ScanFinding(
+            test_run_id=run.id,
+            page_id=page.id,
+            owasp_category="A01",
+            severity="medium",
+            title="Finding",
+            description="Desc",
+        )
+        session.add(finding)
+        session.commit()
+        run_id = run.id
+        finding_id = finding.id
 
-        with TestClient(app, raise_server_exceptions=True) as api_client:
-            response = api_client.post(f"/api/test-runs/{run_id}/crawl/clear")
+    with TestClient(app, raise_server_exceptions=True) as api_client:
+        authenticate_client(api_client, app)
+        response = api_client.post(f"/api/test-runs/{run_id}/crawl/clear")
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "pending"
-        assert data["pages_discovered"] == 0
-        assert data["current_url"] is None
-        assert started == []
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "pending"
+    assert data["pages_discovered"] == 0
+    assert data["current_url"] is None
+    assert started == []
 
-        with Session(engine) as session:
-            assert (
-                session.exec(
-                    select(CrawledPage).where(CrawledPage.test_run_id == run_id)
-                ).all()
-                == []
-            )
-            assert (
-                session.exec(
-                    select(PageLink).where(PageLink.test_run_id == run_id)
-                ).all()
-                == []
-            )
-            assert (
-                session.exec(
-                    select(PageCredentialView).where(
-                        PageCredentialView.test_run_id == run_id
-                    )
-                ).all()
-                == []
-            )
-            assert (
-                session.exec(
-                    select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
-                ).all()
-                == []
-            )
-            finding_after = session.get(ScanFinding, finding_id)
-            assert finding_after is not None
-            assert finding_after.page_id is None
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    with Session(engine) as session:
+        assert (
+            session.exec(
+                select(CrawledPage).where(CrawledPage.test_run_id == run_id)
+            ).all()
+            == []
+        )
+        assert (
+            session.exec(select(PageLink).where(PageLink.test_run_id == run_id)).all()
+            == []
+        )
+        assert (
+            session.exec(
+                select(PageCredentialView).where(
+                    PageCredentialView.test_run_id == run_id
+                )
+            ).all()
+            == []
+        )
+        assert (
+            session.exec(
+                select(TargetIntelItem).where(TargetIntelItem.test_run_id == run_id)
+            ).all()
+            == []
+        )
+        finding_after = session.get(ScanFinding, finding_id)
+        assert finding_after is not None
+        assert finding_after.page_id is None
 
 
 # ── Cascaded delete when site is deleted ──────────────────────────────────────
@@ -1649,59 +1811,71 @@ def test_deleting_site_cleans_up_runs(client: TestClient):
     assert r.status_code == 404
 
 
-def test_get_graph_inferred_parent_links():
+def test_get_graph_inferred_parent_links(engine):
     from aespa.api import test_runs as test_runs_api
     from aespa.models import CrawledPage, Site, TestRun
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+    with Session(engine) as session:
+        site = Site(name="Target", base_url="http://192.168.3.101")
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+
+        run = TestRun(site_id=site.id, name="Run Graph Test")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+
+        root_page = CrawledPage(
+            test_run_id=run.id,
+            url="http://192.168.3.101/",
+            depth=0,
+        )
+        parent_page = CrawledPage(
+            test_run_id=run.id,
+            url="http://192.168.3.101/admin/#/customers",
+            depth=1,
+            state_label="Admin Customer Management",
+        )
+        child_page = CrawledPage(
+            test_run_id=run.id,
+            url="http://192.168.3.101/admin/#/customers/33",
+            depth=2,
+        )
+        session.add(root_page)
+        session.add(parent_page)
+        session.add(child_page)
+        session.commit()
+        session.refresh(parent_page)
+        session.refresh(child_page)
+
+        graph = test_runs_api.get_graph(run.id, session=session)
+        inferred_links = [
+            link for link in graph.links if link.action_kind == "inferred"
+        ]
+        assert len(inferred_links) == 1
+        assert inferred_links[0].source == parent_page.id
+        assert inferred_links[0].target == child_page.id
+
+
+def test_guided_login_is_scoped_to_its_run(client, monkeypatch):
+    import asyncio
+
+    from aespa.services import crawler
+
+    first_done, second_done, second_ready = (asyncio.Event() for _ in range(3))
+    monkeypatch.setattr(
+        crawler, "_guided_registry", {(1, 5): first_done, (2, 5): second_done}
     )
-    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(crawler, "_guided_ready_registry", {(2, 5): second_ready})
 
-    try:
-        with Session(engine) as session:
-            site = Site(name="Target", base_url="http://192.168.3.101")
-            session.add(site)
-            session.commit()
-            session.refresh(site)
+    status = client.get("/api/test-runs/1/guided-login/status").json()
+    assert status == {
+        "pending_credential_ids": [5],
+        "awaiting_ready_credential_ids": [],
+    }
 
-            run = TestRun(site_id=site.id, name="Run Graph Test")
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-
-            root_page = CrawledPage(
-                test_run_id=run.id,
-                url="http://192.168.3.101/",
-                depth=0,
-            )
-            parent_page = CrawledPage(
-                test_run_id=run.id,
-                url="http://192.168.3.101/admin/#/customers",
-                depth=1,
-                state_label="Admin Customer Management",
-            )
-            child_page = CrawledPage(
-                test_run_id=run.id,
-                url="http://192.168.3.101/admin/#/customers/33",
-                depth=2,
-            )
-            session.add(root_page)
-            session.add(parent_page)
-            session.add(child_page)
-            session.commit()
-            session.refresh(parent_page)
-            session.refresh(child_page)
-
-            graph = test_runs_api.get_graph(run.id, session=session)
-            inferred_links = [
-                link for link in graph.links if link.action_kind == "inferred"
-            ]
-            assert len(inferred_links) == 1
-            assert inferred_links[0].source == parent_page.id
-            assert inferred_links[0].target == child_page.id
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    assert client.post("/api/test-runs/2/guided-login/5/confirm").status_code == 200
+    assert second_done.is_set() and not first_done.is_set()
+    assert client.post("/api/test-runs/1/guided-login/5/ready").status_code == 404
+    assert not second_ready.is_set()

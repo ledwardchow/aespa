@@ -29,14 +29,6 @@ from aespa.models import (
 )
 from aespa.services import api_collections as svc
 
-
-@pytest.fixture()
-def data_dir(tmp_path, monkeypatch):
-    """Isolate uploaded-file storage to a temp dir for the test."""
-    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
-    return tmp_path
-
-
 # ---- helpers ----------------------------------------------------------------
 
 

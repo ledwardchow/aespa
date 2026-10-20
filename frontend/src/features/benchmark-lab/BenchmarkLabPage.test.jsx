@@ -1,0 +1,364 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, expect, test, vi } from "vitest";
+
+import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
+import * as settingsApi from "../../shared/api/settings.js";
+import { BenchmarkLabPage } from "./BenchmarkLabPage.jsx";
+
+vi.mock("../../shared/api/benchmarkLab.js");
+vi.mock("../../shared/api/settings.js");
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  window.location.hash = "#/benchmark-lab";
+  benchmarkApi.getBenchmarkSettings.mockResolvedValue({ default_model_id: 6 });
+  benchmarkApi.saveBenchmarkSettings.mockResolvedValue({ default_model_id: 8 });
+  benchmarkApi.listBenchmarkTargets.mockResolvedValue({
+    sites: [
+      {
+        id: 1,
+        name: "Shop",
+        dataset: { id: 3, name: "Shop truth", item_count: 2 },
+        runs: [
+          {
+            id: 9,
+            name: "Shop scan",
+            status: "complete",
+            default_evaluation_model: { id: 6, name: "Test Lead model" },
+          },
+        ],
+      },
+    ],
+    apis: [{ id: 2, name: "Shop API", dataset: null, runs: [] }],
+    sast_runs: [{ id: 7, name: "Source scan", status: "completed" }],
+  });
+  benchmarkApi.listBenchmarkDatasets.mockResolvedValue([
+    { id: 3, name: "Shop truth", item_count: 2 },
+  ]);
+  benchmarkApi.listBenchmarkResults.mockResolvedValue([]);
+  benchmarkApi.listBenchmarkEvaluations.mockResolvedValue([]);
+  settingsApi.listLLMModels.mockResolvedValue([
+    { id: 6, name: "Test Lead model" },
+    { id: 8, name: "Evaluator model" },
+  ]);
+  benchmarkApi.createBenchmarkResult.mockResolvedValue({
+    id: 4,
+    run_kind: "site",
+    target_kind: "site",
+    run_id: 9,
+    target_id: 1,
+    run_name: "Shop scan",
+    comparison: { method: "model", model: { id: 6, name: "Test Lead model" } },
+    scan_models: {
+      primary: { id: 9, name: "Scan Test Lead", model: "scan-model" },
+      sast: [
+        {
+          run_id: 7,
+          run_name: "Source scan",
+          model: { id: 10, name: "SAST agent", model: "sast-model" },
+        },
+      ],
+    },
+    created_at: "2026-09-27T00:00:00Z",
+    summary: { full: 1, partial: 0, missing: 1 },
+    ground_truth: {
+      name: "Shop truth",
+      items: [
+        { external_id: "GT-1", title: "SQL injection" },
+        { external_id: "GT-2", title: "Missing logging" },
+      ],
+    },
+    findings: [{ id: 12, reference: "SITE-001", title: "SQL injection" }],
+    rows: [
+      { external_id: "GT-1", disposition: "full", finding_ids: [12], reason: "Matched" },
+      { external_id: "GT-2", disposition: "missing", finding_ids: [], reason: "No match" },
+    ],
+  });
+});
+
+test("compares a Site scan and shows every ground truth finding", async () => {
+  const user = userEvent.setup();
+  render(<BenchmarkLabPage />);
+  await user.selectOptions(await screen.findByLabelText("Site"), "1");
+  await user.click(screen.getByRole("tab", { name: "New" }));
+  await user.selectOptions(screen.getByLabelText("Completed scan"), "9");
+  await user.click(screen.getByRole("button", { name: "Compare scan" }));
+
+  expect(benchmarkApi.createBenchmarkResult).toHaveBeenCalledWith({
+    run_kind: "site",
+    run_id: 9,
+  });
+  expect(await screen.findByRole("button", { name: /GT-1.*SQL injection/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /GT-2.*Missing logging/ })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: /GT-1.*SQL injection/ }));
+  expect(screen.getByText("SITE-001")).toBeTruthy();
+  expect(screen.getByText("Compared by Test Lead model")).toBeTruthy();
+  expect(screen.getByText("Scan model: Scan Test Lead (scan-model)")).toBeTruthy();
+  expect(screen.getByText("SAST model (Source scan): SAST agent (sast-model)")).toBeTruthy();
+});
+
+test("shows recorded Daybreak programs on a saved result", async () => {
+  const result = await benchmarkApi.createBenchmarkResult();
+  result.scan_models.primary.daybreak_programs = ["daybreak_blue", "daybreak_red"];
+  benchmarkApi.listBenchmarkResults.mockResolvedValue([result]);
+  render(<BenchmarkLabPage initialResultId={4} />);
+  expect(await screen.findByText("Daybreak Blue")).toBeTruthy();
+  expect(screen.getByText("Daybreak Red")).toBeTruthy();
+});
+
+test("shows Glasswing only for the Claude CLI Mythos result", async () => {
+  const result = await benchmarkApi.createBenchmarkResult();
+  result.scan_models.primary = {
+    model: "claude-mythos-5",
+    name: "claude-mythos-5",
+    provider: "claude_cli",
+  };
+  benchmarkApi.listBenchmarkResults.mockResolvedValue([result]);
+  render(<BenchmarkLabPage initialResultId={4} />);
+  expect(await screen.findByText("Glasswing")).toBeTruthy();
+});
+
+test.each([
+  ["api", "APIs", "API", "Shop API"],
+  ["sast", "SAST", "SAST", null],
+])(
+  "%s saved results open a focused review and return to the same list",
+  async (kind, tab, label, application) => {
+    const user = userEvent.setup();
+    const result = {
+      ...(await benchmarkApi.createBenchmarkResult()),
+      run_kind: kind,
+      run_name: `${label} saved scan`,
+      target_id: kind === "api" ? 2 : null,
+    };
+    benchmarkApi.listBenchmarkResults.mockResolvedValue([result]);
+    const { unmount } = render(<BenchmarkLabPage />);
+    await user.click(await screen.findByRole("tab", { name: tab }));
+    await user.click(screen.getByRole("tab", { name: /Saved results/ }));
+    expect(screen.getByRole("region", { name: `Saved ${label} results` })).toBeTruthy();
+    if (application) expect(screen.getByText(application)).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: `Open ${label} saved scan` }).getAttribute("href"),
+    ).toBe("#/benchmark-lab/results/4");
+    unmount();
+    render(<BenchmarkLabPage initialResultId={4} />);
+    expect(await screen.findByRole("region", { name: "Finding review" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /GT-2.*Missing logging/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Back to results" }).getAttribute("href")).toBe(
+      `#/benchmark-lab?tab=${kind}&view=results`,
+    );
+  },
+);
+
+test("lists completed earlier SAST evaluations as saved results", async () => {
+  const user = userEvent.setup();
+  benchmarkApi.listBenchmarkEvaluations.mockResolvedValue([
+    { id: 13, name: "Earlier source result", status: "completed", sast_run_id: 7 },
+  ]);
+  render(<BenchmarkLabPage />);
+  await user.click(await screen.findByRole("tab", { name: "SAST" }));
+  await user.click(screen.getByRole("tab", { name: /Saved results/ }));
+  expect(screen.getByRole("link", { name: "Earlier source result" }).getAttribute("href")).toBe(
+    "#/benchmark-lab/evaluations/13",
+  );
+});
+
+test("saves the default model in Settings and removes per-run selection", async () => {
+  const user = userEvent.setup();
+  render(<BenchmarkLabPage />);
+  await user.click(await screen.findByRole("tab", { name: "Settings" }));
+  await user.selectOptions(await screen.findByLabelText("Default benchmark model"), "8");
+  benchmarkApi.getBenchmarkSettings.mockResolvedValue({ default_model_id: 8 });
+  await user.click(screen.getByRole("button", { name: "Save benchmark model" }));
+  expect(benchmarkApi.saveBenchmarkSettings).toHaveBeenCalledWith({ default_model_id: 8 });
+  await user.click(screen.getByRole("tab", { name: "Results" }));
+  await user.selectOptions(screen.getByLabelText("Site"), "1");
+  await user.click(screen.getByRole("tab", { name: "New" }));
+  await user.selectOptions(screen.getByLabelText("Completed scan"), "9");
+  expect(screen.queryByLabelText("Evaluation model")).toBeNull();
+  expect(screen.getByText("Benchmark model: Evaluator model")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Compare scan" }));
+  expect(benchmarkApi.createBenchmarkResult).toHaveBeenCalledWith({ run_kind: "site", run_id: 9 });
+});
+
+test("requires a default benchmark model", async () => {
+  benchmarkApi.getBenchmarkSettings.mockResolvedValue({ default_model_id: null });
+  const user = userEvent.setup();
+  render(<BenchmarkLabPage />);
+  await user.selectOptions(await screen.findByLabelText("Site"), "1");
+  await user.click(screen.getByRole("tab", { name: "New" }));
+  await user.selectOptions(screen.getByLabelText("Completed scan"), "9");
+  expect(screen.getByRole("button", { name: "Compare scan" }).disabled).toBe(true);
+  expect(screen.getByText("Choose a default benchmark model in Settings first.")).toBeTruthy();
+});
+
+test("deletes a saved comparison result", async () => {
+  const result = await benchmarkApi.createBenchmarkResult();
+  benchmarkApi.listBenchmarkResults.mockResolvedValue([result]);
+  benchmarkApi.deleteBenchmarkResult.mockResolvedValue(undefined);
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  try {
+    render(<BenchmarkLabPage initialResultId={4} />);
+    await screen.findByRole("button", { name: /GT-1.*SQL injection/ });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Delete result" }));
+    expect(benchmarkApi.deleteBenchmarkResult).toHaveBeenCalledWith(4);
+    expect(window.location.hash).toBe("#/benchmark-lab?tab=dast&view=results");
+  } finally {
+    confirm.mockRestore();
+  }
+});
+
+test("Site summary plots saved DAST and SAST analyses and filters both", async () => {
+  const user = userEvent.setup();
+  const dast = { ...(await benchmarkApi.createBenchmarkResult()), scan_cost_usd: 0.42 };
+  const sast = {
+    ...dast,
+    id: 5,
+    run_kind: "sast",
+    run_name: "Source scan",
+    scan_cost_usd: 0.15,
+    scan_models: {
+      primary: { name: "SAST agent" },
+      sast: [{ run_id: 7, model: { name: "SAST agent" } }],
+    },
+  };
+  benchmarkApi.listBenchmarkResults.mockResolvedValue([dast, sast]);
+  render(<BenchmarkLabPage />);
+  await user.selectOptions(await screen.findByLabelText("Site"), "1");
+  expect(
+    screen.queryByRole("button", { name: /Shop scan, DAST with SAST Leads, Scan Test Lead/ }),
+  ).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Scan Test Lead", exact: true }));
+  expect(
+    screen.getByRole("button", { name: /Shop scan, DAST with SAST Leads, Scan Test Lead/ }),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Source scan, SAST, SAST agent/ })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: /Shop scan, DAST with SAST Leads/ }));
+  expect(window.location.hash).toBe("#/benchmark-lab/results/4");
+  await user.click(screen.getByLabelText("Scan type", { selector: "summary" }));
+  await user.click(screen.getByRole("checkbox", { name: "SAST" }));
+  expect(screen.queryByRole("button", { name: /Source scan, SAST, SAST agent/ })).toBeNull();
+  await user.click(screen.getByRole("checkbox", { name: "SAST" }));
+  await user.click(screen.getByLabelText("Model"));
+  await user.click(screen.getByRole("checkbox", { name: "SAST agent" }));
+  expect(screen.queryByRole("button", { name: /Source scan, SAST, SAST agent/ })).toBeNull();
+  await user.click(screen.getByRole("tab", { name: "Analyses" }));
+  expect(screen.getByRole("link", { name: "Open Source scan" }).getAttribute("href")).toBe(
+    "#/benchmark-lab/results/5",
+  );
+});
+
+test("Site includes older SAST analyses that used its ground truth", async () => {
+  const user = userEvent.setup();
+  const result = {
+    ...(await benchmarkApi.createBenchmarkResult()),
+    id: 6,
+    run_kind: "sast",
+    target_kind: null,
+    target_id: null,
+    dataset_id: 3,
+    run_name: "Older source scan",
+    scan_cost_usd: 0.2,
+  };
+  benchmarkApi.listBenchmarkResults.mockResolvedValue([result]);
+  render(<BenchmarkLabPage />);
+  await user.selectOptions(await screen.findByLabelText("Site"), "1");
+  await user.click(screen.getByRole("tab", { name: "Analyses" }));
+  expect(screen.getByRole("link", { name: "Open Older source scan" })).toBeTruthy();
+});
+
+test("completed scans use parent tabs while Sites keeps its existing views", async () => {
+  const user = userEvent.setup();
+  const result = { ...(await benchmarkApi.createBenchmarkResult()), scan_cost_usd: 0.42 };
+  benchmarkApi.listBenchmarkResults.mockResolvedValue([result]);
+  render(<BenchmarkLabPage />);
+  await user.selectOptions(await screen.findByLabelText("Site"), "1");
+  expect(screen.queryByLabelText("Ground truth for bulk benchmarks")).toBeNull();
+  expect(screen.getByRole("button", { name: /Shop scan, DAST with SAST Leads/ })).toBeTruthy();
+  await user.click(screen.getByRole("tab", { name: "Analyses" }));
+  expect(screen.getByRole("link", { name: "Open Shop scan" })).toBeTruthy();
+  expect(screen.queryByLabelText("Ground truth for bulk benchmarks")).toBeNull();
+  await user.click(screen.getByRole("tab", { name: "DAST", exact: true }));
+  expect(screen.getByRole("region", { name: "Sites finished scans" })).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Summary" })).toBeNull();
+  expect(screen.queryByLabelText("Site")).toBeNull();
+  expect(screen.queryByRole("region", { name: "Saved DAST results" })).toBeNull();
+  await user.click(screen.getByRole("tab", { name: "Saved results (1)" }));
+  expect(screen.getByRole("region", { name: "Saved DAST results" })).toBeTruthy();
+  await user.click(screen.getByRole("tab", { name: "Scans" }));
+  await user.click(screen.getByRole("tab", { name: "APIs" }));
+  expect(screen.getByRole("region", { name: "API finished scans" })).toBeTruthy();
+  expect(screen.queryByLabelText("API")).toBeNull();
+  await user.click(screen.getByRole("tab", { name: "SAST" }));
+  expect(screen.getByRole("region", { name: "SAST finished scans" })).toBeTruthy();
+  expect(screen.queryByLabelText("Ground truth for bulk benchmarks")).toBeNull();
+  expect(screen.queryByLabelText("Completed SAST scan")).toBeNull();
+  await user.click(screen.getByRole("tab", { name: "Results" }));
+  expect(screen.getByRole("tab", { name: "Analyses", selected: true })).toBeTruthy();
+  expect(screen.queryByLabelText("Ground truth for bulk benchmarks")).toBeNull();
+  await user.click(screen.getByRole("tab", { name: "DAST", exact: true }));
+  await user.click(screen.getByRole("tab", { name: "Saved results (1)" }));
+  await user.click(screen.getByRole("link", { name: "Open Shop scan" }));
+  expect(window.location.hash).toBe("#/benchmark-lab/results/4");
+});
+
+test.each(["site", "api", "sast"])(
+  "opens a linked %s benchmark result on its own page",
+  async (kind) => {
+    const result = await benchmarkApi.createBenchmarkResult();
+    benchmarkApi.listBenchmarkResults.mockResolvedValue([
+      {
+        ...result,
+        run_kind: kind,
+        target_kind: kind === "sast" ? null : kind,
+        target_id: kind === "api" ? 2 : kind === "site" ? 1 : null,
+      },
+    ]);
+    render(<BenchmarkLabPage initialResultId={4} />);
+    expect(await screen.findByRole("button", { name: /GT-1.*SQL injection/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Back to results" }).getAttribute("href")).toBe(
+      `#/benchmark-lab?tab=${kind === "site" ? "dast" : kind}&view=results`,
+    );
+    expect(screen.queryByRole("tab")).toBeNull();
+  },
+);
+
+test("groups analysis findings by OWASP category or severity", async () => {
+  const user = userEvent.setup();
+  const result = await benchmarkApi.createBenchmarkResult();
+  benchmarkApi.listBenchmarkResults.mockResolvedValue([
+    {
+      ...result,
+      ground_truth: {
+        ...result.ground_truth,
+        items: [
+          { external_id: "GT-1", title: "First", category: "A03: Injection", severity: "high" },
+          {
+            external_id: "GT-2",
+            title: "Second",
+            category: "A01: Broken Access Control",
+            severity: "low",
+          },
+          { external_id: "GT-3", title: "Third", category: "A03: Injection", severity: "critical" },
+        ],
+      },
+    },
+  ]);
+  render(<BenchmarkLabPage initialResultId={4} />);
+  await screen.findByRole("button", { name: /GT-1.*First/ });
+  const groups = () =>
+    [...screen.getAllByRole("heading", { level: 4 })]
+      .map((node) => node.textContent)
+      .filter((text) => text.includes("("));
+  expect(groups()).toEqual([]);
+
+  await user.selectOptions(screen.getByLabelText("Group by"), "category");
+  expect(groups()).toEqual(["A01: Broken Access Control (1)", "A03: Injection (2)"]);
+
+  await user.selectOptions(screen.getByLabelText("Group by"), "severity");
+  expect(groups()).toEqual(["critical (1)", "high (1)", "low (1)"]);
+
+  await user.selectOptions(screen.getByLabelText("Group by"), "none");
+  expect(groups()).toEqual([]);
+});

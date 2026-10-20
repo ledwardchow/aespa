@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlmodel import Session, select
 
-from aespa.models import CrawledPage, PageOwaspTest, Site, TestRun
+from aespa.models import CrawledPage, PageLink, PageOwaspTest, Site, TestRun
 from aespa.services.web_route_inventory import (
     classify_http_exchange,
     enrich_dynamic_route,
@@ -120,6 +120,7 @@ def test_dynamic_route_enrichment_classifies_and_seeds_all_categories(db_engine,
                 response_headers={"content-type": "application/json"},
                 response_body='{"accepted": true}',
                 authenticated=True,
+                browser_observation=True,
             )
         )
 
@@ -127,7 +128,7 @@ def test_dynamic_route_enrichment_classifies_and_seeds_all_categories(db_engine,
     with Session(db_engine) as session:
         page = session.get(CrawledPage, page_id)
         assert page is not None
-        assert page.state_kind == "api"
+        assert page.state_kind == "url"
         assert page.takes_input is True
         assert page.has_object_ref is True
         assert page.has_business_logic is True
@@ -149,6 +150,39 @@ def test_dynamic_route_enrichment_classifies_and_seeds_all_categories(db_engine,
         assert all(cell.status == "not_started" for cell in cells)
 
 
+def test_http_route_enrichment_does_not_create_a_crawl_page(db_engine, run):
+    analyse = AsyncMock()
+    with patch("aespa.services.web_route_inventory.llm_svc.analyse_page", analyse):
+        page_id = asyncio.run(
+            enrich_dynamic_route(
+                run_id=run.id,
+                llm_cfg=object(),
+                url="https://target.local/api/accounts/42/import",
+                method="POST",
+                request_body='{"url": "https://example.test/feed"}',
+                response_status=200,
+                response_body='{"accepted": true}',
+                authenticated=True,
+            )
+        )
+
+    assert page_id is None
+    analyse.assert_not_awaited()
+    with Session(db_engine) as session:
+        assert (
+            session.exec(
+                select(CrawledPage).where(CrawledPage.test_run_id == run.id)
+            ).all()
+            == []
+        )
+        assert (
+            session.exec(
+                select(PageOwaspTest).where(PageOwaspTest.test_run_id == run.id)
+            ).all()
+            == []
+        )
+
+
 def test_dynamic_route_enrichment_reuses_existing_page_and_llm_analysis(db_engine, run):
     with Session(db_engine) as session:
         page = CrawledPage(
@@ -168,10 +202,10 @@ def test_dynamic_route_enrichment_reuses_existing_page_and_llm_analysis(db_engin
             enrich_dynamic_route(
                 run_id=run.id,
                 llm_cfg=object(),
-                url="https://target.local/api/users/2?view=full",
+                url="https://target.local/api/users/1",
                 method="GET",
                 response_status=200,
-                response_body='{"id": 2}',
+                response_body='{"id": 1}',
                 authenticated=True,
             )
         )
@@ -189,3 +223,118 @@ def test_dynamic_route_enrichment_reuses_existing_page_and_llm_analysis(db_engin
         assert applicable["A01"] is True
         assert applicable["A05"] is True
         assert applicable["A07"] is True
+
+
+def test_http_query_variant_does_not_change_an_existing_page(db_engine, run):
+    with Session(db_engine) as session:
+        page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/api/users/1?view=summary",
+            in_scope=True,
+            owasp_applicable_json=json.dumps({"A01": True}),
+        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+        page_id = page.id
+
+    analyse = AsyncMock()
+    with patch("aespa.services.web_route_inventory.llm_svc.analyse_page", analyse):
+        resolved = asyncio.run(
+            enrich_dynamic_route(
+                run_id=run.id,
+                llm_cfg=object(),
+                url="https://target.local/api/users/1?view=full",
+                method="GET",
+                response_status=200,
+                response_body='{"id": 1}',
+                authenticated=True,
+            )
+        )
+
+    assert resolved is None
+    analyse.assert_not_awaited()
+    with Session(db_engine) as session:
+        pages = session.exec(
+            select(CrawledPage).where(CrawledPage.test_run_id == run.id)
+        ).all()
+        assert len(pages) == 1
+        assert pages[0].id == page_id
+        assert json.loads(pages[0].owasp_applicable_json) == {"A01": True}
+        assert (
+            session.exec(
+                select(PageOwaspTest).where(PageOwaspTest.test_run_id == run.id)
+            ).all()
+            == []
+        )
+
+
+def test_dynamic_route_enrichment_records_source_page_link(db_engine, run):
+    with Session(db_engine) as session:
+        source_page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/account",
+            title="Account",
+        )
+        session.add(source_page)
+        session.commit()
+        session.refresh(source_page)
+        source_page_id = source_page.id
+
+    page_id = asyncio.run(
+        enrich_dynamic_route(
+            run_id=run.id,
+            llm_cfg=None,
+            url="https://target.local/api/account/preferences",
+            method="GET",
+            response_status=200,
+            browser_observation=True,
+            source_page_id=source_page_id,
+        )
+    )
+
+    with Session(db_engine) as session:
+        link = session.exec(
+            select(PageLink)
+            .where(PageLink.test_run_id == run.id)
+            .where(PageLink.source_page_id == source_page_id)
+            .where(PageLink.target_page_id == page_id)
+        ).one()
+
+    assert link.action_kind == "dynamic_navigation"
+    assert link.link_text == "Observed during Dynamic Scan"
+
+
+def test_http_route_does_not_link_source_to_a_synthetic_page(db_engine, run):
+    with Session(db_engine) as session:
+        source_page = CrawledPage(
+            test_run_id=run.id,
+            url="https://target.local/account",
+            title="Account",
+        )
+        session.add(source_page)
+        session.commit()
+        session.refresh(source_page)
+        source_page_id = source_page.id
+
+    page_id = asyncio.run(
+        enrich_dynamic_route(
+            run_id=run.id,
+            llm_cfg=None,
+            url="https://target.local/api/account/preferences",
+            method="GET",
+            response_status=200,
+            source_page_id=source_page_id,
+        )
+    )
+
+    assert page_id is None
+    with Session(db_engine) as session:
+        pages = session.exec(
+            select(CrawledPage).where(CrawledPage.test_run_id == run.id)
+        ).all()
+        assert [page.id for page in pages] == [source_page_id]
+        assert (
+            session.exec(select(PageLink).where(PageLink.test_run_id == run.id)).all()
+            == []
+        )

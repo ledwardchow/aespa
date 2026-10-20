@@ -2,8 +2,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session
 
 
 def test_get_llm_config_initially_null(client: TestClient):
@@ -30,6 +29,14 @@ def test_get_default_models(client: TestClient, monkeypatch):
     assert r.status_code == 200
     data = r.json()
     assert "anthropic" in data
+    assert data["claude_cli"] == [
+        "sonnet",
+        "opus",
+        "haiku",
+        "mythos",
+        "mythos-5",
+        "claude-mythos-5",
+    ]
     assert "factory_droid" in data
     assert "github_copilot" in data
     assert "openai" in data
@@ -147,6 +154,32 @@ def test_discover_llm_models_endpoint(client: TestClient, monkeypatch):
     assert r.json() == ["custom-openrouter-model-1", "custom-openrouter-model-2"]
 
 
+def test_bedrock_model_discovery_uses_saved_profile(client: TestClient, monkeypatch):
+    provider = _make_provider(
+        client,
+        name="Bedrock discovery",
+        api_format="bedrock",
+        models=["global.anthropic.claude-sonnet-4-6"],
+        aws_profile="scan-operator",
+    ).json()
+    captured = {}
+
+    async def fake_discover(**kwargs):
+        captured.update(kwargs)
+        return {"models": ["global.anthropic.claude-sonnet-4-6"], "capabilities": {}}
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_model_options_for_format", fake_discover
+    )
+    response = client.post(
+        "/api/settings/llm/discover-model-options",
+        json={"api_format": "bedrock", "provider_id": provider["id"]},
+    )
+
+    assert response.status_code == 200
+    assert captured["aws_profile"] == "scan-operator"
+
+
 def test_openai_compatible_discovery_failure_has_clear_error(
     client: TestClient, monkeypatch
 ):
@@ -171,27 +204,21 @@ def test_openai_compatible_discovery_failure_has_clear_error(
     )
 
 
-def test_burp_rest_api_config_round_trip(client: TestClient):
-    r = client.get("/api/settings/burp-rest-api")
+def test_burp_extension_config_round_trip(client: TestClient):
+    r = client.get("/api/extensions/aespa.burpsuite")
     assert r.status_code == 200
     assert r.json()["enabled"] is False
-    assert r.json()["api_url"] == "http://127.0.0.1:1337"
-    assert (
-        r.json()["scan_configuration_name"]
-        == "Audit checks - all except time-based detection methods"
+    assert r.json()["settings"] == {}
+
+    enabled = client.put(
+        "/api/extensions/aespa.burpsuite/enabled", json={"enabled": True}
     )
-    assert r.json()["scan_sqli"] is True
-    assert r.json()["scan_xss"] is True
-    assert r.json()["scan_command_injection"] is True
-    assert r.json()["scan_path_traversal"] is True
-    assert r.json()["scan_ssrf"] is True
-    assert r.json()["scan_xxe"] is True
-    assert r.json()["scan_ssti"] is True
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+    assert enabled.json()["web_scanners"][0]["id"] == "aespa.burpsuite"
 
     payload = {
-        "enabled": True,
         "api_url": "http://127.0.0.1:1337",
-        "api_key": None,
         "scan_configuration_name": "Fast audit",
         "scan_sqli": False,
         "scan_xss": True,
@@ -201,10 +228,11 @@ def test_burp_rest_api_config_round_trip(client: TestClient):
         "scan_xxe": True,
         "scan_ssti": True,
     }
-    r = client.put("/api/settings/burp-rest-api", json=payload)
+    r = client.patch(
+        "/api/extensions/aespa.burpsuite/settings", json={"settings": payload}
+    )
     assert r.status_code == 200
-    data = r.json()
-    assert data["enabled"] is True
+    data = r.json()["settings"]
     assert data["api_url"] == "http://127.0.0.1:1337"
     assert data["scan_configuration_name"] == "Fast audit"
     assert data["scan_sqli"] is False
@@ -216,6 +244,63 @@ def test_burp_rest_api_config_round_trip(client: TestClient):
     assert data["scan_ssti"] is True
 
 
+def test_upstream_proxy_config_uses_separate_urls(client: TestClient):
+    initial = client.get("/api/settings/upstream-proxy")
+    assert initial.status_code == 200
+    assert initial.json()["scanner_proxy_url"] is None
+    assert initial.json()["llm_proxy_url"] is None
+
+    payload = {
+        "scanner_proxy_url": " http://scanner-proxy.local:8080 ",
+        "llm_proxy_url": "https://llm-proxy.local:8443",
+        "proxy_scanner": True,
+        "proxy_llm": True,
+    }
+    updated = client.put("/api/settings/upstream-proxy", json=payload)
+
+    assert updated.status_code == 200
+    assert updated.json()["scanner_proxy_url"] == "http://scanner-proxy.local:8080"
+    assert updated.json()["llm_proxy_url"] == "https://llm-proxy.local:8443"
+    assert updated.json()["proxy_scanner"] is True
+    assert updated.json()["proxy_llm"] is True
+
+
+@pytest.mark.parametrize("field", ["scanner_proxy_url", "llm_proxy_url"])
+def test_upstream_proxy_config_rejects_invalid_url(client: TestClient, field: str):
+    response = client.put(
+        "/api/settings/upstream-proxy",
+        json={field: "socks5://proxy.local:1080"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_upstream_proxy_config_accepts_ca_bundle_paths(client: TestClient):
+    import certifi
+
+    bundle = certifi.where()
+    response = client.put(
+        "/api/settings/upstream-proxy",
+        json={
+            "scanner_ca_bundle_path": bundle,
+            "llm_ca_bundle_path": bundle,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["scanner_ca_bundle_path"] == bundle
+    assert response.json()["llm_ca_bundle_path"] == bundle
+    saved = client.get("/api/settings/upstream-proxy")
+    assert saved.json()["scanner_ca_bundle_path"] == bundle
+
+
+def test_upstream_proxy_config_rejects_missing_ca_bundle(client: TestClient):
+    response = client.put(
+        "/api/settings/upstream-proxy",
+        json={"llm_ca_bundle_path": "/missing/company-ca.pem"},
+    )
+    assert response.status_code == 422
+
+
 def test_cloudflare_access_config_round_trip(client: TestClient):
     # Defaults to no audience (legacy behaviour: audience check skipped).
     r = client.get("/api/settings/cloudflare-access")
@@ -224,6 +309,8 @@ def test_cloudflare_access_config_round_trip(client: TestClient):
 
 
 def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
+    monkeypatch.setattr("aespa.browser.playwright_chromium_available", lambda: True)
+    monkeypatch.setattr("aespa.browser.chromium_install_state", lambda: "available")
     monkeypatch.setattr(
         "aespa.runtime_capabilities.graphical_display_available", lambda: True
     )
@@ -231,6 +318,7 @@ def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
     assert initial.status_code == 200
     assert initial.json()["browser_engine"] == "playwright_chromium"
     assert initial.json()["browser_visible"] is False
+    assert initial.json()["playwright_chromium_available"] is True
 
     updated = client.put(
         "/api/settings/browser-debug",
@@ -243,9 +331,32 @@ def test_browser_debug_config_round_trip(client: TestClient, monkeypatch):
     assert updated.json()["graphical_display_message"] is None
 
 
+def test_browser_debug_defaults_to_system_chrome_after_install_failure(
+    client: TestClient, monkeypatch
+):
+    monkeypatch.setattr("aespa.browser.playwright_chromium_available", lambda: False)
+    monkeypatch.setattr("aespa.browser.chromium_install_state", lambda: "failed")
+
+    initial = client.get("/api/settings/browser-debug")
+
+    assert initial.status_code == 200
+    assert initial.json()["browser_engine"] == "system_chrome"
+    assert initial.json()["playwright_chromium_available"] is False
+    assert initial.json()["playwright_chromium_installing"] is False
+
+    updated = client.put(
+        "/api/settings/browser-debug",
+        json={"browser_engine": "playwright_chromium", "browser_visible": False},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["browser_engine"] == "system_chrome"
+
+
 def test_browser_debug_disables_visible_mode_without_display(
     client: TestClient, monkeypatch
 ):
+    monkeypatch.setattr("aespa.browser.playwright_chromium_available", lambda: True)
+    monkeypatch.setattr("aespa.browser.chromium_install_state", lambda: "available")
     monkeypatch.setattr(
         "aespa.runtime_capabilities.graphical_display_available", lambda: False
     )
@@ -372,6 +483,135 @@ def _make_profile(client: TestClient, provider_id: int, **overrides):
     return client.post("/api/settings/llm/model-configs", json=payload)
 
 
+def test_thinking_level_is_rejected_when_model_lists_none(
+    client: TestClient, monkeypatch
+):
+    async def no_levels(**kwargs):
+        return {"models": ["plain-model"], "capabilities": {"plain-model": {}}}
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_model_options_for_format", no_levels
+    )
+    provider = _make_provider(
+        client, models=["plain-model"], model_capabilities={"plain-model": {}}
+    ).json()
+
+    rejected = _make_profile(
+        client, provider["id"], model="plain-model", reasoning_effort="xhigh"
+    )
+    assert rejected.status_code == 422
+    assert "Set Thinking level to Default" in rejected.json()["detail"]
+
+    accepted = _make_profile(client, provider["id"], model="plain-model")
+    assert accepted.status_code == 200
+    assert accepted.json()["reasoning_effort"] is None
+
+
+def test_thinking_level_uses_live_levels_when_none_are_saved(
+    client: TestClient, monkeypatch
+):
+    calls = []
+
+    async def live_levels(**kwargs):
+        calls.append(kwargs)
+        return {
+            "models": ["live-model"],
+            "capabilities": {"live-model": {"supported_efforts": ["low", "high"]}},
+        }
+
+    monkeypatch.setattr(
+        "aespa.services.settings.discover_model_options_for_format", live_levels
+    )
+    provider = _make_provider(
+        client, models=["live-model"], model_capabilities={"live-model": {}}
+    ).json()
+
+    accepted = _make_profile(
+        client, provider["id"], model="live-model", reasoning_effort="high"
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["reasoning_effort"] == "high"
+    assert calls and calls[0]["api_format"] == "openai"
+
+    rejected = _make_profile(
+        client,
+        provider["id"],
+        name="Other",
+        model="live-model",
+        reasoning_effort="xhigh",
+    )
+    assert rejected.status_code == 422
+
+
+def test_auto_context_uses_freshly_discovered_form_value(client: TestClient):
+    provider_r = _make_provider(
+        client,
+        models=["reasoning-model"],
+        model_capabilities={
+            "reasoning-model": {"supported_efforts": ["low", "medium"]}
+        },
+    )
+    provider = provider_r.json()
+
+    profile_r = _make_profile(
+        client,
+        provider["id"],
+        model="reasoning-model",
+        max_context_tokens=None,
+        detected_context_tokens=1_000_000,
+    )
+
+    assert profile_r.status_code == 200
+    profile = profile_r.json()
+    assert profile["max_context_tokens"] == 1_000_000
+    assert profile["context_limit_source"] == "discovered"
+
+
+def test_provider_refresh_updates_auto_context_but_not_manual_context(
+    client: TestClient,
+):
+    provider_payload = {
+        "name": "Context Provider",
+        "api_format": "openai_compatible",
+        "base_url": "http://localhost:1234/v1",
+        "models": ["context-model"],
+        "model_capabilities": {"context-model": {"context_window_tokens": 100_000}},
+        "api_key": None,
+    }
+    provider = client.post("/api/settings/llm/providers", json=provider_payload).json()
+    automatic = _make_profile(
+        client,
+        provider["id"],
+        name="Automatic",
+        model="context-model",
+        max_context_tokens=None,
+    ).json()
+    manual = _make_profile(
+        client,
+        provider["id"],
+        name="Manual",
+        model="context-model",
+        max_context_tokens=150_000,
+    ).json()
+
+    provider_payload["model_capabilities"]["context-model"]["context_window_tokens"] = (
+        200_000
+    )
+    response = client.put(
+        f"/api/settings/llm/providers/{provider['id']}", json=provider_payload
+    )
+
+    assert response.status_code == 200
+    profiles = {
+        item["id"]: item
+        for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    assert profiles[automatic["id"]]["max_context_tokens"] == 200_000
+    assert profiles[automatic["id"]]["context_limit_source"] == "provider"
+    assert profiles[manual["id"]]["max_context_tokens"] == 150_000
+    assert profiles[manual["id"]]["context_limit_source"] == "manual"
+
+
 def test_factory_droid_provider_uses_cli_credentials(client: TestClient):
     response = _make_provider(
         client,
@@ -391,6 +631,28 @@ def test_factory_droid_provider_uses_cli_credentials(client: TestClient):
     assert provider["project_id"] is None
     assert provider["username"] is None
     assert provider["models"] == ["gpt-5.6-luna"]
+
+
+def test_claude_cli_provider_uses_signed_in_account(client: TestClient):
+    response = _make_provider(
+        client,
+        name="Claude CLI",
+        api_format="claude_cli",
+        base_url="https://should-not-be-stored.example",
+        models=["sonnet", "opus"],
+        api_key="should-not-be-stored",
+        username="should-not-be-stored",
+    )
+
+    assert response.status_code == 200
+    provider = response.json()
+    assert provider["base_url"] is None
+    assert provider["has_api_key"] is False
+    assert provider["username"] is None
+    assert provider["models"] == ["sonnet", "opus"]
+    profile = _make_profile(client, provider["id"], model="sonnet")
+    assert profile.status_code == 200
+    assert profile.json()["provider"] == "claude_cli"
 
 
 def test_create_provider_and_profile(client: TestClient):
@@ -414,6 +676,112 @@ def test_create_provider_and_profile(client: TestClient):
     active = client.get("/api/settings/llm").json()
     assert active["api_key"] is None
     assert active["provider"] == "openai"
+
+
+def test_model_rate_limits_are_saved_and_shared_by_provider_model_pair(
+    client: TestClient,
+):
+    provider = _make_provider(client).json()
+    first = _make_profile(
+        client,
+        provider["id"],
+        name="Primary llama",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+    second = _make_profile(
+        client,
+        provider["id"],
+        name="Secondary llama",
+        max_tpm=120_000,
+        max_rpm=60,
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert "max_tpm" not in provider
+    assert "max_rpm" not in provider
+
+    updated = client.put(
+        f"/api/settings/llm/model-configs/{second.json()['id']}",
+        json={
+            "name": "Secondary llama",
+            "provider_id": provider["id"],
+            "model": "llama-3",
+            "max_tpm": 240_000,
+            "max_rpm": 90,
+            "max_tokens": 4096,
+        },
+    )
+
+    assert updated.status_code == 200
+    models = {
+        item["id"]: item
+        for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    for model_id in (first.json()["id"], second.json()["id"]):
+        assert models[model_id]["max_tpm"] == 240_000
+        assert models[model_id]["max_rpm"] == 90
+
+
+def test_llm_export_places_rate_limits_on_models(client: TestClient):
+    provider = _make_provider(client).json()
+    model = _make_profile(
+        client,
+        provider["id"],
+        max_tpm=120_000,
+        max_rpm=60,
+    ).json()
+
+    exported = client.get("/api/settings/llm/export").json()
+
+    assert exported["version"] == 2
+    exported_provider = next(
+        item for item in exported["providers"] if item["name"] == provider["name"]
+    )
+    exported_model = next(
+        item for item in exported["profiles"] if item["name"] == model["name"]
+    )
+    assert "max_tpm" not in exported_provider
+    assert "max_rpm" not in exported_provider
+    assert exported_model["max_tpm"] == 120_000
+    assert exported_model["max_rpm"] == 60
+
+
+def test_llm_import_accepts_legacy_provider_rate_limits(client: TestClient):
+    response = client.post(
+        "/api/settings/llm/import",
+        json={
+            "version": 1,
+            "exported_at": "2026-09-18T00:00:00Z",
+            "providers": [
+                {
+                    "name": "Legacy provider",
+                    "api_format": "openai",
+                    "models": ["gpt-4o"],
+                    "max_tpm": 100_000,
+                    "max_rpm": 50,
+                }
+            ],
+            "profiles": [
+                {
+                    "name": "Legacy model",
+                    "provider_name": "Legacy provider",
+                    "model": "gpt-4o",
+                    "max_tokens": 4096,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    model = next(
+        item
+        for item in client.get("/api/settings/llm/model-configs").json()
+        if item["name"] == "Legacy model"
+    )
+    assert model["max_tpm"] == 100_000
+    assert model["max_rpm"] == 50
 
 
 def test_create_model_defaults_name_to_provider_model(client: TestClient):
@@ -464,12 +832,14 @@ def test_create_bedrock_provider_with_blank_api_key(client: TestClient):
         base_url=None,
         models=["global.anthropic.claude-sonnet-4-6"],
         api_key=None,
+        aws_profile="scan-operator",
     )
     assert provider_r.status_code == 200
     provider = provider_r.json()
     assert provider["api_format"] == "bedrock"
     assert provider["api_key"] is None
     assert provider["base_url"] is None
+    assert provider["aws_profile"] == "scan-operator"
 
     profile_r = _make_profile(
         client,
@@ -481,6 +851,7 @@ def test_create_bedrock_provider_with_blank_api_key(client: TestClient):
     assert active["provider"] == "bedrock"
     assert active["api_key"] is None
     assert active["base_url"] is None
+    assert active["aws_profile"] == "scan-operator"
 
 
 def test_create_github_copilot_provider_without_token(client: TestClient):
@@ -515,11 +886,13 @@ def test_bedrock_mantle_project_id_round_trips(client: TestClient):
         project_id="proj_5d5ykleja6cwpirysbb7",
         models=["openai.gpt-oss-120b"],
         api_key="bedrock-key",
+        aws_profile="mantle-operator",
     )
     assert provider_r.status_code == 200
     provider = provider_r.json()
     assert provider["api_format"] == "bedrock_mantle"
     assert provider["project_id"] == "proj_5d5ykleja6cwpirysbb7"
+    assert provider["aws_profile"] == "mantle-operator"
 
     profile_r = _make_profile(client, provider["id"], model="openai.gpt-oss-120b")
     assert profile_r.status_code == 200
@@ -527,6 +900,65 @@ def test_bedrock_mantle_project_id_round_trips(client: TestClient):
     active = client.get("/api/settings/llm").json()
     assert active["provider"] == "bedrock_mantle"
     assert active["project_id"] == "proj_5d5ykleja6cwpirysbb7"
+    assert active["aws_profile"] == "mantle-operator"
+
+
+def test_google_vertex_provider_uses_adc_settings(client: TestClient):
+    provider_r = _make_provider(
+        client,
+        name="Vertex",
+        api_format="google_vertex",
+        base_url="https://should-not-be-stored.example",
+        project_id="example-project",
+        location="us-central1",
+        models=["gemini-2.5-flash"],
+        api_key="should-not-be-stored",
+    )
+
+    assert provider_r.status_code == 200
+    provider = provider_r.json()
+    assert provider["api_format"] == "google_vertex"
+    assert provider["project_id"] == "example-project"
+    assert provider["location"] == "us-central1"
+    assert provider["base_url"] is None
+    assert provider["has_api_key"] is False
+
+    profile_r = _make_profile(client, provider["id"], model="gemini-2.5-flash")
+    assert profile_r.status_code == 200
+    active = client.get("/api/settings/llm").json()
+    assert active["provider"] == "google_vertex"
+    assert active["project_id"] == "example-project"
+    assert active["location"] == "us-central1"
+    exported = client.get("/api/settings/llm/export").json()
+    exported_provider = next(
+        item for item in exported["providers"] if item["name"] == "Vertex"
+    )
+    assert exported_provider["project_id"] == "example-project"
+    assert exported_provider["location"] == "us-central1"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "projects/example/locations/us-central1/endpoints/123",
+        "projects/example/locations/us-central1/models/123",
+        "tunedModels/example",
+    ],
+)
+def test_google_vertex_rejects_non_serverless_model_resources(
+    client: TestClient, model: str
+):
+    response = _make_provider(
+        client,
+        name=f"Vertex {model}",
+        api_format="google_vertex",
+        project_id="example-project",
+        location="global",
+        models=[model],
+    )
+
+    assert response.status_code == 422
+    assert "serverless publisher model" in response.text
 
 
 def test_legacy_provider_formats_are_supported(client: TestClient):
@@ -626,95 +1058,75 @@ def test_write_only_api_keys_behavior(client: TestClient):
     assert clear_resp.status_code == 200
     assert clear_resp.json()["has_api_key"] is False
 
-    # 5. Burp REST API key write-only test
-    burp_put = client.put(
-        "/api/settings/burp-rest-api",
-        json={
-            "enabled": True,
-            "api_url": "http://127.0.0.1:1337",
-            "api_key": "burp-secret-key",
-            "scan_configuration_name": "Audit",
-            "scan_sqli": True,
-            "scan_xss": True,
-            "scan_command_injection": True,
-            "scan_path_traversal": True,
-            "scan_ssrf": True,
-            "scan_xxe": True,
-            "scan_ssti": True,
-        },
+    # 5. Extension secret write-only test
+    client.put("/api/extensions/aespa.burpsuite/enabled", json={"enabled": True})
+    burp_put = client.patch(
+        "/api/extensions/aespa.burpsuite/settings",
+        json={"settings": {"api_key": "burp-secret-key"}},
     )
     assert burp_put.status_code == 200
-    assert burp_put.json()["has_api_key"] is True
-    assert burp_put.json()["api_key"] is None
+    assert burp_put.json()["has_secrets"]["api_key"] is True
+    assert "burp-secret-key" not in burp_put.text
 
-    burp_get = client.get("/api/settings/burp-rest-api")
-    assert burp_get.json()["has_api_key"] is True
-    assert burp_get.json()["api_key"] is None
+    burp_get = client.get("/api/extensions/aespa.burpsuite")
+    assert burp_get.json()["has_secrets"]["api_key"] is True
+    assert "burp-secret-key" not in burp_get.text
 
 
-def test_run_llm_config_resolves_provider_fields_without_changing_session_instance():
-    from aespa import models as _models  # noqa: F401
+def test_run_llm_config_resolves_provider_fields_without_changing_session_instance(
+    engine,
+):
     from aespa.models import LLMConfig, LLMProviderConfig, Site, TestRun
     from aespa.services import settings as settings_service
 
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    try:
-        SQLModel.metadata.create_all(engine)
-        with Session(engine) as session:
-            provider = LLMProviderConfig(
-                name="Azure Claude",
-                api_format="azure_foundry_anthropic",
-                api_key="provider-key",
-                base_url="https://example.services.ai.azure.com/anthropic/v1",
-                models_json='["claude-sonnet-4-5"]',
-            )
-            profile = LLMConfig(
-                name="Claude profile",
-                is_active=True,
-                provider_id=1,
-                model="claude-sonnet-4-5",
-                api_key=None,
-                base_url=None,
-            )
-            site = Site(name="Target", base_url="https://target.local")
-            session.add(provider)
-            session.add(profile)
-            session.add(site)
-            session.commit()
-            session.refresh(site)
-            run = TestRun(site_id=site.id, name="Run", llm_config_id=profile.id)
-            session.add(run)
-            session.commit()
-            session.refresh(run)
+    with Session(engine) as session:
+        provider = LLMProviderConfig(
+            name="Azure Claude",
+            api_format="azure_foundry_anthropic",
+            api_key="provider-key",
+            base_url="https://example.services.ai.azure.com/anthropic/v1",
+            models_json='["claude-sonnet-4-5"]',
+        )
+        profile = LLMConfig(
+            name="Claude profile",
+            is_active=True,
+            provider_id=1,
+            model="claude-sonnet-4-5",
+            api_key=None,
+            base_url=None,
+        )
+        site = Site(name="Target", base_url="https://target.local")
+        session.add(provider)
+        session.add(profile)
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        run = TestRun(site_id=site.id, name="Run", llm_config_id=profile.id)
+        session.add(run)
+        session.commit()
+        session.refresh(run)
 
-            cfg = settings_service.get_llm_config_for_run(session, run)
+        cfg = settings_service.get_llm_config_for_run(session, run)
 
-            assert inspect(cfg, raiseerr=False) is None
-            assert inspect(profile).session is session
-            assert session.is_modified(profile) is False
-            assert cfg.provider == "azure_foundry_anthropic"
-            assert cfg.api_key == "provider-key"
-            assert cfg.base_url == "https://example.services.ai.azure.com/anthropic/v1"
+        assert inspect(cfg, raiseerr=False) is None
+        assert inspect(profile).session is session
+        assert session.is_modified(profile) is False
+        assert cfg.provider == "azure_foundry_anthropic"
+        assert cfg.api_key == "provider-key"
+        assert cfg.base_url == "https://example.services.ai.azure.com/anthropic/v1"
 
-            settings_service.get_run_scanner_policy(session, run)
-            assert session.is_modified(profile) is False
-            assert profile.api_key is None
-            assert profile.base_url is None
-            profile_id = profile.id
-            session.expire_all()
-            assert cfg.api_key == "provider-key"
+        settings_service.get_run_scanner_policy(session, run)
+        assert session.is_modified(profile) is False
+        assert profile.api_key is None
+        assert profile.base_url is None
+        profile_id = profile.id
+        session.expire_all()
+        assert cfg.api_key == "provider-key"
 
-        with Session(engine) as session:
-            persisted = session.get(LLMConfig, profile_id)
-            assert persisted.api_key is None
-            assert persisted.base_url is None
-    finally:
-        SQLModel.metadata.drop_all(engine)
-        engine.dispose()
+    with Session(engine) as session:
+        persisted = session.get(LLMConfig, profile_id)
+        assert persisted.api_key is None
+        assert persisted.base_url is None
 
 
 def test_profile_model_must_belong_to_provider(client: TestClient):
@@ -745,6 +1157,86 @@ def test_cannot_delete_model_used_by_scan_profile(client: TestClient):
         'Cannot delete model "Shared model" because it is used by '
         "scan profile(s): Full scan. Update those profiles first."
     )
+
+
+def test_cannot_remove_provider_model_used_by_scan_profile(client: TestClient):
+    provider = _make_provider(client).json()
+    model = _make_profile(client, provider["id"], name="Shared model").json()
+    client.post(
+        "/api/settings/llm/profiles",
+        json={"name": "Full scan", "default_model_id": model["id"]},
+    )
+
+    response = client.put(
+        f"/api/settings/llm/providers/{provider['id']}",
+        json={
+            "name": provider["name"],
+            "api_format": provider["api_format"],
+            "base_url": provider["base_url"],
+            "models": ["gpt-4o"],
+            "api_key": None,
+        },
+    )
+
+    assert response.status_code == 409
+    assert '"llama-3" is used by Full scan' in response.json()["detail"]
+    saved_provider = next(
+        item
+        for item in client.get("/api/settings/llm/providers").json()
+        if item["id"] == provider["id"]
+    )
+    assert "llama-3" in saved_provider["models"]
+
+
+def test_removing_unused_provider_model_deletes_its_model_record(client: TestClient):
+    provider = _make_provider(client).json()
+    removed_model = _make_profile(client, provider["id"], name="Removed model").json()
+    retained_model = _make_profile(
+        client, provider["id"], name="Retained model", model="gpt-4o"
+    ).json()
+
+    response = client.put(
+        f"/api/settings/llm/providers/{provider['id']}",
+        json={
+            "name": provider["name"],
+            "api_format": provider["api_format"],
+            "base_url": provider["base_url"],
+            "models": ["gpt-4o"],
+            "api_key": None,
+        },
+    )
+
+    assert response.status_code == 200
+    models = {
+        item["id"]: item
+        for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    assert removed_model["id"] not in models
+    assert models[retained_model["id"]]["is_active"] is True
+
+
+def test_import_removing_unused_provider_model_deletes_its_model_record(
+    client: TestClient,
+):
+    provider = _make_provider(client).json()
+    removed_model = _make_profile(client, provider["id"], name="Removed model").json()
+    _make_profile(client, provider["id"], name="Retained model", model="gpt-4o")
+    exported = client.get("/api/settings/llm/export").json()
+    exported_provider = next(
+        item for item in exported["providers"] if item["name"] == provider["name"]
+    )
+    exported_provider["models"] = ["gpt-4o"]
+    exported["profiles"] = [
+        item for item in exported["profiles"] if item["name"] != removed_model["name"]
+    ]
+
+    response = client.post("/api/settings/llm/import", json=exported)
+
+    assert response.status_code == 200
+    model_ids = {
+        item["id"] for item in client.get("/api/settings/llm/model-configs").json()
+    }
+    assert removed_model["id"] not in model_ids
 
 
 def test_delete_scan_profile_clears_run_reference(client: TestClient):
@@ -792,11 +1284,45 @@ def test_upsert_invalid_max_tokens(client: TestClient):
 # ── Scanner policy ───────────────────────────────────────────────────────────
 
 
+def test_openai_refusal_recovery_toggle_preserves_other_policy(client: TestClient):
+    original = client.get("/api/settings/scanner-policy").json()
+    response = client.put(
+        "/api/settings/scanner-policy/openai-refusal-recovery",
+        json={"enabled": True},
+    )
+    assert response.status_code == 200
+    saved = client.get("/api/settings/scanner-policy").json()
+    assert saved["openai_refusal_recovery_enabled"] is True
+    assert saved["scan_mode"] == original["scan_mode"]
+
+    legacy_payload = {
+        key: value
+        for key, value in saved.items()
+        if key not in {"openai_refusal_recovery_enabled", "updated_at"}
+    }
+    response = client.put("/api/settings/scanner-policy", json=legacy_payload)
+    assert response.status_code == 200
+    assert response.json()["openai_refusal_recovery_enabled"] is True
+
+    response = client.put(
+        "/api/settings/scanner-policy/openai-refusal-recovery",
+        json={"enabled": False},
+    )
+    assert response.status_code == 200
+    assert (
+        client.get("/api/settings/scanner-policy").json()[
+            "openai_refusal_recovery_enabled"
+        ]
+        is False
+    )
+
+
 def test_get_scanner_policy_defaults(client: TestClient):
     r = client.get("/api/settings/scanner-policy")
     assert r.status_code == 200
     data = r.json()
     assert data["execution_monitor_enabled"] is False
+    assert data["openai_refusal_recovery_enabled"] is False
     assert data["disable_deterministic_checks"] is False
     assert data["max_consecutive_text_turns"] == 0
     assert data["enforce_full_coverage_obligations"] is False
@@ -805,10 +1331,14 @@ def test_get_scanner_policy_defaults(client: TestClient):
     assert "DELETE" not in data["methods_by_mode"]["aggressive"]
     assert data["max_probes_per_page"] == 50
     assert data["thinking_max_steps"] == 120
+    assert data["dast_max_concurrent_llm_requests"] == 4
     assert data["min_delay_s"] == 0.05
     assert data["allowed_schemes"] == ["http", "https"]
     assert "POST" in data["methods_by_mode"]["safe_active"]
     assert data["strict_locator_enforcement"] is True
+    assert data["sast_budget_mode"] == "adaptive"
+    assert data["sast_worker_budget_max"] == 250
+    assert data["sast_max_concurrent_llm_requests"] == 4
 
 
 def test_upsert_scanner_policy(client: TestClient):
@@ -823,10 +1353,13 @@ def test_upsert_scanner_policy(client: TestClient):
             "standard_coverage_percent": 72,
             "max_probes_per_page": 25,
             "thinking_max_steps": 180,
+            "dast_max_concurrent_llm_requests": 7,
             "request_timeout_s": 12.5,
             "min_delay_s": 0.1,
             "blocked_headers": ["host", "cookie", "x-admin"],
             "strict_locator_enforcement": False,
+            "sast_budget_mode": "fixed",
+            "sast_max_concurrent_llm_requests": 6,
         }
     )
     r = client.put("/api/settings/scanner-policy", json=payload)
@@ -840,8 +1373,11 @@ def test_upsert_scanner_policy(client: TestClient):
     assert data["scan_mode"] == "aggressive"
     assert data["max_probes_per_page"] == 25
     assert data["thinking_max_steps"] == 180
+    assert data["dast_max_concurrent_llm_requests"] == 7
     assert data["blocked_headers"] == ["host", "cookie", "x-admin"]
     assert data["strict_locator_enforcement"] is False
+    assert data["sast_budget_mode"] == "fixed"
+    assert data["sast_max_concurrent_llm_requests"] == 6
 
     r2 = client.get("/api/settings/scanner-policy")
     assert r2.json()["request_timeout_s"] == 12.5
@@ -852,6 +1388,55 @@ def test_upsert_scanner_policy_invalid_limit(client: TestClient):
     payload["max_probes_per_page"] = 9999
     r = client.put("/api/settings/scanner-policy", json=payload)
     assert r.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["dast_max_concurrent_llm_requests", "sast_max_concurrent_llm_requests"],
+)
+def test_upsert_scanner_policy_rejects_invalid_llm_concurrency(
+    client: TestClient, field: str
+):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload[field] = 0
+
+    response = client.put("/api/settings/scanner-policy", json=payload)
+
+    assert response.status_code == 422
+
+
+def test_upsert_scanner_policy_rejects_adaptive_max_below_minimum(client: TestClient):
+    payload = client.get("/api/settings/scanner-policy").json()
+    payload["sast_budget_mode"] = "adaptive"
+    payload["sast_threat_budget"] = 80
+    payload["sast_worker_budget_max"] = 79
+    r = client.put("/api/settings/scanner-policy", json=payload)
+    assert r.status_code == 422
+
+
+def test_deep_scan_settings_are_separate_from_specialists(client: TestClient):
+    defaults = client.get("/api/settings/deep-scan-config")
+    assert defaults.status_code == 200
+    assert defaults.json()["max_concurrent_workers"] == 6
+    assert defaults.json()["max_concurrent_planners"] == 4
+
+    payload = {
+        "max_concurrent_workers": 8,
+        "max_concurrent_planners": 3,
+        "max_tasks": 250,
+        "max_steps_per_task": 40,
+        "include_sast_leads": True,
+        "include_recon_checks": False,
+    }
+    saved = client.put("/api/settings/deep-scan-config", json=payload)
+    assert saved.status_code == 200
+    assert saved.json()["max_concurrent_workers"] == 8
+    assert saved.json()["max_concurrent_planners"] == 3
+    assert saved.json()["include_recon_checks"] is False
+
+    specialist = client.get("/api/settings/specialist-agent-config")
+    assert specialist.status_code == 200
+    assert specialist.json()["max_concurrent"] == 5
 
 
 def test_upsert_scanner_policy_rejects_invalid_standard_target(client: TestClient):
@@ -1028,13 +1613,13 @@ def test_delete_model_used_by_scan_profile_returns_conflict(fk_engine):
     from aespa.models import (
         ApiCollection,
         ApiTestRun,
-        Application,
         AssessmentCampaign,
         LLMConfig,
         LLMProfile,
         LLMProviderConfig,
         SastRun,
         Site,
+        System,
         TestRun,
     )
     from aespa.services import settings as settings_svc
@@ -1091,11 +1676,11 @@ def test_delete_model_used_by_scan_profile_returns_conflict(fk_engine):
         sast_run = SastRun(name="SAST Run", llm_config_id=model1.id)
         session.add(sast_run)
 
-        app = Application(name="Test App")
+        app = System(name="Test App")
         session.add(app)
         session.flush()
         campaign = AssessmentCampaign(
-            application_id=app.id, name="Campaign", llm_config_id=model1.id
+            system_id=app.id, name="Campaign", llm_config_id=model1.id
         )
         session.add(campaign)
         session.commit()

@@ -1,5 +1,7 @@
 """Tests for Phase 1 recon summary: build_recon_summary and context builder fallback."""
 
+import json
+
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -14,7 +16,7 @@ from aespa.models import (
 )
 from aespa.models import TestRun as RunModel
 from aespa.services import recon_summary as recon_summary_svc
-from aespa.services import scanner
+from aespa.services import scanner, web_workprogram
 
 
 def _make_engine():
@@ -99,6 +101,67 @@ def test_build_recon_summary_access_observations(monkeypatch):
     assert routes["https://target.local/profile"]["access"]["classification"] == "mixed"
     assert routes["https://target.local/account"]["access"]["labels"] == ["Customer"]
     assert summary["access"]["profiles"][0]["username"] == "alice"
+
+
+def test_public_page_with_same_authenticated_content_skips_auth_obligations(
+    monkeypatch,
+):
+    engine = _make_engine()
+    monkeypatch.setattr(recon_summary_svc, "get_engine", lambda: engine)
+    monkeypatch.setattr(web_workprogram, "get_engine", lambda: engine)
+
+    with Session(engine) as s:
+        run = _seed_run(s, engine)
+        run_id = run.id
+        credential = Credential(
+            site_id=run.site_id, username="alice", password="secret"
+        )
+        s.add(credential)
+        s.flush()
+        page_text = "Open an account today. Total Balance $42,816.50"
+        page = CrawledPage(
+            test_run_id=run_id,
+            url="http://target.local/",
+            req_auth=False,
+            page_text=page_text,
+            accessible_by=f"[{credential.id}]",
+        )
+        s.add(page)
+        s.flush()
+        s.add_all(
+            [
+                PageCredentialView(
+                    page_id=page.id,
+                    test_run_id=run_id,
+                    credential_id=None,
+                    username="unauthenticated",
+                    req_auth=False,
+                    page_text=page_text,
+                ),
+                PageCredentialView(
+                    page_id=page.id,
+                    test_run_id=run_id,
+                    credential_id=credential.id,
+                    username="alice",
+                    req_auth=False,
+                    page_text=page_text,
+                ),
+            ]
+        )
+        s.commit()
+
+    summary = recon_summary_svc.build_recon_summary(run_id)
+    route = next(
+        route
+        for route in summary["routes"]
+        if route["canonical_url"] == "http://target.local/"
+    )
+
+    assert route["access"]["classification"] == "mixed"
+    assert route["access"]["identity_content"] == "equivalent"
+    obligations = web_workprogram._web_route_obligations(route, scan_mode="full")
+    assert not any(item[1] == "auth_vs_unauth" for item in obligations)
+    assert not any(item[1] == "http_cleartext_sensitive" for item in obligations)
 
 
 def test_build_recon_summary_evidence_signals(monkeypatch):
@@ -437,6 +500,58 @@ def test_thinking_context_uses_summary_when_present(monkeypatch):
     assert "Recon brief" in context
     assert "Actionable route sample" in context
     assert "priority order" not in context
+    assert "Grouped pages" not in context
+
+
+def test_thinking_context_lists_grouped_pages(monkeypatch):
+    engine = _make_engine()
+    monkeypatch.setattr(recon_summary_svc, "get_engine", lambda: engine)
+
+    import aespa.services.scanner as scanner_mod
+
+    monkeypatch.setattr(scanner_mod, "get_engine", lambda: engine)
+
+    with Session(engine) as s:
+        run = _seed_run(s, engine)
+        run.route_groups_json = json.dumps(
+            [
+                {
+                    "route_pattern": "https://target.local/products/{value}",
+                    "label": "Product pages",
+                    "links_seen": 4000,
+                    "example_urls": ["https://target.local/products/a"],
+                    "pages_sampled": 5,
+                }
+            ]
+        )
+        s.add(run)
+        run_id = run.id
+        s.commit()
+
+    recon_summary_svc.build_recon_summary(run_id)
+
+    context = scanner._build_thinking_context_from_recon_summary(
+        run_id,
+        base_url="https://target.local",
+        findings_snapshot=[],
+    )
+    assert (
+        "https://target.local/products/{value}: 4000 links seen, "
+        "5 example pages visited" in context
+    )
+    assert "crawl sampling for indexing, not scan scope" in context
+    assert "other in-scope URLs and object IDs" in context
+    assert (
+        "unsampled records for access control, IDOR, ownership, roles, and business logic"
+        in context
+    )
+    assert (
+        "Similar page layout does not establish shared authorization or coverage"
+        in context
+    )
+    assert "Base findings and coverage claims on concrete tests and evidence" in context
+    assert "do not need to index or exhaustively test every linked page" in context
+    assert "try another example only" not in context
 
 
 def test_thinking_context_includes_confirmed_findings(monkeypatch):

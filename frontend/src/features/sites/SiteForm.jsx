@@ -1,57 +1,71 @@
 import * as sitesApi from "../../shared/api/sites.js";
 import * as settingsApi from "../../shared/api/settings.js";
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { nav } from "../../shared/navigation/router.js";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
-import { IconPlus } from "../../shared/ui/Icons.jsx";
+import { Tabs } from "../../shared/ui/Tabs.tsx";
+import {
+  SiteCredentialsTab,
+  credentialFromSite,
+  credentialPayload,
+  currentTest,
+} from "./SiteCredentialsTab.jsx";
+import { SiteWorkflowsTab } from "./SiteWorkflowsTab.jsx";
+import styles from "./SiteForm.module.css";
 
-const defaultLoginFields = () => [
-  {
-    key: "username",
-    label: "Username",
-    value: "",
-    sensitive: false,
-    selector: "",
-  },
-  {
-    key: "password",
-    label: "Password",
-    value: "",
-    sensitive: true,
-    selector: "",
-  },
-];
-
-const fieldKey = (label, index, used) => {
-  const stem =
-    (label || `field_${index + 1}`)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
-      .replace(/^[^a-z]+/, "") || `field_${index + 1}`;
-  let key = stem;
-  let suffix = 2;
-  while (used.has(key)) key = `${stem}_${suffix++}`;
-  used.add(key);
-  return key;
+const emptyForm = {
+  name: "",
+  base_url: "",
+  requires_auth: false,
+  login_url: "",
+  notes: "",
+  scan_guidance: "",
+  workflow_data: [],
+  credentials: [],
 };
 
-export function SiteForm({ siteId }) {
+const formFromSite = (site) => ({
+  name: site.name,
+  base_url: site.base_url,
+  requires_auth: site.requires_auth,
+  login_url: site.login_url || "",
+  notes: site.notes || "",
+  scan_guidance: site.scan_guidance || "",
+  workflow_data: site.workflow_data || [],
+  credentials: site.credentials.map(credentialFromSite),
+});
+
+const firstInvalid = (root) =>
+  root?.querySelector("input:invalid, select:invalid, textarea:invalid");
+
+const invalidTabs = (root) =>
+  new Set(
+    [...(root?.querySelectorAll("input:invalid, select:invalid, textarea:invalid") || [])]
+      .map((el) => el.closest("[data-tab]")?.dataset.tab)
+      .filter(Boolean),
+  );
+
+// With `onSaved`, the form is embedded in the site page: it saves in place and
+// reports the updated site instead of navigating away.
+export function SiteForm({ siteId, onSaved }) {
   const isEdit = typeof siteId === "number";
-  const [form, setForm] = useState({
-    name: "",
-    base_url: "",
-    requires_auth: false,
-    login_url: "",
-    notes: "",
-    scan_guidance: "",
-    credentials: [],
-  });
+  const embedded = typeof onSaved === "function";
+  const [form, setForm] = useState(emptyForm);
+  const [savedForm, setSavedForm] = useState(emptyForm);
+  const [savedNotice, setSavedNotice] = useState(false);
+  const [hasSavedWorkflows, setHasSavedWorkflows] = useState(false);
+  const [tab, setTab] = useState("site");
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [checked, setChecked] = useState(false);
+  const [tabErrors, setTabErrors] = useState(new Set());
   const [browserCapabilities, setBrowserCapabilities] = useState(null);
+  const [loginTests, setLoginTests] = useState({});
+  const formRef = useRef(null);
+
   useEffect(() => {
     settingsApi
       .getBrowserDebugConfig()
@@ -63,29 +77,10 @@ export function SiteForm({ siteId }) {
     (async () => {
       try {
         const d = await sitesApi.getSite(siteId);
-        setForm({
-          name: d.name,
-          base_url: d.base_url,
-          requires_auth: d.requires_auth,
-          login_url: d.login_url || "",
-          notes: d.notes || "",
-          scan_guidance: d.scan_guidance || "",
-          credentials: d.credentials.map((c) => ({
-            username: c.username,
-            password: c.password,
-            login_fields: (c.login_fields?.length ? c.login_fields : defaultLoginFields()).map(
-              (field) => ({
-                ...field,
-                selector: field.selector || "",
-              }),
-            ),
-            label: c.label || "",
-            login_url: c.login_url || "",
-            auth_mode: c.auth_mode || "auto",
-            totp_seed: "",
-            test_mailbox_url: c.test_mailbox_url || "",
-          })),
-        });
+        const loaded = formFromSite(d);
+        setForm(loaded);
+        setSavedForm(loaded);
+        setHasSavedWorkflows(Boolean(d.workflow_data?.length));
       } catch (e) {
         setError(e.message);
       } finally {
@@ -93,47 +88,37 @@ export function SiteForm({ siteId }) {
       }
     })();
   }, [isEdit, siteId]);
+  useEffect(() => {
+    if (checked) setTabErrors(invalidTabs(formRef.current));
+  }, [checked, form]);
+
   const upd = (p) => {
-    setForm((f) => ({
-      ...f,
-      ...p,
-    }));
+    setSavedNotice(false);
+    setForm((f) => ({ ...f, ...p }));
   };
-  const updC = (i, p) =>
-    setForm((f) => ({
-      ...f,
-      credentials: f.credentials.map((c, j) =>
-        j === i
-          ? {
-              ...c,
-              ...p,
-            }
-          : c,
-      ),
-    }));
-  const addC = () =>
-    upd({
-      credentials: [
-        ...form.credentials,
-        {
-          username: "",
-          password: "",
-          login_fields: defaultLoginFields(),
-          label: "",
-          login_url: "",
-          auth_mode: "auto",
-          totp_seed: "",
-          test_mailbox_url: "",
-        },
-      ],
-    });
-  const rmC = (i) =>
-    upd({
-      credentials: form.credentials.filter((_, j) => j !== i),
-    });
+  const dirty = JSON.stringify(form) !== JSON.stringify(savedForm);
+  const discardChanges = () => {
+    setForm(savedForm);
+    setChecked(false);
+    setTabErrors(new Set());
+    setError(null);
+  };
+
   const onSubmit = async (e) => {
     e.preventDefault();
     setError(null);
+    setChecked(true);
+    const invalid = firstInvalid(formRef.current);
+    if (invalid) {
+      // Show the tab, account, or workflow that holds the field before the
+      // browser reports it; hidden fields cannot show a validation message.
+      flushSync(() => {
+        setTab(invalid.closest("[data-tab]")?.dataset.tab || "site");
+        invalid.checkValidity();
+      });
+      invalid.reportValidity();
+      return;
+    }
     setSaving(true);
     const payload = {
       name: form.name.trim(),
@@ -142,30 +127,25 @@ export function SiteForm({ siteId }) {
       login_url: form.requires_auth ? form.login_url.trim() || null : null,
       notes: form.notes.trim() || null,
       scan_guidance: form.scan_guidance.trim() || null,
-      credentials: form.requires_auth
-        ? form.credentials.map((c) => {
-            const usedKeys = new Set();
-            const loginFields = c.login_fields.map((field, index) => ({
-              key: fieldKey(field.label, index, usedKeys),
-              label: field.label.trim(),
-              value: field.value,
-              sensitive: Boolean(field.sensitive),
-              selector: field.selector?.trim() || null,
-            }));
-            const base = {
-              login_fields: loginFields,
-              label: c.label || null,
-              login_url: c.login_url?.trim() || null,
-              auth_mode: c.auth_mode || "auto",
-            };
-            if (c.totp_seed?.trim()) base.totp_seed = c.totp_seed.trim();
-            if (c.test_mailbox_url?.trim()) base.test_mailbox_url = c.test_mailbox_url.trim();
-            return base;
-          })
-        : [],
+      workflow_data: form.workflow_data.map((item) => ({
+        name: item.name.trim(),
+        goal: item.goal.trim(),
+        start_url: item.start_url.trim(),
+        instructions: item.instructions.trim(),
+      })),
+      credentials: form.requires_auth ? form.credentials.map(credentialPayload) : [],
     };
     try {
-      if (isEdit) {
+      if (embedded) {
+        const updated = await sitesApi.updateSite(siteId, payload);
+        const saved = formFromSite(updated);
+        setForm(saved);
+        setSavedForm(saved);
+        setHasSavedWorkflows(Boolean(updated.workflow_data?.length));
+        setChecked(false);
+        setSavedNotice(true);
+        onSaved(updated);
+      } else if (isEdit) {
         await sitesApi.updateSite(siteId, payload);
         nav(`#/sites/${siteId}`);
       } else {
@@ -178,6 +158,43 @@ export function SiteForm({ siteId }) {
       setSaving(false);
     }
   };
+
+  const failedLogins = form.requires_auth
+    ? form.credentials.filter((c) =>
+        ["failed", "error"].includes(
+          currentTest(loginTests, c, form.login_url, form.base_url)?.state,
+        ),
+      ).length
+    : 0;
+  const tabLabel = (key, text, count, failed = 0) => (
+    <>
+      {text}
+      {count > 0 && <span className={styles.count}>{count}</span>}
+      {failed > 0 && <span className={styles.failedCount}>{failed} failed</span>}
+      {tabErrors.has(key) && (
+        <span className={styles.tabError} title="Has fields to fix">
+          !
+        </span>
+      )}
+    </>
+  );
+  const tabs = [
+    { key: "site", label: tabLabel("site", "Site") },
+    {
+      key: "credentials",
+      label: tabLabel(
+        "credentials",
+        "Credentials",
+        form.requires_auth ? form.credentials.length : 0,
+        failedLogins,
+      ),
+    },
+    ...(hasSavedWorkflows
+      ? [{ key: "workflows", label: tabLabel("workflows", "Workflows", form.workflow_data.length) }]
+      : []),
+    { key: "instructions", label: tabLabel("instructions", "Instructions") },
+  ];
+
   const bc = isEdit ? (
     <>
       <Crumb href={`#/sites/${siteId}`}>{form.name || "Site"}</Crumb>
@@ -189,368 +206,112 @@ export function SiteForm({ siteId }) {
   );
   return (
     <>
-      <PageHeader title={bc} />
-      <div className="content scroll-content">
-        {loading && <div className="subtle">Loading…</div>}
-        {!loading && (
-          <form className="card" onSubmit={onSubmit}>
-            {error && <div className="alert error">{error}</div>}
-            <div className="form-section-title">Site</div>
-            <div className="field">
-              <label>Name</label>
-              <input
-                type="text"
-                required
-                value={form.name}
-                placeholder="e.g. Juice Shop"
-                onChange={(e) =>
-                  upd({
-                    name: e.target.value,
-                  })
-                }
-              />
-            </div>
-            <div className="field">
-              <label>Base URL</label>
-              <input
-                type="url"
-                required
-                value={form.base_url}
-                placeholder="https://target.example.com"
-                onChange={(e) =>
-                  upd({
-                    base_url: e.target.value,
-                  })
-                }
-              />
-            </div>
-            <div className="field">
-              <label>Notes (optional)</label>
-              <textarea
-                value={form.notes}
-                placeholder="Scope, contacts…"
-                onChange={(e) =>
-                  upd({
-                    notes: e.target.value,
-                  })
-                }
-              />
-            </div>
-            <div className="field">
-              <label>Test Lead guidance (optional)</label>
-              <textarea
-                rows="9"
-                value={form.scan_guidance}
-                placeholder="Instructions for the testing agents (passed directly to the prompt) — i.e. how to complete a particularly complex login sequence, things to focus on, things to avoid…"
-                onChange={(e) =>
-                  upd({
-                    scan_guidance: e.target.value,
-                  })
-                }
-              />
-            </div>
-            <div className="divider" />
-            <div className="form-section-title">Authentication</div>
-            <label className="toggle-row">
-              <input
-                type="checkbox"
-                checked={form.requires_auth}
-                onChange={(e) =>
-                  upd({
-                    requires_auth: e.target.checked,
-                  })
-                }
-              />
-              <span>This site requires authentication</span>
-            </label>
-            {form.requires_auth && (
-              <>
-                <div className="field">
-                  <label>Default login page URL</label>
-                  <input
-                    type="url"
-                    value={form.login_url}
-                    placeholder="https://target.example.com/login"
-                    onChange={(e) =>
-                      upd({
-                        login_url: e.target.value,
-                      })
-                    }
-                  />
+      {!embedded && <PageHeader title={bc} />}
+      {loading ? (
+        <div className="content">
+          <div className="subtle">Loading…</div>
+        </div>
+      ) : (
+        <form ref={formRef} className={`content ${styles.page}`} noValidate onSubmit={onSubmit}>
+          <Tabs
+            label="Site settings"
+            tabs={tabs}
+            value={tab}
+            onChange={setTab}
+            {...(embedded && {
+              className: "activity-sub-tab-bar coverage-sub-tab-bar",
+              buttonClassName: "activity-sub-tab-btn coverage-sub-tab-btn",
+            })}
+          />
+          <div className={styles.scroll}>
+            <div className={styles.panel} data-tab="site" hidden={tab !== "site"}>
+              <div className={styles.panelBody}>
+                <div className={styles.twoCol}>
+                  <div className="field">
+                    <label htmlFor="site-name">Name</label>
+                    <input
+                      id="site-name"
+                      type="text"
+                      required
+                      value={form.name}
+                      placeholder="e.g. Juice Shop"
+                      onChange={(e) => upd({ name: e.target.value })}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="site-base-url">Base URL</label>
+                    <input
+                      id="site-base-url"
+                      type="url"
+                      required
+                      value={form.base_url}
+                      placeholder="https://target.example.com"
+                      onChange={(e) => upd({ base_url: e.target.value })}
+                    />
+                  </div>
                 </div>
-                <fieldset>
-                  <legend>Credentials</legend>
-                  {form.credentials.length === 0 && (
-                    <div className="subtle">No credentials yet.</div>
-                  )}
-                  {form.credentials.map((c, i) => {
-                    const updateLoginField = (fieldIndex, changes) =>
-                      updC(i, {
-                        login_fields: c.login_fields.map((field, index) =>
-                          index === fieldIndex
-                            ? {
-                                ...field,
-                                ...changes,
-                              }
-                            : field,
-                        ),
-                      });
-                    const addLoginField = () =>
-                      updC(i, {
-                        login_fields: [
-                          ...c.login_fields,
-                          {
-                            key: `field_${c.login_fields.length + 1}`,
-                            label: "",
-                            value: "",
-                            sensitive: false,
-                            selector: "",
-                          },
-                        ],
-                      });
-                    const removeLoginField = (fieldIndex) =>
-                      updC(i, {
-                        login_fields: c.login_fields.filter((_, index) => index !== fieldIndex),
-                      });
-
-                    return (
-                      <div className="cred-row" key={i}>
-                        <div className="field">
-                          <label>
-                            Account label <span className="field-optional">(optional)</span>
-                          </label>
-                          <input
-                            type="text"
-                            value={c.label}
-                            placeholder="e.g. Test policyholder"
-                            onChange={(e) =>
-                              updC(i, {
-                                label: e.target.value,
-                              })
-                            }
-                          />
-                        </div>
-                        <div className="field credential-login-field">
-                          <label>
-                            Login URL <span className="field-optional">(optional override)</span>
-                          </label>
-                          <input
-                            type="url"
-                            value={c.login_url || ""}
-                            placeholder={
-                              form.login_url
-                                ? `Uses default: ${form.login_url}`
-                                : "Required if no default login URL"
-                            }
-                            onChange={(e) =>
-                              updC(i, {
-                                login_url: e.target.value,
-                              })
-                            }
-                          />
-                        </div>
-                        <div className="login-fields-editor">
-                          <div className="login-fields-heading">Login fields</div>
-                          {c.login_fields.map((field, fieldIndex) => (
-                            <div className="login-field-row" key={fieldIndex}>
-                              <div className="field">
-                                <label>Field name</label>
-                                <input
-                                  type="text"
-                                  required
-                                  value={field.label}
-                                  placeholder="e.g. Policy Number"
-                                  onChange={(e) =>
-                                    updateLoginField(fieldIndex, {
-                                      label: e.target.value,
-                                    })
-                                  }
-                                />
-                              </div>
-                              <div className="field">
-                                <label>Value</label>
-                                <input
-                                  type={field.sensitive ? "password" : "text"}
-                                  required
-                                  value={field.value}
-                                  onChange={(e) =>
-                                    updateLoginField(fieldIndex, {
-                                      value: e.target.value,
-                                    })
-                                  }
-                                />
-                              </div>
-                              <label className="login-field-sensitive">
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(field.sensitive)}
-                                  onChange={(e) =>
-                                    updateLoginField(fieldIndex, {
-                                      sensitive: e.target.checked,
-                                    })
-                                  }
-                                />{" "}
-                                Sensitive
-                              </label>
-                              <div className="field">
-                                <label>
-                                  CSS selector <span className="field-optional">(optional)</span>
-                                </label>
-                                <input
-                                  type="text"
-                                  value={field.selector || ""}
-                                  placeholder="#policy-number"
-                                  onChange={(e) =>
-                                    updateLoginField(fieldIndex, {
-                                      selector: e.target.value,
-                                    })
-                                  }
-                                />
-                              </div>
-                              <button
-                                type="button"
-                                className="btn ghost sm"
-                                disabled={c.login_fields.length === 1}
-                                onClick={() => removeLoginField(fieldIndex)}
-                              >
-                                Remove field
-                              </button>
-                            </div>
-                          ))}
-                          <button
-                            type="button"
-                            className="btn secondary sm"
-                            onClick={addLoginField}
-                          >
-                            <IconPlus /> Add login field
-                          </button>
-                        </div>
-                        <div className="field">
-                          <label>Auth Mode</label>
-                          <select
-                            value={c.auth_mode || "auto"}
-                            title={
-                              browserCapabilities?.graphical_display_available === false
-                                ? browserCapabilities.graphical_display_message
-                                : undefined
-                            }
-                            onChange={(e) =>
-                              updC(i, {
-                                auth_mode: e.target.value,
-                              })
-                            }
-                          >
-                            <option value="auto">auto — single-page form fill</option>
-                            <option value="totp">totp — form fill + TOTP 2FA</option>
-                            <option value="email_otp">
-                              email OTP — form fill + test mailbox code
-                            </option>
-                            <option value="entra_id">entra id — Microsoft multi-page login</option>
-                            <option
-                              value="guided"
-                              disabled={browserCapabilities?.graphical_display_available === false}
-                            >
-                              guided — interactive browser login
-                            </option>
-                          </select>
-                          {browserCapabilities?.graphical_display_available === false && (
-                            <div className="field-hint" style={{ marginTop: 6 }}>
-                              {browserCapabilities.graphical_display_message}
-                            </div>
-                          )}
-                        </div>
-                        {["totp", "entra_id"].includes(c.auth_mode || "auto") && (
-                          <div className="field">
-                            <label>
-                              TOTP Seed{" "}
-                              <span className="field-optional">
-                                {(c.auth_mode || "auto") === "entra_id"
-                                  ? '(optional, for Entra "other app" code mode)'
-                                  : "(base32 secret from authenticator app)"}
-                              </span>
-                            </label>
-                            <input
-                              type="text"
-                              value={c.totp_seed || ""}
-                              placeholder="JBSWY3DPEHPK3PXP…"
-                              onChange={(e) =>
-                                updC(i, {
-                                  totp_seed: e.target.value,
-                                })
-                              }
-                            />
-                          </div>
-                        )}
-                        {(c.auth_mode || "auto") === "email_otp" && (
-                          <div className="field">
-                            <label>Test mailbox URL</label>
-                            <input
-                              type="url"
-                              required
-                              value={c.test_mailbox_url || ""}
-                              placeholder="https://mail.example.test/inbox/test-user"
-                              onChange={(e) =>
-                                updC(i, {
-                                  test_mailbox_url: e.target.value,
-                                })
-                              }
-                            />
-                          </div>
-                        )}
-                        {(c.auth_mode || "auto") === "guided" && (
-                          <div className="field">
-                            <div
-                              style={{
-                                background: "var(--surface-2,#2a2a2a)",
-                                border: "1px solid var(--border)",
-                                borderRadius: 4,
-                                padding: "8px 10px",
-                                fontSize: 12,
-                                color: "var(--text-2)",
-                              }}
-                            >
-                              🖥️ A browser window will open when a crawl or dynamic scan starts.
-                              Complete the login (including any SSO / MFA / push notifications),
-                              then click <strong>I'm Done</strong> in the run detail view. ALICE
-                              reuses the session captured by whichever phase runs first.
-                            </div>
-                          </div>
-                        )}
-                        {(c.auth_mode || "auto") === "entra_id" && (
-                          <div className="field">
-                            <div
-                              style={{
-                                background: "var(--surface-2,#2a2a2a)",
-                                border: "1px solid var(--border)",
-                                borderRadius: 4,
-                                padding: "8px 10px",
-                                fontSize: 12,
-                                color: "var(--text-2)",
-                              }}
-                            >
-                              Uses a Microsoft Entra ID-aware browser flow for username, password,
-                              consent, account picker, stay-signed-in, Authenticator number
-                              matching, and TOTP code pages. MFA policies that require manual
-                              interaction may still need guided mode.
-                            </div>
-                          </div>
-                        )}
-                        <div className="credential-remove-cell">
-                          <button type="button" className="btn ghost sm" onClick={() => rmC(i)}>
-                            Remove
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <button type="button" className="btn secondary sm" onClick={addC}>
-                    <IconPlus /> Add credential
-                  </button>
-                </fieldset>
-              </>
+                <div className="field">
+                  <label htmlFor="site-notes">
+                    Notes <span className="field-optional">(optional)</span>
+                  </label>
+                  <textarea
+                    id="site-notes"
+                    rows={4}
+                    value={form.notes}
+                    placeholder="Scope, contacts…"
+                    onChange={(e) => upd({ notes: e.target.value })}
+                  />
+                  <div className="field-hint">
+                    For you and your team. Not sent to the testing agents.
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className={styles.panel} data-tab="credentials" hidden={tab !== "credentials"}>
+              <SiteCredentialsTab
+                siteId={isEdit ? siteId : null}
+                baseUrl={form.base_url}
+                requiresAuth={form.requires_auth}
+                loginUrl={form.login_url}
+                credentials={form.credentials}
+                browser={browserCapabilities}
+                tests={loginTests}
+                onTestsChange={setLoginTests}
+                onChange={upd}
+              />
+            </div>
+            {hasSavedWorkflows && (
+              <div className={styles.panel} data-tab="workflows" hidden={tab !== "workflows"}>
+                <SiteWorkflowsTab
+                  workflows={form.workflow_data}
+                  onChange={(workflow_data) => upd({ workflow_data })}
+                />
+              </div>
             )}
-            <div className="divider" />
-            <div className="row spread">
+            <div className={styles.panel} data-tab="instructions" hidden={tab !== "instructions"}>
+              <div className={styles.panelBody}>
+                <div className="field">
+                  <label htmlFor="site-guidance">Instructions for the testing agents</label>
+                  <textarea
+                    id="site-guidance"
+                    rows={14}
+                    value={form.scan_guidance}
+                    placeholder="How to finish a tricky login, what to focus on, what to avoid…"
+                    onChange={(e) => upd({ scan_guidance: e.target.value })}
+                  />
+                  <div className="field-hint">Sent to the testing agents as written.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className={styles.footer}>
+            {embedded ? (
+              dirty && (
+                <button type="button" className="btn ghost" onClick={discardChanges}>
+                  Discard changes
+                </button>
+              )
+            ) : (
               <button
                 type="button"
                 className="btn ghost"
@@ -558,13 +319,23 @@ export function SiteForm({ siteId }) {
               >
                 Cancel
               </button>
-              <button type="submit" className="btn" disabled={saving}>
-                {saving ? "Saving…" : isEdit ? "Save changes" : "Create site"}
-              </button>
-            </div>
-          </form>
-        )}
-      </div>
+            )}
+            {embedded && !error && (dirty || savedNotice) && (
+              <span className="subtle" aria-live="polite">
+                {dirty ? "Unsaved changes" : "Changes saved"}
+              </span>
+            )}
+            {error && (
+              <div className={`alert error ${styles.footerError}`} role="alert">
+                {error}
+              </div>
+            )}
+            <button type="submit" className="btn" disabled={saving}>
+              {saving ? "Saving…" : isEdit ? "Save changes" : "Create site"}
+            </button>
+          </div>
+        </form>
+      )}
     </>
   );
 }

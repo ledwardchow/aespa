@@ -1,4 +1,4 @@
-// Shared formatting/labels for the Applications & Campaigns feature.
+// Shared formatting/labels for the Systems & Campaigns feature.
 // Kept tiny and dependency-free — no giant shared-state module, just pure helpers.
 
 export function formatBytes(bytes) {
@@ -124,6 +124,19 @@ export function safeParseJson(text, fallback) {
   } catch {
     return fallback;
   }
+}
+
+const RESOLVED_CAMPAIGN_WARNING_MARKERS = [
+  "The application restarted while this stage was running.",
+];
+
+export function campaignDisplayWarnings(campaign) {
+  const warnings = safeParseJson(campaign?.warnings_json, []);
+  if (!campaign || isTerminalPause(campaignDisplayStatus(campaign))) return warnings;
+  return warnings.filter(
+    (warning) =>
+      !RESOLVED_CAMPAIGN_WARNING_MARKERS.some((marker) => String(warning).includes(marker)),
+  );
 }
 
 export function confidencePct(score) {

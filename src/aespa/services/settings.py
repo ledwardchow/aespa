@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 from fastapi import HTTPException, Request
@@ -23,12 +24,11 @@ from aespa.schemas import (
 from aespa.services.model_capabilities import (
     documented_model_capability,
     enrich_model_options,
+    has_effort_list,
     validate_effort,
+    validate_service_tier,
 )
 from aespa.services.resolved_llm_config import ResolvedLLMConfig
-from aespa.services.settings_integrations import (
-    _burp_rest_api_config_from_model as _burp_rest_api_config_from_model,
-)
 from aespa.services.settings_integrations import (
     _policy_from_model as _policy_from_model,
 )
@@ -37,12 +37,6 @@ from aespa.services.settings_integrations import (
 )
 from aespa.services.settings_integrations import (
     get_browser_debug_config as get_browser_debug_config,
-)
-from aespa.services.settings_integrations import (
-    get_burp_rest_api_config as get_burp_rest_api_config,
-)
-from aespa.services.settings_integrations import (
-    get_burp_rest_api_config_model as get_burp_rest_api_config_model,
 )
 from aespa.services.settings_integrations import (
     get_cloudflare_access_config as get_cloudflare_access_config,
@@ -55,6 +49,9 @@ from aespa.services.settings_integrations import (
 )
 from aespa.services.settings_integrations import (
     get_crawler_config as get_crawler_config,
+)
+from aespa.services.settings_integrations import (
+    get_deep_scan_config as get_deep_scan_config,
 )
 from aespa.services.settings_integrations import (
     get_global_http_header_config as get_global_http_header_config,
@@ -81,9 +78,6 @@ from aespa.services.settings_integrations import (
     upsert_browser_debug_config as upsert_browser_debug_config,
 )
 from aespa.services.settings_integrations import (
-    upsert_burp_rest_api_config as upsert_burp_rest_api_config,
-)
-from aespa.services.settings_integrations import (
     upsert_cloudflare_access_config as upsert_cloudflare_access_config,
 )
 from aespa.services.settings_integrations import (
@@ -94,6 +88,9 @@ from aespa.services.settings_integrations import (
 )
 from aespa.services.settings_integrations import (
     upsert_crawler_config as upsert_crawler_config,
+)
+from aespa.services.settings_integrations import (
+    upsert_deep_scan_config as upsert_deep_scan_config,
 )
 from aespa.services.settings_integrations import (
     upsert_global_http_header_config as upsert_global_http_header_config,
@@ -183,6 +180,9 @@ from aespa.services.settings_providers import (
     _provider_out as _provider_out,
 )
 from aespa.services.settings_providers import (
+    _reconcile_provider_model_configs as _reconcile_provider_model_configs,
+)
+from aespa.services.settings_providers import (
     create_llm_provider as create_llm_provider,
 )
 from aespa.services.settings_providers import (
@@ -221,6 +221,8 @@ from aespa.services.settings_values import (
     _utcnow as _utcnow,
 )
 
+log = logging.getLogger("aespa.settings")
+
 
 def resolve_llm_config(
     session: Session, cfg: LLMConfig | ResolvedLLMConfig
@@ -243,6 +245,8 @@ def resolve_llm_config(
             "base_url": provider.base_url,
             "username": provider.username,
             "project_id": provider.project_id,
+            "aws_profile": provider.aws_profile,
+            "location": provider.location,
         }
     )
 
@@ -267,7 +271,11 @@ def llm_profile_out_model(
         base_url=resolved.base_url,
         username=resolved.username,
         project_id=resolved.project_id,
+        aws_profile=resolved.aws_profile,
+        location=resolved.location,
         model=resolved.model,
+        max_tpm=resolved.max_tpm,
+        max_rpm=resolved.max_rpm,
         max_tokens=resolved.max_tokens,
         max_context_tokens=resolved.max_context_tokens,
         context_limit_source=resolved.context_limit_source,
@@ -275,6 +283,7 @@ def llm_profile_out_model(
         use_vision=resolved.use_vision,
         force_tool_choice=resolved.force_tool_choice,
         reasoning_effort=resolved.reasoning_effort,
+        service_tier=resolved.service_tier,
         updated_at=resolved.updated_at,
     )
 
@@ -294,6 +303,20 @@ def _model_for_profile_role(
     session: Session, prof: LLMProfile, role: str | None
 ) -> ResolvedLLMConfig | None:
     """Resolve a role model, with Mentor inheriting Test Lead before default."""
+    if prof.extension_ref:
+        from aespa.extensions import get_extension_manager
+
+        _, extension_id, kind, profile_key = prof.extension_ref.split(":", 3)
+        if kind != "profile":
+            raise RuntimeError("Extension scan profile reference is invalid")
+        try:
+            return get_extension_manager().resolve_extension_llm_profile(
+                extension_id, profile_key, role
+            )
+        except (KeyError, ValueError) as exc:
+            raise RuntimeError(
+                f"Extension scan profile '{prof.name}' is unavailable. Enable or repair its extension before scanning."
+            ) from exc
     model_id: int | None = None
     role_models = _json_loads(prof.role_models_json, {})
     if role is not None:
@@ -358,12 +381,18 @@ async def discover_models_for_format(
     api_key: str | None = None,
     base_url: str | None = None,
     username: str | None = None,
+    project_id: str | None = None,
+    location: str | None = None,
+    aws_profile: str | None = None,
 ) -> list[str]:
     options = await discover_model_options_for_format(
         api_format=api_format,
         api_key=api_key,
         base_url=base_url,
         username=username,
+        project_id=project_id,
+        location=location,
+        aws_profile=aws_profile,
     )
     return list(options["models"])
 
@@ -373,6 +402,9 @@ async def discover_model_options_for_format(
     api_key: str | None = None,
     base_url: str | None = None,
     username: str | None = None,
+    project_id: str | None = None,
+    location: str | None = None,
+    aws_profile: str | None = None,
 ) -> dict[str, object]:
     """Discover model names and per-model reasoning capability metadata."""
     native: dict[str, object] = {}
@@ -387,6 +419,10 @@ async def discover_model_options_for_format(
             native = {item["id"]: item for item in raw if item.get("id")}
         else:
             discovered = await droid_provider.discover_models()
+    elif api_format == "claude_cli":
+        from aespa.services.claude_cli_provider import DEFAULT_MODELS
+
+        discovered = list(DEFAULT_MODELS)
     elif api_format == "openai_codex":
         from aespa.services import codex_provider
 
@@ -397,6 +433,50 @@ async def discover_model_options_for_format(
             native = {item["id"]: item for item in raw if item.get("id")}
         else:
             discovered = await codex_provider.discover_models()
+    elif api_format == "openai_chatgpt_plan":
+        from aespa.services import chatgpt_plan
+
+        client_id = username or chatgpt_plan.status().get("active")
+        catalog_complete = True
+        speed_tiers: dict[str, list[dict[str, str]]] = {}
+        try:
+            options = await chatgpt_plan.discover_model_options(client_id)
+            discovered = [item["id"] for item in options]
+            speed_tiers = {
+                item["id"]: item["service_tiers"]
+                for item in options
+                if item.get("service_tiers")
+            }
+        except Exception:
+            discovered = []
+            catalog_complete = False
+        try:
+            access = await chatgpt_plan.check_access(client_id)
+        except Exception:
+            if not discovered:
+                raise
+            access = {"models": []}
+        discovered = list(dict.fromkeys([*discovered, *access["models"]]))
+        if not discovered:
+            raise RuntimeError("No models are available for this ChatGPT account")
+        return {
+            "models": discovered,
+            "catalog_complete": catalog_complete,
+            "capabilities": {
+                model: capability
+                for model in discovered
+                if (
+                    capability := {
+                        **(documented_model_capability(api_format, model) or {}),
+                        **(
+                            {"service_tiers": speed_tiers[model]}
+                            if model in speed_tiers
+                            else {}
+                        ),
+                    }
+                )
+            },
+        }
     elif api_format == "google_antigravity":
         from aespa.services import antigravity_provider
 
@@ -462,6 +542,19 @@ async def discover_model_options_for_format(
             capability = documented_model_capability("google", model)
             if capability is not None:
                 native[model] = native.get(model) or capability
+    elif api_format == "google_vertex":
+        from aespa.services import model_discovery
+
+        raw = await model_discovery.discover_google_vertex_model_options(
+            project_id=project_id or "",
+            location=location or "global",
+        )
+        discovered = [item["id"] for item in raw]
+        native = {item["id"]: item for item in raw}
+        for model in discovered:
+            capability = documented_model_capability("google_vertex", model)
+            if capability is not None:
+                native[model] = {**capability, **native.get(model, {})}
     elif api_format in {"azure_openai", "azure_foundry", "azure_foundry_openai"}:
         from aespa.services import model_discovery
 
@@ -483,7 +576,9 @@ async def discover_model_options_for_format(
     elif api_format == "bedrock":
         from aespa.services import model_discovery
 
-        discovered = await model_discovery.discover_bedrock_models(region_name=base_url)
+        discovered = await model_discovery.discover_bedrock_models(
+            region_name=base_url, profile=aws_profile
+        )
         native = {
             model: capability
             for model in discovered
@@ -495,6 +590,7 @@ async def discover_model_options_for_format(
         raw = await model_discovery.discover_bedrock_mantle_model_options(
             api_key=api_key,
             base_url=base_url,
+            profile=aws_profile,
         )
         discovered = [item["id"] for item in raw]
         native = {item["id"]: item for item in raw}
@@ -511,10 +607,61 @@ async def discover_model_options_for_format(
                 "reasoning",
             )
         )
-        if capability is not None and not has_native_fields:
-            native[model] = capability
+        if capability is not None:
+            if not has_native_fields:
+                native[model] = capability
+            elif isinstance(existing, dict):
+                merged = dict(existing)
+                for key in ("context_window_tokens", "context_window_source"):
+                    if key in capability:
+                        merged.setdefault(key, capability[key])
+                native[model] = merged
     capabilities = await enrich_model_options(api_format, discovered, native)
+    if api_format == "bedrock_mantle":
+        from aespa.services.llm import _bedrock_mantle_model_api
+
+        for model in discovered:
+            try:
+                inference_api = _bedrock_mantle_model_api(model)
+            except ValueError:
+                inference_api = "unknown"
+            capabilities.setdefault(model, {})["inference_api"] = inference_api
     return {"models": discovered, "capabilities": capabilities}
+
+
+async def discover_effort_capability(
+    session: Session, provider_id: int, model: str, effort: str | None
+) -> dict | None:
+    """Look up a model's thinking levels live when the provider has none saved.
+
+    The model form offers levels from the same live lookup when the provider
+    record has none, so saving must accept the levels the form showed.  Returns
+    ``None`` when no lookup is needed or the lookup fails.
+    """
+    if not effort or not effort.strip():
+        return None
+    provider = session.get(LLMProviderConfig, provider_id)
+    if provider is None:
+        return None
+    if has_effort_list(_provider_capabilities(provider).get(model)):
+        return None
+    kwargs: dict[str, object] = {
+        "api_format": provider.api_format,
+        "api_key": provider.api_key,
+        "base_url": provider.base_url,
+        "username": provider.username,
+    }
+    if provider.api_format == "google_vertex":
+        kwargs.update(project_id=provider.project_id, location=provider.location)
+    if provider.api_format in {"bedrock", "bedrock_mantle"}:
+        kwargs["aws_profile"] = provider.aws_profile
+    try:
+        result = await discover_model_options_for_format(**kwargs)
+    except Exception as exc:
+        log.warning("Thinking level lookup for '%s' failed: %s", model, exc)
+        return None
+    capability = dict(result.get("capabilities", {})).get(model)
+    return capability if isinstance(capability, dict) else None
 
 
 # ── LLM config export / import ────────────────────────────────────────────────
@@ -565,12 +712,12 @@ def export_llm_config(
             base_url=p.base_url,
             username=p.username,
             project_id=p.project_id,
+            aws_profile=p.aws_profile,
+            location=p.location,
             models=_provider_models(p),
             model_capabilities=_provider_capabilities(p),
             has_api_key=bool(p.api_key and p.api_key.strip()),
             api_key=p.api_key if include_raw_keys else None,
-            max_tpm=p.max_tpm,
-            max_rpm=p.max_rpm,
         )
         for p in providers_db
     ]
@@ -582,10 +729,13 @@ def export_llm_config(
             if c.provider_id is not None
             else "",
             model=c.model,
+            max_tpm=c.max_tpm,
+            max_rpm=c.max_rpm,
             max_tokens=c.max_tokens,
             max_context_tokens=c.max_context_tokens,
             temperature=c.temperature,
             reasoning_effort=c.reasoning_effort,
+            service_tier=c.service_tier,
             use_vision=c.use_vision,
             force_tool_choice=c.force_tool_choice,
             is_active=c.is_active,
@@ -650,6 +800,7 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             existing_providers[key] = provider
         else:
             result.providers_updated += 1
+        _reconcile_provider_model_configs(session, provider, item.models)
         provider.name = item.name
         provider.api_format = item.api_format
         provider.base_url = item.base_url
@@ -658,13 +809,19 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             username or None if item.api_format == "github_copilot" else None
         )
         provider.project_id = item.project_id
+        provider.aws_profile = (
+            item.aws_profile
+            if item.api_format in {"bedrock", "bedrock_mantle"}
+            else None
+        )
+        provider.location = (
+            (item.location or "global") if item.api_format == "google_vertex" else None
+        )
         if item.api_key is not None:
             key_str = item.api_key.strip()
             provider.api_key = key_str if key_str else None
         provider.models_json = _json_dumps(item.models)
         provider.model_capabilities_json = _json_dumps(item.model_capabilities)
-        provider.max_tpm = item.max_tpm
-        provider.max_rpm = item.max_rpm
         provider.updated_at = _utcnow()
         session.add(provider)
         session.flush()  # assign id before we need it
@@ -684,6 +841,11 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
     }
 
     imported_active_name: str | None = None
+    legacy_provider_limits = {
+        item.name.strip().casefold(): (item.max_tpm, item.max_rpm)
+        for item in payload.providers
+    }
+    imported_pair_limits: dict[tuple[int, str], tuple[int | None, int | None]] = {}
     for item in payload.profiles:
         provider_key = item.provider_name.strip().casefold()
         provider_id = provider_name_to_id.get(provider_key)
@@ -718,7 +880,30 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
         cfg.provider = provider.api_format
         cfg.api_key = provider.api_key
         cfg.base_url = provider.base_url
+        cfg.username = provider.username
+        cfg.project_id = provider.project_id
+        cfg.aws_profile = provider.aws_profile
+        cfg.location = provider.location
         cfg.model = item.model
+        legacy_tpm, legacy_rpm = legacy_provider_limits.get(provider_key, (None, None))
+        pair_limits = (
+            item.max_tpm if item.max_tpm is not None else legacy_tpm,
+            item.max_rpm if item.max_rpm is not None else legacy_rpm,
+        )
+        pair_key = (provider_id, item.model)
+        if (
+            pair_key in imported_pair_limits
+            and imported_pair_limits[pair_key] != pair_limits
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Profiles using provider '{item.provider_name}' and model "
+                    f"'{item.model}' must use the same rate limits"
+                ),
+            )
+        imported_pair_limits[pair_key] = pair_limits
+        cfg.max_tpm, cfg.max_rpm = pair_limits
         cfg.max_tokens = item.max_tokens
         if item.max_context_tokens is None:
             cfg.max_context_tokens, cfg.context_limit_source = detect_context_window(
@@ -738,6 +923,11 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
                 _provider_capabilities(provider).get(item.model),
                 item.reasoning_effort,
             )
+            cfg.service_tier = validate_service_tier(
+                provider.api_format,
+                _provider_capabilities(provider).get(item.model),
+                item.service_tier,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         cfg.use_vision = item.use_vision
@@ -750,6 +940,19 @@ def import_llm_config(session: Session, payload: LLMConfigExport) -> LLMImportRe
             imported_active_name = item.name.strip().casefold()
 
     session.flush()
+
+    # Saved configurations for one provider/model pair use one limiter. Apply
+    # imported values to existing configurations for that pair as well.
+    for (provider_id, model), (max_tpm, max_rpm) in imported_pair_limits.items():
+        for cfg in session.exec(
+            select(LLMConfig).where(
+                LLMConfig.provider_id == provider_id,
+                LLMConfig.model == model,
+            )
+        ).all():
+            cfg.max_tpm = max_tpm
+            cfg.max_rpm = max_rpm
+            session.add(cfg)
 
     # ── 3. Activate the designated profile (if any) ───────────────────────────
     if imported_active_name is not None:

@@ -5,14 +5,20 @@ import * as settingsApi from "../../shared/api/settings.js";
 import * as sitesApi from "../../shared/api/sites.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 
+import { Notice } from "../../shared/ui/Notice.jsx";
 import { ScopeHostsPanel } from "../../shared/runs/ScopeHostsPanel.jsx";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { usePolling } from "../../shared/hooks/usePolling.js";
 
 import { nav } from "../../shared/navigation/router.js";
 import { WebRunChatProvider, useWebRunChat } from "./WebRunChat.jsx";
 import { FindingsDataProvider, useFindingsData } from "./FindingsData.jsx";
 import { useActivity } from "./useActivity.js";
-import { isCrawlerAgentActive } from "./runState.js";
+import {
+  canResumeSelectedScanMode,
+  hasResumableExperimentalScan,
+  isCrawlerAgentActive,
+} from "./runState.js";
 
 import { WebRunFindingsTab } from "./WebRunFindingsTab.jsx";
 import { WebRunActivityTab } from "./WebRunActivityTab.jsx";
@@ -26,8 +32,19 @@ import { WebRunSitemapMeta } from "./WebRunSitemapMeta.jsx";
 import { WebRunSitemapGraph } from "./WebRunSitemapGraph.jsx";
 import { WebRunCrawlProgress } from "./WebRunCrawlProgress.jsx";
 import { WebRunHeader } from "./WebRunHeader.jsx";
+import { WorkflowInputDrawer } from "./WorkflowInputDrawer.jsx";
+import { useUncrawledWorkflowWarning } from "./useUncrawledWorkflowWarning.jsx";
+import {
+  acknowledgeWorkflowIds,
+  readAcknowledgedWorkflowIds,
+  visibleWorkflowInputNotes,
+} from "./workflowAcknowledgement.js";
+import { crawlerAgentForRetries, mergeRetries, retriesByNote } from "./workflowRetries.js";
 import { WebRunSastLeadsTab } from "../../shared/leads/RunLeadsTab.jsx";
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
+import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
+import { BudgetPausedBanner, RunBudgetMeter, isBudgetReached } from "./RunBudget.jsx";
+import { SastSourceCosts } from "../../shared/ui/SastSourceCosts";
 
 export function TestRunDetail(props) {
   return (
@@ -39,9 +56,20 @@ export function TestRunDetail(props) {
   );
 }
 
-function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }) {
+function TestRunContent({
+  runId,
+  showDeepScan = false,
+  showTeamScan = false,
+  initialTab,
+  initialFindingRef,
+  findingIds,
+  coverageReturn,
+  initialLeadRef,
+  initialTrafficCoverage,
+}) {
   const [run, setRun] = useState(null);
   const [siteName, setSiteName] = useState(null);
+  const [sitemapSite, setSitemapSite] = useState(null);
   const [graph, setGraph] = useState(null);
   const activeTab = normaliseWebTab(initialTab);
   const setActiveTab = (tab) => nav(runHref({ runKind: "web", runId }, tab));
@@ -59,6 +87,41 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
   const [guidedLoginPending, setGuidedLoginPending] = useState([]);
   const [guidedLoginErrors, setGuidedLoginErrors] = useState([]);
   const [entraPrompts, setEntraPrompts] = useState([]);
+  const [workflowNotes, setWorkflowNotes] = useState([]);
+  const [workflowRetries, setWorkflowRetries] = useState({});
+  const [notificationFocus, setNotificationFocus] = useState(0);
+  const [focusedNotificationId, setFocusedNotificationId] = useState(null);
+  const [workflowFocus, setWorkflowFocus] = useState(null);
+  const [workflowInputOpen, setWorkflowInputOpen] = useState(false);
+  const [acknowledgedWorkflowIds, setAcknowledgedWorkflowIds] = useState(() =>
+    readAcknowledgedWorkflowIds(runId),
+  );
+
+  const loadWorkflowNotes = useCallback(async () => {
+    const [result, retry] = await Promise.all([
+      webRunsApi.getWorkflowNotes(runId),
+      webRunsApi.getWorkflowRetryStatus(runId),
+    ]);
+    setWorkflowNotes(result?.notes || []);
+    setWorkflowRetries((current) => mergeRetries(current, retriesByNote(retry)));
+  }, [runId]);
+  usePolling(loadWorkflowNotes, { intervalMs: 5000 });
+  const waitingWorkflows = visibleWorkflowInputNotes(
+    workflowNotes,
+    workflowRetries,
+    acknowledgedWorkflowIds,
+  );
+  const viewWorkflow = (noteId) => {
+    setWorkflowInputOpen(false);
+    setWorkflowFocus((current) => ({ noteId, sequence: (current?.sequence || 0) + 1 }));
+    setActiveTab("attack");
+  };
+  const openWorkflowInput = (noteId = null) => {
+    setFocusedNotificationId(noteId);
+    setNotificationFocus((value) => value + 1);
+    setWorkflowInputOpen(true);
+  };
+  const closeWorkflowInput = useCallback(() => setWorkflowInputOpen(false), []);
 
   // Load LLM profiles once so the read-only display and edit dropdown both work.
   useEffect(() => {
@@ -67,7 +130,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
       .then(setRunProfiles)
       .catch(() => {});
   }, []);
-  const { aliceIsThinking, aliceGlobalRunning, handleAliceStop, submitAliceDirective } =
+  const { aliceIsThinking, aliceGlobalRunning, handleAliceStopAll, submitAliceDirective } =
     useWebRunChat();
   const [crawlStopRequested, setCrawlStopRequested] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState(null);
@@ -77,6 +140,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
   const [wpReloadKey, setWpReloadKey] = useState(0); // bump to force workprogram reload
   const [checkpointStatus, setCheckpointStatus] = useState(null);
   const [trafficTotal, setTrafficTotal] = useState(0);
+  const [tokenExpanded, setTokenExpanded] = useState(false);
   const crawlImportInputRef = useRef(null);
 
   const [error, setError] = useState(null);
@@ -98,13 +162,21 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
   const { agentCurrentTask } = activityPresentation({
     run,
     thinkingStatus,
-    aliceIsThinking,
+    aliceIsThinking: aliceGlobalRunning,
     activityLog,
   });
 
   const crawlerAgent = agents.find((agent) => agent.id === "crawler");
-  const crawlerTask = crawlerAgent ? agentCurrentTask(crawlerAgent) : null;
-  const crawlerActive = isCrawlerAgentActive(crawlerAgent, crawlStopRequested);
+  const displayedCrawlerAgent = crawlerAgentForRetries(crawlerAgent, workflowRetries);
+  const displayedAgents =
+    displayedCrawlerAgent === crawlerAgent
+      ? agents
+      : crawlerAgent
+        ? agents.map((agent) => (agent.id === "crawler" ? displayedCrawlerAgent : agent))
+        : [...agents, displayedCrawlerAgent];
+  const crawlerTask = displayedCrawlerAgent ? agentCurrentTask(displayedCrawlerAgent) : null;
+  const mainCrawlerActive = isCrawlerAgentActive(crawlerAgent, crawlStopRequested);
+  const crawlerActive = isCrawlerAgentActive(displayedCrawlerAgent, crawlStopRequested);
 
   // Initial load
   const loadAll = useCallback(async () => {
@@ -113,7 +185,9 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
       setRun(r);
       setGraph(g);
       if (r?.scope_hosts) setScopeHosts(r.scope_hosts);
-      if (r?.coverage_mode) setCoverageMode(r.coverage_mode);
+      if (r?.coverage_mode) {
+        setCoverageMode(r.coverage_mode);
+      }
       webRunsApi
         .getThinkingStatus(runId)
         .then(setThinkingStatus)
@@ -122,14 +196,22 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
         .getCheckpointStatus(runId)
         .then(setCheckpointStatus)
         .catch(() => {});
+      // Load findings once so the tab count is right before the tab is opened.
+      webRunsApi
+        .getFindings(runId)
+        .then(setFindings)
+        .catch(() => {});
       sitesApi
         .getSite(r.site_id)
-        .then((s) => setSiteName(s.name))
+        .then((s) => {
+          setSiteName(s.name);
+          setSitemapSite(s);
+        })
         .catch(() => {});
     } catch (e) {
       setError(e.message);
     }
-  }, [runId]);
+  }, [runId, setFindings]);
   useEffect(() => {
     loadAll();
   }, [loadAll]);
@@ -155,6 +237,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
     setGuidedLoginErrors,
     setEntraPrompts,
     setCheckpointStatus,
+    onRunError: setError,
   });
 
   // Fetch checkpoint status whenever dynamic scan transitions to an inactive status (stopped/complete/failed/idle)
@@ -170,7 +253,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
   // Poll run metadata (including per_user_progress current URLs) while crawling
   // or while the backend is unwinding after a stop request.
   useEffect(() => {
-    if (!crawlerActive) return;
+    if (!mainCrawlerActive) return;
     const iv = setInterval(() => {
       Promise.all([webRunsApi.getRun(runId), webRunsApi.getCrawlStatus(runId).catch(() => null)])
         .then(([r, crawlStatus]) => {
@@ -206,7 +289,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
         });
     }, 2000);
     return () => clearInterval(iv);
-  }, [crawlerActive, runId, crawlStopRequested, setAgents]);
+  }, [mainCrawlerActive, runId, crawlStopRequested, setAgents]);
 
   // Poll thinking-scan status independently.
   useEffect(() => {
@@ -253,24 +336,32 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
       setError(e.message);
     }
   };
-  const onStartThinkingScan = async () => {
+  const startThinkingScan = async (selectedCoverageMode) => {
     try {
       setThinkingStopReq(false);
       setThinkingStatus({
         status: "running",
       });
       setCheckpointStatus(null);
-      const s = await webRunsApi.startThinkingScan(runId, coverageMode);
+      setRun((current) =>
+        current ? { ...current, coverage_mode: selectedCoverageMode } : current,
+      );
+      const s = await webRunsApi.startThinkingScan(runId, selectedCoverageMode);
       setThinkingStatus(s);
       setWpReloadKey((k) => k + 1);
+      return true;
     } catch (e) {
       setThinkingStopReq(false);
       setError(e.message);
+      return false;
     }
   };
   const onResumeThinkingScan = async () => {
     try {
       setThinkingStopReq(false);
+      setRun((current) =>
+        current ? { ...current, status: "running", phase: "scanning" } : current,
+      );
       setThinkingStatus({
         status: "running",
       });
@@ -282,10 +373,25 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
       setError(e.message);
     }
   };
-  const onStart = async () => {
+  const onResumeAfterBudget = async () => {
+    if (run?.phase === "crawling") {
+      setRun(await webRunsApi.resumeWebCrawl(runId));
+      return;
+    }
+    await onResumeThinkingScan();
+  };
+  const startCrawl = async (
+    startPentestAfterCrawl = false,
+    selectedCoverageMode = coverageMode,
+  ) => {
     try {
       setCrawlStopRequested(false);
-      const body = crawlCredentialId ? { crawl_credential_id: crawlCredentialId } : undefined;
+      const body = {
+        ...(crawlCredentialId ? { crawl_credential_id: crawlCredentialId } : {}),
+        ...(startPentestAfterCrawl
+          ? { start_pentest_after_crawl: true, coverage_mode: selectedCoverageMode }
+          : {}),
+      };
       const r = await webRunsApi.startRun(runId, body);
       // Optimistically mark as running so the poll interval starts immediately.
       // Clear per_user_progress so stale data from the previous crawl is never
@@ -295,10 +401,25 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
         status: "running",
         per_user_progress: {},
       });
+      return true;
     } catch (e) {
       setError(e.message);
+      return false;
     }
   };
+  const { requestStart, warning } = useUncrawledWorkflowWarning({
+    runId,
+    onStart: (action, selectedCoverageMode) =>
+      action === "crawl-then-scan"
+        ? startCrawl(true, selectedCoverageMode)
+        : startThinkingScan(selectedCoverageMode),
+    onViewWorkflows: viewWorkflow,
+    onAcknowledged: (ids) =>
+      setAcknowledgedWorkflowIds((current) => acknowledgeWorkflowIds(runId, current, ids)),
+  });
+  const onStartThinkingScan = () => requestStart("scan", coverageMode);
+  const onStart = () => startCrawl();
+  const onStartCrawlThenPentest = () => requestStart("crawl-then-scan", coverageMode);
   const onStop = async () => {
     try {
       setCrawlStopRequested(true);
@@ -327,19 +448,20 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
       setError(e.message);
     }
   };
-  const onExportCrawl = () => webRunsApi.exportCrawl(runId);
   const onImportCrawlClick = () => crawlImportInputRef.current?.click();
+  const showImportedCrawl = async (imported) => {
+    const importedGraph = await webRunsApi.getGraph(runId);
+    setRun(imported);
+    setGraph(importedGraph);
+    setWpReloadKey((key) => key + 1);
+    setActiveTab("sitemap");
+  };
   const onImportCrawlFile = async (event) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
     try {
-      const imported = await webRunsApi.importCrawl(runId, file);
-      const importedGraph = await webRunsApi.getGraph(runId);
-      setRun(imported);
-      setGraph(importedGraph);
-      setWpReloadKey((key) => key + 1);
-      setActiveTab("sitemap");
+      await showImportedCrawl(await webRunsApi.importCrawl(runId, file));
     } catch (e) {
       setError(e.message);
     }
@@ -354,7 +476,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
     !isDynamicScanActive(effectiveThinkingStatus);
   const canClearCrawl =
     run && !crawlStopRequested && ["stopped", "failed", "complete"].includes(run.status);
-  const canStop = isCrawlerAgentActive(crawlerAgent) && !crawlStopRequested;
+  const canStop = mainCrawlerActive && !crawlStopRequested;
   const canStopThinking = isDynamicScanActive(effectiveThinkingStatus);
   const canStartAnyScan =
     run?.status !== "running" &&
@@ -365,9 +487,10 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
     canStartAnyScan &&
     ["idle", "complete", "stopped", "failed", null].includes(effectiveThinkingStatus);
   const hasCheckpoint =
-    checkpointStatus?.exists === true &&
+    (checkpointStatus?.exists === true || hasResumableExperimentalScan(run)) &&
     canStartAnyScan &&
     !isDynamicScanActive(effectiveThinkingStatus);
+  const canResume = canResumeSelectedScanMode(hasCheckpoint, coverageMode, run?.coverage_mode);
   const interactiveLogins = useMemo(
     () =>
       (run?.credentials || []).flatMap((credential) => {
@@ -409,6 +532,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
   }
   return (
     <>
+      {warning}
       <WebRunHeader
         run={run}
         siteName={siteName}
@@ -419,21 +543,40 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
         canStop={canStop}
         canStartScan={canStartThinking}
         canStopScan={canStopThinking}
-        canResume={hasCheckpoint}
+        canResume={canResume}
         canImportCrawl={canImportCrawl}
         crawlStopping={crawlStopRequested}
         scanStopping={thinkingStopRequested}
         coverageMode={coverageMode}
+        showDeepScan={showDeepScan}
+        showTeamScan={showTeamScan}
         onCoverageMode={setCoverageMode}
         onStart={onStart}
+        onStartCrawlThenPentest={onStartCrawlThenPentest}
         onStop={onStop}
         onStartScan={onStartThinkingScan}
         onStopScan={onStopThinkingScan}
         onResume={onResumeThinkingScan}
-        onExportCrawl={onExportCrawl}
         onImportCrawl={onImportCrawlClick}
+        onSavedCrawlLoaded={showImportedCrawl}
+        onError={setError}
         aliceRunning={aliceGlobalRunning}
-        onStopAlice={handleAliceStop}
+        onStopAlice={handleAliceStopAll}
+        workflowInputCount={waitingWorkflows.length}
+        workflowInputOpen={workflowInputOpen}
+        onToggleWorkflowInput={() =>
+          workflowInputOpen ? closeWorkflowInput() : openWorkflowInput()
+        }
+      />
+      <WorkflowInputDrawer
+        open={workflowInputOpen}
+        runId={runId}
+        onClose={closeWorkflowInput}
+        onNotesChange={setWorkflowNotes}
+        onRetryStatusChange={setWorkflowRetries}
+        onViewWorkflow={viewWorkflow}
+        focusedNoteId={focusedNotificationId}
+        focusSequence={notificationFocus}
       />
       <input
         ref={crawlImportInputRef}
@@ -454,16 +597,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
           minHeight: 0,
         }}
       >
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 12,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        {error && <Notice onDismiss={() => setError(null)}>{error}</Notice>}
 
         <GuidedLoginNotices
           runId={runId}
@@ -535,32 +669,63 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
           onGraphView={setGraphView}
         />
 
+        <div className="run-usage-bars">
+          <TokenUsageBar
+            tokenUsage={tokenUsage}
+            tokenExpanded={tokenExpanded}
+            setTokenExpanded={setTokenExpanded}
+            hideEstimatedCost={run?.llm_budget_usd != null}
+          >
+            {run ? (
+              <RunBudgetMeter
+                run={run}
+                tokenUsage={tokenUsage}
+                onRunUpdate={setRun}
+                onError={setError}
+              />
+            ) : null}
+          </TokenUsageBar>
+          <SastSourceCosts runId={runId} />
+        </div>
+        {run?.status === "paused" && isBudgetReached(run, tokenUsage) ? (
+          <BudgetPausedBanner
+            key={run.llm_budget_usd}
+            run={run}
+            tokenUsage={tokenUsage}
+            onRunUpdate={setRun}
+            onResume={onResumeAfterBudget}
+          />
+        ) : null}
+
         {activeTab === "sitemap" && run && (
           <>
-            <WebRunSitemapMeta
-              run={run}
-              graph={graph}
-              crawlUsername={crawlUsername}
-              profiles={runProfiles}
-              onRunUpdate={setRun}
-              onError={setError}
-              crawlCredentialId={crawlCredentialId}
-              onCrawlCredentialChange={setCrawlCredentialId}
-            />
-            {activeTab === "sitemap" && run && (
+            <div className="sitemap-toolbar">
+              <WebRunSitemapMeta
+                run={run}
+                graph={graph}
+                crawlUsername={crawlUsername}
+                profiles={runProfiles}
+                onRunUpdate={setRun}
+                onError={setError}
+                crawlCredentialId={crawlCredentialId}
+                onCrawlCredentialChange={setCrawlCredentialId}
+              />
               <ScopeHostsPanel siteId={run.site_id} hosts={scopeHosts} onChange={setScopeHosts} />
-            )}
+            </div>
             <WebRunCrawlProgress
               run={run}
               crawlerTask={crawlerTask}
-              crawlerActive={crawlerActive}
+              crawlerActive={mainCrawlerActive}
             />
           </>
         )}
 
         <WebRunSitemapGraph
+          site={sitemapSite}
+          crawlerActive={mainCrawlerActive}
           runId={runId}
           run={run}
+          activityLog={activityLog}
           graph={graph}
           active={activeTab === "sitemap"}
           graphView={graphView}
@@ -580,6 +745,8 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
             run={run}
             siteName={siteName}
             initialFindingRef={initialFindingRef}
+            findingIds={findingIds}
+            coverageReturn={coverageReturn}
             thinkingStatus={thinkingStatus}
             thinkingStopRequested={thinkingStopRequested}
             aliceIsThinking={aliceIsThinking}
@@ -592,6 +759,10 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
 
         <WebRunAttackSurfaceTab
           runId={runId}
+          workflowFocus={workflowFocus}
+          onWorkflowNotesChange={setWorkflowNotes}
+          onWorkflowRetryStatusChange={setWorkflowRetries}
+          onOpenWorkflowNotification={openWorkflowInput}
           run={run}
           active={activeTab === "attack"}
           scanActive={isDynamicScanActive(thinkingStatus?.status)}
@@ -623,8 +794,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
             run={run}
             thinkingStatus={thinkingStatus}
             activityLog={activityLog}
-            agents={agents}
-            tokenUsage={tokenUsage}
+            agents={displayedAgents}
             sitePlanData={sitePlanData}
             onClearLog={async () => {
               await webRunsApi.clearScanLog(runId);
@@ -648,6 +818,7 @@ function TestRunContent({ runId, initialTab, initialFindingRef, initialLeadRef }
           }
           runStatus={run?.status}
           onTotalChange={setTrafficTotal}
+          coverageFilter={initialTrafficCoverage}
         />
         {activeTab === "leads" && (
           <WebRunSastLeadsTab

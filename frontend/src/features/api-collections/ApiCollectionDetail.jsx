@@ -1,10 +1,17 @@
+import { coverageModeLabel } from "../../shared/runs/coverageModes.js";
+import { IconPlus } from "../../shared/ui/Icons.jsx";
+import { fmtDate } from "../../shared/lib/dates.js";
+import { useBenchmarkLinks } from "../../shared/hooks/useBenchmarkLinks.js";
+import { BenchmarkBadge } from "../../shared/ui/BenchmarkBadge.jsx";
 import * as apiCollectionsApi from "../../shared/api/apiCollections.js";
 import { useState, useEffect, useCallback, useMemo } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { Notice, PageError } from "../../shared/ui/Notice.jsx";
 
 const API_COLLECTION_TABS = [
   {
@@ -22,6 +29,7 @@ const API_COLLECTION_TABS = [
 ];
 
 export function ApiCollectionDetail({ collectionId, initialTab }) {
+  const benchmarkLinks = useBenchmarkLinks();
   const activeTab = API_COLLECTION_TABS.some((tab) => tab.key === initialTab) ? initialTab : "runs";
   const [collection, setCollection] = useState(null);
   const [endpoints, setEndpoints] = useState(null);
@@ -29,6 +37,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
   const [apiRuns, setApiRuns] = useState(null);
   const [credentials, setCredentials] = useState(null);
   const [error, setError] = useState(null);
+  const [message, setMessage] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [assessing, setAssessing] = useState(false);
   const [purging, setPurging] = useState(false);
@@ -125,6 +134,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
     if (
       !confirm(
         "Delete ALL endpoints and credentials for this collection?\n\n" +
+          "Endpoint test results from earlier API runs are also removed. " +
           "Documents are kept — you can re-parse them afterwards.\n\n" +
           "Use this to clear duplicates from uploading the same file multiple times.",
       )
@@ -137,7 +147,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
       setEndpoints([]);
       setReadiness(null);
       setCredentials([]);
-      alert(
+      setMessage(
         `Purged: ${result.endpoints_deleted} endpoints and ${result.credentials_deleted} credentials removed.`,
       );
     } catch (e) {
@@ -184,19 +194,15 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
 
   // Readiness helpers
   const scoreColor = (score) =>
-    score >= 75
-      ? "var(--success,#22c55e)"
-      : score >= 40
-        ? "var(--warning-text,#d97706)"
-        : "var(--danger,#ef4444)";
-  const readinessLabel = (score) => (score >= 75 ? "Ready" : score >= 40 ? "Partial" : "Not Ready");
+    score >= 75 ? "var(--ok)" : score >= 40 ? "var(--warn)" : "var(--danger)";
+  const readinessLabel = (score) => (score >= 75 ? "Ready" : score >= 40 ? "Partial" : "Not ready");
   const prereqIcon = (ep) => {
     if (!ep.prereq_can_test)
       return (
         <span
           title="Cannot test — insufficient info"
           style={{
-            color: "var(--danger,#ef4444)",
+            color: "var(--danger)",
             fontSize: 14,
           }}
         >
@@ -208,7 +214,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
         <span
           title="Auth credentials missing"
           style={{
-            color: "var(--warning-text,#d97706)",
+            color: "var(--warn)",
             fontSize: 14,
           }}
         >
@@ -219,7 +225,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
       <span
         title="Ready to test"
         style={{
-          color: "var(--success,#22c55e)",
+          color: "var(--ok)",
           fontSize: 14,
         }}
       >
@@ -240,6 +246,11 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
         actions={
           <>
             {collection && (
+              <button className="btn secondary" onClick={() => nav(`#/apis/${collectionId}/edit`)}>
+                Edit collection
+              </button>
+            )}
+            {collection && (
               <button className="btn secondary" onClick={() => nav(`#/apis/${collectionId}/files`)}>
                 Manage files
               </button>
@@ -250,13 +261,13 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
               </button>
             )}
             {collection && (
-              <button className="btn secondary" onClick={() => nav(`#/apis/${collectionId}/edit`)}>
-                Edit collection
+              <button className="btn danger-outline" onClick={onDelete}>
+                Delete
               </button>
             )}
             {collection && (
-              <button className="btn danger-outline" onClick={onDelete}>
-                Delete
+              <button className="btn" onClick={() => nav(`#/apis/${collectionId}/runs/new`)}>
+                <IconPlus /> New test run
               </button>
             )}
           </>
@@ -277,7 +288,12 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
         ))}
       </div>
       <div className="content scroll-content stack">
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} inline={!collection} onDismiss={() => setError(null)} />
+        {message && (
+          <Notice variant="success" onDismiss={() => setMessage(null)}>
+            {message}
+          </Notice>
+        )}
         {collection && (
           <>
             {activeTab === "endpoints" && (
@@ -379,7 +395,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                         <span
                           style={{
                             fontSize: 13,
-                            color: "var(--fg)",
+                            color: "var(--text)",
                           }}
                         >
                           {readiness.overall.summary}
@@ -394,7 +410,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                           <strong
                             style={{
                               fontSize: 12,
-                              color: "var(--danger,#ef4444)",
+                              color: "var(--danger)",
                             }}
                           >
                             Blocking gaps
@@ -404,7 +420,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                               margin: "4px 0 0 18px",
                               padding: 0,
                               fontSize: 12,
-                              color: "var(--fg)",
+                              color: "var(--text)",
                             }}
                           >
                             {readiness.overall.blocking_gaps.map((g, i) => (
@@ -444,9 +460,9 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                           color: "var(--muted)",
                         }}
                       >
-                        Assessed {new Date(readiness.assessed_at).toLocaleString()}· Auth
-                        understood: {readiness.overall.auth_method_understood ? "✓" : "✗"}·
-                        Credentials: {readiness.overall.has_credentials ? "✓" : "✗"}· Test data:{" "}
+                        Assessed {fmtDate(readiness.assessed_at)}· Auth understood:{" "}
+                        {readiness.overall.auth_method_understood ? "✓" : "✗"}· Credentials:{" "}
+                        {readiness.overall.has_credentials ? "✓" : "✗"}· Test data:{" "}
                         {readiness.overall.has_sufficient_test_data ? "✓" : "✗"}
                       </div>
                     </div>
@@ -521,7 +537,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                                 </td>
                                 <td
                                   style={{
-                                    fontFamily: "var(--mono,monospace)",
+                                    fontFamily: "var(--mono)",
                                     fontSize: 12,
                                   }}
                                 >
@@ -537,7 +553,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                                 </td>
                                 <td
                                   style={{
-                                    fontFamily: "var(--mono,monospace)",
+                                    fontFamily: "var(--mono)",
                                     fontSize: 12,
                                     overflowWrap: "break-word",
                                     wordBreak: "break-all",
@@ -551,7 +567,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                                     color: "var(--muted)",
                                   }}
                                 >
-                                  {new Date(c.created_at).toLocaleString()}
+                                  {fmtDate(c.created_at)}
                                 </td>
                               </tr>
                             ))}
@@ -725,7 +741,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                               <td>{methodBadge(ep.method)}</td>
                               <td
                                 style={{
-                                  fontFamily: "var(--mono,monospace)",
+                                  fontFamily: "var(--mono)",
                                   fontSize: 12,
                                   overflowWrap: "break-word",
                                   wordBreak: "break-all",
@@ -790,23 +806,8 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
 
             {activeTab === "runs" && (
               <>
-                <div className="card">
-                  <div
-                    className="form-section-title"
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                    }}
-                  >
-                    <span>Test Runs</span>
-                    <button
-                      className="btn sm"
-                      onClick={() => nav(`#/apis/${collectionId}/runs/new`)}
-                    >
-                      + New test run
-                    </button>
-                  </div>
+                <div>
+                  <div className="section-label">Test runs</div>
                   {apiRuns === null && <div className="subtle">Loading…</div>}
                   {apiRuns !== null && apiRuns.length === 0 && (
                     <div
@@ -815,7 +816,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                         padding: "12px 0",
                       }}
                     >
-                      No test runs yet. Click <strong>+ New test run</strong> to start one.
+                      No test runs yet. Click <strong>New test run</strong> to start one.
                     </div>
                   )}
                   {apiRuns !== null && apiRuns.length > 0 && (
@@ -856,43 +857,42 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                         </thead>
                         <tbody>
                           {sortedApiRuns.map((r) => (
-                            <tr key={r.id}>
+                            <NavigationRow
+                              key={r.id}
+                              href={`#/api-runs/${r.id}/status`}
+                              label={`Open ${r.name}`}
+                            >
                               <td>
-                                <a
-                                  href={`#/api-runs/${r.id}/status`}
-                                  style={{
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  {r.name}
-                                </a>
+                                <span className="run-name">
+                                  <a
+                                    href={`#/api-runs/${r.id}/status`}
+                                    style={{
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {r.name}
+                                  </a>
+                                  <BenchmarkBadge inline href={benchmarkLinks[`api:${r.id}`]} />
+                                </span>
                               </td>
                               <td>
                                 <StatusBadge status={r.status} />
                               </td>
-                              <td>
-                                {r.coverage_mode === "enforce"
-                                  ? "Full"
-                                  : r.coverage_mode === "standard"
-                                    ? "Standard"
-                                    : r.coverage_mode === "sast_validate"
-                                      ? "SAST Validate"
-                                      : "Quick"}
-                              </td>
+                              <td>{coverageModeLabel(r.coverage_mode)}</td>
                               <td
                                 style={{
                                   fontSize: 12,
                                   color: "var(--muted)",
                                 }}
                               >
-                                {new Date(r.created_at).toLocaleString()}
+                                {fmtDate(r.created_at)}
                               </td>
                               <td>
                                 <a href={`#/api-runs/${r.id}/status`} className="btn secondary sm">
                                   Open
                                 </a>
                               </td>
-                            </tr>
+                            </NavigationRow>
                           ))}
                         </tbody>
                       </table>

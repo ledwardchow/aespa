@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import inspect
 import json
@@ -25,6 +26,7 @@ from aespa.services import llm as llm_svc
 from aespa.services.prompts.alice import (
     ALICE_API_OPERATIONAL_SYSTEM_PROMPT,
     ALICE_API_SYSTEM_PROMPT,
+    ALICE_FINDING_MANAGEMENT_SYSTEM_PROMPT,
     ALICE_OPERATIONAL_SYSTEM_PROMPT,
     ALICE_SYSTEM_PROMPT,
 )
@@ -45,17 +47,33 @@ def _apply_upstream_proxy(session: Session) -> None:
     clients all read the proxy ContextVars set here; without this call they run in
     a fresh context with the vars unset and every request bypasses Burp/ZAP.
     """
-    from aespa.services.scanner import _scanner_proxy_var
+    from aespa.services.scanner import _scanner_ca_bundle_var, _scanner_proxy_var
     from aespa.services.settings import get_upstream_proxy_config
 
     cfg = get_upstream_proxy_config(session)
-    _scanner_proxy_var.set(cfg.proxy_url if cfg.proxy_scanner else None)
-    llm_svc.set_llm_proxy(cfg.proxy_url if cfg.proxy_llm else None)
+    _scanner_proxy_var.set(cfg.scanner_proxy_url if cfg.proxy_scanner else None)
+    _scanner_ca_bundle_var.set(cfg.scanner_ca_bundle_path)
+    llm_svc.set_llm_proxy(cfg.llm_proxy_url if cfg.proxy_llm else None)
+    llm_svc.set_llm_ca_bundle(cfg.llm_ca_bundle_path)
     log.info(
-        "ALICE upstream proxy: url=%s scanner=%s llm=%s",
-        cfg.proxy_url,
+        "ALICE upstream proxy: scanner_url=%s llm_url=%s scanner=%s llm=%s",
+        cfg.scanner_proxy_url,
+        cfg.llm_proxy_url,
         cfg.proxy_scanner,
         cfg.proxy_llm,
+    )
+
+
+def _alice_pause_message(exc: llm_svc.LLMQuotaPauseError) -> str:
+    if isinstance(exc, llm_svc.LLMBudgetPauseError):
+        return (
+            "This run reached its LLM budget, so AESPA paused this ALICE turn. "
+            f"Raise the budget on the run page to continue. Details: {exc}"
+        )
+    return (
+        "ChatGPT/Codex is temporarily unavailable because its allowance or "
+        "rate-limit window is full. AESPA paused this ALICE turn. Come back "
+        f"after the window resets and try again. Details: {exc}"
     )
 
 
@@ -104,6 +122,8 @@ _ALICE_TOOL_NAMES = {
     "agent_dispatch",
     "done",
     "remove_finding",
+    "update_finding",
+    "consolidate_findings",
 }
 
 _RERUN_VALIDATION_TOOL = {
@@ -120,26 +140,112 @@ _RERUN_VALIDATION_TOOL = {
     },
 }
 
+_FINDING_EDIT_PROPERTIES = {
+    "title": {"type": "string"},
+    "severity": {
+        "type": "string",
+        "enum": ["critical", "high", "medium", "low", "info"],
+    },
+    "description": {"type": "string"},
+    "impact": {"type": "string"},
+    "likelihood": {"type": "string"},
+    "recommendation": {"type": "string"},
+    "cvss_score": {"type": "number"},
+    "cvss_vector": {"type": "string"},
+    "affected_url": {"type": "string"},
+    "owasp_category": {"type": "string"},
+    "owasp_api_category": {"type": "string"},
+    "evidence": {"type": "string"},
+    "request_evidence": {"type": "string"},
+    "response_evidence": {"type": "string"},
+}
 
-# Live Playwright browsers for ALICE's interactive `browser` tool, keyed by run_id.
-# One headless browser per run, launched lazily on first browser action and closed
-# when the turn ends. ponytail: per-run global, no pooling/limits — fine for a
-# localhost single-user tool; revisit if ALICE ever runs many concurrent turns.
-_alice_browsers: dict[int, dict] = {}
+_UPDATE_FINDING_TOOL = {
+    "name": "update_finding",
+    "description": (
+        "Edit one saved finding without contacting the target. Only supplied fields change; "
+        "the finding's validation state and public reference are preserved."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "finding_reference": {
+                "type": "string",
+                "description": "Public finding reference, for example ABCD-001.",
+            },
+            **_FINDING_EDIT_PROPERTIES,
+        },
+        "required": ["finding_reference"],
+        "additionalProperties": False,
+    },
+}
+
+_CONSOLIDATE_FINDINGS_TOOL = {
+    "name": "consolidate_findings",
+    "description": (
+        "Consolidate duplicate saved findings in one transaction. The retained finding is "
+        "rewritten with supplied fields, provenance links are moved to it, and the listed "
+        "duplicates are deleted. The retained public reference and validation state remain."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "keep_finding_reference": {
+                "type": "string",
+                "description": "Public reference of the finding to retain.",
+            },
+            "remove_finding_references": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Public references of duplicate findings to remove.",
+            },
+            **_FINDING_EDIT_PROPERTIES,
+        },
+        "required": ["keep_finding_reference", "remove_finding_references"],
+        "additionalProperties": False,
+    },
+}
+
+_FINDING_MANAGEMENT_TOOL_NAMES = {
+    "context_tool",
+    "update_finding",
+    "consolidate_findings",
+    "remove_finding",
+    "done",
+}
+
+
+# Live Playwright browsers for ALICE's interactive `browser` tool. One headless
+# browser per chat tab, launched lazily on first browser action and closed when
+# that tab's turn ends. Several tabs on the same run can work at once, so the
+# key includes the chat tab (set by alice_tasks for each background turn) and
+# the run kind, because web and API run ids share the same integer space.
+alice_browser_scope: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "alice_browser_scope", default=""
+)
+_alice_browsers: dict[tuple[str, int, str], dict] = {}
+
+
+def _alice_browser_key(run_id: int, api_run_id: int | None) -> tuple[str, int, str]:
+    if api_run_id is not None:
+        return ("api", api_run_id, alice_browser_scope.get())
+    return ("web", run_id, alice_browser_scope.get())
 
 
 async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
-    """Return a live (page, context) for ``run_id``, launching one if needed.
+    """Return a live (page, context) for this run and chat tab, launching one if needed.
 
     Pass ``api_run_id`` for API-collection runs so browser traffic is keyed on
     the API owner column.
     """
-    entry = _alice_browsers.get(run_id)
+    key = _alice_browser_key(run_id, api_run_id)
+    entry = _alice_browsers.get(key)
     if entry:
         page = entry.get("page")
         if page is not None and not page.is_closed():
             return page, entry["ctx"]
-        await _close_alice_browser(run_id)
+        await _close_alice_browser(run_id, api_run_id=api_run_id)
 
     from playwright.async_api import async_playwright
 
@@ -166,17 +272,16 @@ async def _get_alice_browser(run_id: int, api_run_id: int | None = None):
     traffic_svc.setup_playwright_logging(
         ctx,
         None if api_run_id is not None else run_id,
-        username="alice",
         api_run_id=api_run_id,
     )
     page = await ctx.new_page()
-    _alice_browsers[run_id] = {"pw": pw, "browser": browser, "ctx": ctx, "page": page}
+    _alice_browsers[key] = {"pw": pw, "browser": browser, "ctx": ctx, "page": page}
     return page, ctx
 
 
-async def _close_alice_browser(run_id: int) -> None:
-    """Tear down the live browser for ``run_id`` (best-effort)."""
-    entry = _alice_browsers.pop(run_id, None)
+async def _close_alice_browser(run_id: int, api_run_id: int | None = None) -> None:
+    """Tear down the live browser for this run and chat tab (best-effort)."""
+    entry = _alice_browsers.pop(_alice_browser_key(run_id, api_run_id), None)
     if not entry:
         return
     for key in ("ctx", "browser"):
@@ -188,6 +293,38 @@ async def _close_alice_browser(run_id: int) -> None:
         await entry["pw"].stop()
     except Exception:
         pass
+
+
+# Workprogram finding hooks installed by ALICE turns, keyed by web run id:
+# run_id -> [hook, number of turns using it]. Several chat tabs on one run can
+# run turns at once, so the hook is removed only when the last turn finishes.
+_alice_finding_hooks: dict[int, list[Any]] = {}
+
+
+def _acquire_alice_finding_hook(run_id: int) -> None:
+    from aespa.services.scanner import _finding_hooks
+    from aespa.services.web_workprogram import _make_web_post_finding_fn
+
+    entry = _alice_finding_hooks.get(run_id)
+    if entry is None:
+        entry = _alice_finding_hooks[run_id] = [_make_web_post_finding_fn(run_id), 0]
+    entry[1] += 1
+    _finding_hooks[run_id] = entry[0]
+
+
+def _release_alice_finding_hook(run_id: int) -> None:
+    from aespa.services.scanner import _finding_hooks
+
+    entry = _alice_finding_hooks.get(run_id)
+    if entry is None:
+        return
+    entry[1] -= 1
+    if entry[1] > 0:
+        return  # another chat tab's turn is still using it
+    del _alice_finding_hooks[run_id]
+    # Leave any hook another component installed after ALICE.
+    if _finding_hooks.get(run_id) is entry[0]:
+        _finding_hooks.pop(run_id, None)
 
 
 def _extract_user_directive(history: list[dict]) -> str:
@@ -255,8 +392,36 @@ def _is_alice_operational_question(instruction: str) -> bool:
     return not any(marker in security_request for marker in explicit_test_markers)
 
 
+def _is_alice_finding_management_request(instruction: str) -> bool:
+    """Identify requests that change findings already stored in AESPA."""
+    text = re.sub(r"\s+", " ", str(instruction or "").strip().casefold())
+    if not re.search(r"\bfindings?\b", text):
+        return False
+    mutation_markers = (
+        "rewrite",
+        "re-write",
+        "reword",
+        "edit",
+        "update",
+        "change",
+        "rename",
+        "consolidate",
+        "combine",
+        "merge",
+        "deduplicate",
+        "de-duplicate",
+        "delete",
+        "remove",
+        "mark as",
+        "set severity",
+    )
+    return any(marker in text for marker in mutation_markers)
+
+
 def _classify_alice_intent(instruction: str) -> str:
     """Classify a turn before selecting ALICE's prompt and tools."""
+    if _is_alice_finding_management_request(instruction):
+        return "finding_management"
     return "operational" if _is_alice_operational_question(instruction) else "testing"
 
 
@@ -328,11 +493,20 @@ def _get_alice_tools(exclude: set[str] | None = None) -> list[dict]:
     exclude = exclude or set()
     allowed = _ALICE_TOOL_NAMES - exclude
     tools = [t for t in THINKING_AGENT_TOOLS if t["name"] in allowed]
+    if "update_finding" in allowed:
+        tools.append(_UPDATE_FINDING_TOOL)
+    if "consolidate_findings" in allowed:
+        tools.append(_CONSOLIDATE_FINDINGS_TOOL)
     if "rerun_validation" not in exclude:
         tools.append(_RERUN_VALIDATION_TOOL)
     if "tls_scan" not in exclude:
         tools.append(TLS_SCAN_TOOL)
     return tools
+
+
+def _finding_management_tools(tools: list[dict]) -> list[dict]:
+    """Limit finding edits to saved-record tools, without target access."""
+    return [tool for tool in tools if tool["name"] in _FINDING_MANAGEMENT_TOOL_NAMES]
 
 
 def _goal_mode_tools(tools: list[dict]) -> list[dict]:
@@ -419,9 +593,7 @@ async def _check_goal_completion(
         from aespa.services import scanner, validator
 
         active_specialists = sum(
-            1
-            for task in scanner._specialist_tasks.get(run_id, [])
-            if not task.done()
+            1 for task in scanner._specialist_tasks.get(run_id, []) if not task.done()
         )
         if active_specialists:
             missing.append(f"Wait for {active_specialists} active specialist(s).")
@@ -438,9 +610,12 @@ async def _check_goal_completion(
         "(an array). Use completed only when the stated outcome is supported and no "
         "required work remains. Use blocked only for a specific external condition "
         "that prevents useful progress.\n\n"
-        f"OBJECTIVE:\n{objective}\n\n"
-        f"PROPOSAL:\n{json.dumps(proposal, default=str)}\n\n"
-        f"TOOL EVIDENCE:\n{json.dumps(evidence[-30:], default=str)}"
+        f"OBJECTIVE:\n{str(objective)[:2_000]}\n"
+        f"[objective_omitted_chars={max(0, len(str(objective)) - 2_000)}]\n\n"
+        "PROPOSAL:\n"
+        f"{json.dumps(_bounded_goal_proposal(proposal), default=str, separators=(',', ':'))}\n\n"
+        "TOOL EVIDENCE:\n"
+        f"{json.dumps(_bounded_goal_evidence(evidence), default=str, separators=(',', ':'))}"
     )
     try:
         raw = await llm_svc.plain_completion(llm_cfg, verifier_prompt)
@@ -453,7 +628,9 @@ async def _check_goal_completion(
     if not isinstance(verifier_missing, list):
         verifier_missing = []
     if reviewed_status != status:
-        reason = str(verdict.get("reason") or "The completion evidence is insufficient.")
+        reason = str(
+            verdict.get("reason") or "The completion evidence is insufficient."
+        )
         return False, reviewed_status, [reason, *map(str, verifier_missing)]
 
     if status == "blocked":
@@ -461,14 +638,20 @@ async def _check_goal_completion(
         normalized_blocker = " ".join(blocker.casefold().split())
         previous_blocker = str(checkpoint.get("blocker_candidate") or "")
         confirmations = int(checkpoint.get("blocker_confirmations") or 0)
-        confirmations = confirmations + 1 if previous_blocker == normalized_blocker else 1
+        confirmations = (
+            confirmations + 1 if previous_blocker == normalized_blocker else 1
+        )
         checkpoint["blocker_candidate"] = normalized_blocker
         checkpoint["blocker_confirmations"] = confirmations
         if confirmations < 3:
-            return False, "blocked", [
-                "Confirm the same external blocker in another work cycle "
-                f"({confirmations}/3 confirmations)."
-            ]
+            return (
+                False,
+                "blocked",
+                [
+                    "Confirm the same external blocker in another work cycle "
+                    f"({confirmations}/3 confirmations)."
+                ],
+            )
     return True, reviewed_status, []
 
 
@@ -539,8 +722,13 @@ def _invoke_context_tool(
     history: list[dict],
     run_id: int,
     base_url: str,
+    api_run_id: int | None = None,
 ) -> dict:
-    """Call a context adapter with rich state, falling back for old callbacks."""
+    """Call a context adapter with rich state, falling back for old callbacks.
+
+    ``api_run_id`` is forwarded only to adapters that declare it; the API
+    adapter already closes over its run id.
+    """
     kwargs = {
         "pages_snapshot": pages_snapshot,
         "findings_snapshot": findings_snapshot,
@@ -549,8 +737,19 @@ def _invoke_context_tool(
         "base_url": base_url,
     }
     try:
-        inspect.signature(callback).bind(tool_name, args, **kwargs)
+        signature = inspect.signature(callback)
     except (TypeError, ValueError):
+        return callback(tool_name, args)
+    if api_run_id is not None:
+        try:
+            signature.bind(tool_name, args, **kwargs, api_run_id=api_run_id)
+        except TypeError:
+            pass
+        else:
+            return callback(tool_name, args, **kwargs, api_run_id=api_run_id)
+    try:
+        signature.bind(tool_name, args, **kwargs)
+    except TypeError:
         return callback(tool_name, args)
     return callback(tool_name, args, **kwargs)
 
@@ -585,11 +784,160 @@ def _redact_goal_evidence_text(value: str) -> str:
     from aespa.services.scanner import _redact_sensitive_text
 
     redacted = _redact_sensitive_text(str(value or ""))
+    redacted = re.sub(
+        r'(?i)(["\']?authorization["\']?\s*[:=]\s*["\']?bearer\s+)[^\s,"\'}]+',
+        r"\1[REDACTED_BEARER]",
+        redacted,
+    )
+    redacted = re.sub(
+        r'(?i)(["\']?authorization["\']?\s*[:=]\s*["\']?basic\s+)[^\s,"\'}]+',
+        r"\1[REDACTED_BASIC]",
+        redacted,
+    )
     return re.sub(
         r'(?i)(["\']?(?:password|secret|access_token|refresh_token|api[_-]?key|cookie)["\']?\s*[:=]\s*["\']?)[^\s,"\'}]+',
         r"\1[REDACTED]",
         redacted,
     )
+
+
+def _bounded_goal_evidence(evidence: list[dict]) -> dict:
+    """Keep the newest goal receipts within a small verifier prompt budget."""
+    max_entries = 30
+    max_entry_chars = 2_000
+    selected = evidence[-max_entries:]
+    entries: list[dict] = []
+    omitted_entries = max(0, len(evidence) - len(selected))
+    omitted_chars = 0
+    for item in reversed(selected):
+        if not isinstance(item, dict):
+            item = {"value": str(item)}
+        safe_input = _redact_history_value(item.get("input"))
+        input_text = json.dumps(safe_input, default=str, separators=(",", ":"))
+        safe_result = _redact_goal_evidence_text(str(item.get("result") or ""))
+        entry = {
+            "step": item.get("step"),
+            "tool": str(item.get("tool") or "")[:200],
+            "input": safe_input,
+            "result": safe_result,
+        }
+        rendered = json.dumps(entry, default=str, separators=(",", ":"))
+        if len(rendered) > max_entry_chars:
+            omitted = len(rendered) - max_entry_chars
+            omitted_chars += omitted
+            entry["input"] = {
+                "_truncated": True,
+                "preview": input_text[:600],
+                "omitted_chars": max(0, len(input_text) - 600),
+            }
+            entry["result"] = safe_result[:1_000]
+            entry["omitted_chars"] = omitted
+        entries.append(entry)
+    entries.reverse()
+    return {
+        "entries": entries,
+        "omitted_entries": omitted_entries,
+        "omitted_chars": omitted_chars,
+    }
+
+
+def _bounded_goal_proposal_value(
+    value: object, *, depth: int = 0
+) -> tuple[object, int, int]:
+    """Recursively bound nested proposal data and return omission counts."""
+    limit = 400
+    if depth >= 4:
+        rendered = json.dumps(value, default=str, separators=(",", ":"))
+        return (
+            {
+                "_truncated": True,
+                "preview": rendered[:limit],
+                "omitted_chars": max(0, len(rendered) - limit),
+            },
+            1,
+            max(0, len(rendered) - limit),
+        )
+    if isinstance(value, str):
+        return value[:limit], 0, max(0, len(value) - limit)
+    if isinstance(value, dict):
+        bounded: dict = {}
+        omitted_items = max(0, len(value) - 20)
+        omitted_chars = 0
+        for key, child in list(value.items())[:20]:
+            safe_key = str(key)[:200]
+            omitted_chars += max(0, len(str(key)) - len(safe_key))
+            child_value, child_items, child_chars = _bounded_goal_proposal_value(
+                child, depth=depth + 1
+            )
+            bounded[safe_key] = child_value
+            omitted_items += child_items
+            if child_items:
+                bounded[f"{safe_key}_omitted_items"] = child_items
+            if child_chars:
+                bounded[f"{safe_key}_omitted_chars"] = child_chars
+            omitted_chars += child_chars
+        if omitted_items:
+            bounded["_omitted_items"] = omitted_items
+        if omitted_chars:
+            bounded["_omitted_chars"] = omitted_chars
+        return bounded, omitted_items, omitted_chars
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+        bounded_items: list = []
+        omitted_items = max(0, len(items) - 20)
+        omitted_chars = 0
+        for child in items[:20]:
+            child_value, child_items, child_chars = _bounded_goal_proposal_value(
+                child, depth=depth + 1
+            )
+            bounded_items.append(child_value)
+            omitted_items += child_items
+            omitted_chars += child_chars
+        return bounded_items, omitted_items, omitted_chars
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, 0, 0
+    rendered = str(value)
+    return rendered[:limit], 0, max(0, len(rendered) - limit)
+
+
+def _bounded_goal_proposal(proposal: dict) -> dict:
+    """Limit model-controlled completion fields while retaining their shape."""
+    bounded: dict = {}
+    items = list(proposal.items())[:20]
+    for key, value in items:
+        safe_key = str(key)[:200]
+        if isinstance(value, list):
+            values = []
+            omitted_items = max(0, len(value) - 20)
+            omitted_chars = 0
+            for item in value[:20]:
+                bounded_item, child_items, child_chars = _bounded_goal_proposal_value(
+                    item
+                )
+                values.append(bounded_item)
+                omitted_items += child_items
+                omitted_chars += child_chars
+            bounded[safe_key] = values
+            if omitted_items:
+                bounded[f"{safe_key}_omitted"] = omitted_items
+            if omitted_chars:
+                bounded[f"{safe_key}_omitted_chars"] = omitted_chars
+        elif isinstance(value, str):
+            bounded[safe_key] = value[:2_000]
+            if len(value) > 2_000:
+                bounded[f"{safe_key}_omitted_chars"] = len(value) - 2_000
+        else:
+            bounded_value, omitted_items, omitted_chars = _bounded_goal_proposal_value(
+                value
+            )
+            bounded[safe_key] = bounded_value
+            if omitted_items:
+                bounded[f"{safe_key}_omitted"] = omitted_items
+            if omitted_chars:
+                bounded[f"{safe_key}_omitted_chars"] = omitted_chars
+    if len(proposal) > len(items):
+        bounded["_omitted_keys"] = len(proposal) - len(items)
+    return bounded
 
 
 def _append_alice_history(
@@ -774,19 +1122,27 @@ async def _execute_alice_tool(
         timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
+            run_id=_traffic_run_id,
+            api_run_id=api_run_id,
+            username=(selected or {}).get("username"),
             cookies=req_cookies,
             headers=req_headers,
             timeout=timeout,
             follow_redirects=True,
-            verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(
-                _traffic_run_id, username="alice", api_run_id=api_run_id
-            ),
         ) as hx:
             try:
                 if isinstance(hx, traffic_svc.LoggingAsyncClient):
                     hx.page_id = tool_input.get("page_id")
                     hx.session_label = use_session_label
+                    hx.provenance = {
+                        "agent_id": "alice",
+                        "purpose": traffic_svc.request_purpose(
+                            tool_input, "Probe target", agent_name="ALICE"
+                        ),
+                        "owasp_category": tool_input.get("owasp_category"),
+                        "test_class": tool_input.get("test_class"),
+                        "obligation_id": tool_input.get("obligation_id"),
+                    }
                 kwargs: dict = {}
                 if body is not None:
                     if isinstance(body, dict):
@@ -1035,7 +1391,10 @@ async def _execute_alice_tool(
 
     # ── write_finding ─────────────────────────────────────────────────────────
     if tool_name == "write_finding":
-        from aespa.services.scanner import _persist_dynamic_finding
+        from aespa.services.scanner import (
+            _persist_dynamic_finding,
+            _unauthenticated_finding_rejection,
+        )
 
         finding_raw = dict(tool_input)
         finding_raw["finding_source"] = "alice"
@@ -1075,9 +1434,14 @@ async def _execute_alice_tool(
             "request_evidence": str(finding_raw.get("request_evidence") or ""),
             "response_evidence": str(finding_raw.get("response_evidence") or ""),
         }
+        finding_rejection = _unauthenticated_finding_rejection(
+            finding_raw, {str(affected): fw_result}
+        )
+        if finding_rejection:
+            return finding_rejection
 
         try:
-            saved = await _persist_dynamic_finding(
+            write_result = await _persist_dynamic_finding(
                 run_id=run_id,
                 llm_cfg=llm_cfg,
                 raw=finding_raw,
@@ -1093,6 +1457,7 @@ async def _execute_alice_tool(
                 run_id,
                 finding_raw.get("title"),
             )
+            saved = write_result.finding
             if saved is not None:
                 from aespa.services import validator as _validator_svc
 
@@ -1114,11 +1479,19 @@ async def _execute_alice_tool(
                     "outcome": (
                         f"Saved [{finding_raw.get('severity', '?')}] {finding_raw.get('title', 'Untitled')} (ID: {saved.id})"
                         if saved
-                        else f"Duplicate skipped: {finding_raw.get('title', 'Untitled')}"
+                        else (
+                            f"Duplicate skipped: {finding_raw.get('title', 'Untitled')}"
+                            if write_result.status == "duplicate"
+                            else f"Finding rejected: {write_result.reason}"
+                        )
                     ),
                     "_persist": True,
                 },
             )
+            if write_result.status == "rejected":
+                return f"Finding rejected: {write_result.reason}"
+            if write_result.status == "duplicate":
+                return f"Duplicate skipped: {finding_raw.get('title', 'Untitled')} already exists."
             return f"Finding '{finding_raw.get('title')}' recorded successfully."
         except Exception as exc:
             log.warning("A.L.I.C.E. write_finding failed: %s", exc)
@@ -1272,14 +1645,13 @@ async def _execute_alice_tool(
         timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
+            run_id=_traffic_run_id,
+            api_run_id=api_run_id,
             cookies={},
             headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
             timeout=timeout,
             follow_redirects=False,
-            verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(
-                _traffic_run_id, username="alice", api_run_id=api_run_id
-            ),
+            provenance={"agent_id": "alice"},
         ) as hx:
             for cand in candidates[:20]:
                 body = {
@@ -1287,6 +1659,12 @@ async def _execute_alice_tool(
                     password_field: cand.get("password", ""),
                 }
                 try:
+                    if isinstance(hx, traffic_svc.LoggingAsyncClient):
+                        hx.provenance["purpose"] = traffic_svc.request_purpose(
+                            tool_input,
+                            f"Check credentials for {cand.get('username') or 'candidate'}",
+                            agent_name="ALICE",
+                        )
                     if "application/json" in req_headers.get("Content-Type", ""):
                         resp = await hx.request(
                             method, cred_url, json=body, headers=req_headers
@@ -1389,14 +1767,18 @@ async def _execute_alice_tool(
         timeout = _get_alice_timeout(run_id)
 
         async with _make_scanner_client(
+            run_id=_traffic_run_id,
+            api_run_id=api_run_id,
             cookies={},
             headers={"User-Agent": "Mozilla/5.0 (compatible; ALICE/1.0)"},
             timeout=timeout,
             follow_redirects=True,
-            verify=False,
-            event_hooks=traffic_svc.make_httpx_hooks(
-                _traffic_run_id, username="alice", api_run_id=api_run_id
-            ),
+            provenance={
+                "agent_id": "alice",
+                "purpose": traffic_svc.request_purpose(
+                    tool_input, "Register a test account", agent_name="ALICE"
+                ),
+            },
         ) as hx:
             try:
                 _reg_kwargs = {"headers": req_headers}
@@ -1631,7 +2013,18 @@ async def _execute_alice_tool(
 
         with Session(get_engine()) as _s:
             scanner_policy = get_scanner_policy(_s)
-        traffic_svc.set_browser_context_tag(ctx, browser_page_id, use_session_label)
+        traffic_svc.set_browser_context_tag(
+            ctx,
+            browser_page_id,
+            use_session_label,
+            username=(selected or {}).get("username"),
+            purpose=traffic_svc.request_purpose(
+                tool_input, "Browser probe", agent_name="ALICE"
+            ),
+            owasp_category=tool_input.get("owasp_category"),
+            test_class=tool_input.get("test_class"),
+            obligation_id=tool_input.get("obligation_id"),
+        )
         try:
             result = await _run_thinking_browser_action(
                 page,
@@ -1794,6 +2187,116 @@ async def _execute_alice_tool(
             log.warning("ALICE update_lead error: %s", exc)
             return f"update_lead failed: {exc}"
 
+    # ── update_finding / consolidate_findings ─────────────────────────────────
+    if tool_name in {"update_finding", "consolidate_findings"}:
+        from aespa.schemas import ScanFindingUpdateIn
+        from aespa.services import findings as findings_svc
+        from aespa.services.references import find_finding_by_reference
+
+        owner_type = "api" if api_run_id is not None else "web"
+        owner_id = api_run_id if api_run_id is not None else run_id
+        update_fields = {
+            key: value
+            for key, value in tool_input.items()
+            if key in _FINDING_EDIT_PROPERTIES
+        }
+        if not update_fields:
+            return f"{tool_name} requires at least one rewritten finding field."
+        try:
+            payload = ScanFindingUpdateIn.model_validate(update_fields)
+        except Exception as exc:
+            return f"{tool_name}: invalid finding update: {exc}"
+
+        with Session(get_engine()) as s:
+            if tool_name == "update_finding":
+                finding_reference = str(
+                    tool_input.get("finding_reference") or ""
+                ).strip()
+                finding = find_finding_by_reference(
+                    s, owner_type, owner_id, finding_reference
+                )
+                if finding is None:
+                    return (
+                        f"update_finding: finding {finding_reference!r} was not found "
+                        "for this run."
+                    )
+                findings_svc.apply_finding_update(finding, payload)
+                s.add(finding)
+                s.commit()
+                s.refresh(finding)
+                log.info(
+                    "ALICE update_finding run_id=%s finding_id=%s reference=%s",
+                    run_id,
+                    finding.id,
+                    finding.reference,
+                )
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "finding_reference": finding.reference,
+                        "title": finding.title,
+                        "updated_fields": sorted(update_fields),
+                    }
+                )
+
+            keep_reference = str(tool_input.get("keep_finding_reference") or "").strip()
+            remove_references = list(
+                dict.fromkeys(
+                    str(reference).strip()
+                    for reference in tool_input.get("remove_finding_references") or []
+                    if str(reference).strip()
+                )
+            )
+            if not keep_reference or not remove_references:
+                return (
+                    "consolidate_findings requires one retained finding reference and "
+                    "at least one duplicate reference."
+                )
+            if keep_reference in remove_references:
+                return "consolidate_findings cannot remove the retained finding."
+            keeper = find_finding_by_reference(s, owner_type, owner_id, keep_reference)
+            if keeper is None:
+                return (
+                    f"consolidate_findings: retained finding {keep_reference!r} was "
+                    "not found for this run."
+                )
+            duplicates = []
+            missing = []
+            for reference in remove_references:
+                finding = find_finding_by_reference(s, owner_type, owner_id, reference)
+                if finding is None:
+                    missing.append(reference)
+                else:
+                    duplicates.append(finding)
+            if missing:
+                return (
+                    "consolidate_findings: no changes made because these findings were "
+                    f"not found for this run: {', '.join(missing)}"
+                )
+            try:
+                removed = findings_svc.consolidate_findings(
+                    s, keeper, duplicates, payload
+                )
+            except Exception as exc:
+                s.rollback()
+                log.warning("ALICE consolidate_findings failed: %s", exc)
+                return f"consolidate_findings failed; no changes were made: {exc}"
+            log.info(
+                "ALICE consolidate_findings run_id=%s keeper=%s removed=%s",
+                run_id,
+                keeper.reference,
+                removed,
+            )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "finding_reference": keeper.reference,
+                    "title": keeper.title,
+                    "removed_finding_references": removed,
+                    "updated_fields": sorted(update_fields),
+                }
+            )
+
     # ── remove_finding ────────────────────────────────────────────────────────
     if tool_name == "remove_finding":
         from aespa.models import ScanFinding as _SF
@@ -1839,6 +2342,9 @@ async def _execute_alice_tool(
             title = finding.title
             public_reference = finding.reference
             finding_id = finding.id
+            from aespa.services.run_cleanup import detach_finding_dependents
+
+            detach_finding_dependents(s, [finding_id])
             s.delete(finding)
             s.commit()
 
@@ -2006,18 +2512,6 @@ async def run_alice_turn_stream(
 
     _web_post_probe_fn = _wp_probe_fn(run_id)
 
-    # Register the workprogram finding hook so write_finding tool calls also
-    # flip Work Program cells.  This mirrors the pattern in scanner._do_thinking_scan
-    # (see scanner.py: _finding_hooks[run_id] = _web_post_finding_fn).  Cleared
-    # in the finally block below so the hook never leaks past this turn.
-    from aespa.services.scanner import _finding_hooks
-    from aespa.services.web_workprogram import (
-        _make_web_post_finding_fn as _wp_finding_fn,
-    )
-
-    _web_post_finding_fn = _wp_finding_fn(run_id)
-    _finding_hooks[run_id] = _web_post_finding_fn
-
     # Yield initial thinking chunk immediately (0ms time-to-first-event!)
     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': '[A.L.I.C.E. Initializing] Mapped target sitemap and active scan configuration...\n'})}\n\n"
     await asyncio.sleep(0.01)
@@ -2065,15 +2559,17 @@ async def run_alice_turn_stream(
             user_directive=user_instruction,
             base_url=base_url,
         )
+    elif intent == "finding_management":
+        system_message = ALICE_FINDING_MANAGEMENT_SYSTEM_PROMPT.format(
+            user_directive=user_instruction,
+        )
     else:
         system_message = ALICE_SYSTEM_PROMPT.format(
             user_directive=user_instruction,
             base_url=base_url,
         )
     if goal:
-        system_message += GOAL_MODE_INSTRUCTIONS.format(
-            objective=goal["objective"]
-        )
+        system_message += GOAL_MODE_INSTRUCTIONS.format(objective=goal["objective"])
 
     # Convert conversation history to Anthropic-format messages.
     # History items from the chat UI have sender/text; convert to role/content.
@@ -2098,7 +2594,7 @@ async def run_alice_turn_stream(
     # testing context, but would unnecessarily steer a status answer back toward
     # the target.
     initial_parts = [run_status_block]
-    if intent != "operational" and leads_block:
+    if intent == "testing" and leads_block:
         initial_parts.append(leads_block)
     initial_parts.append(user_instruction)
     messages.append({"role": "user", "content": "\n\n".join(initial_parts)})
@@ -2110,6 +2606,8 @@ async def run_alice_turn_stream(
         alice_tools = [
             tool for tool in alice_tools if tool["name"] in {"context_tool", "done"}
         ]
+    elif intent == "finding_management":
+        alice_tools = _finding_management_tools(alice_tools)
     if goal:
         alice_tools = _goal_mode_tools(alice_tools)
 
@@ -2123,6 +2621,11 @@ async def run_alice_turn_stream(
         ((goal or {}).get("checkpoint") or {}).get("evidence") or []
     )
     goal_terminal = False
+
+    # Register the workprogram finding hook so write_finding tool calls also
+    # flip Work Program cells.  Registered directly before the try block so the
+    # finally below always releases it, even on early exit or cancellation.
+    _acquire_alice_finding_hook(run_id)
 
     # 4. Agentic loop
     try:
@@ -2152,13 +2655,26 @@ async def run_alice_turn_stream(
                 pass
 
             try:
-                (
-                    content_blocks,
-                    stop_reason,
-                    raw_content,
-                ) = await llm_svc._call_with_tools(
+                streamed_text = ""
+                streamed_payload = ""
+                stream_prefix = ""
+                async for call_event in llm_svc.stream_tools_call(
                     llm_cfg, system_message, messages, tools=alice_tools
-                )
+                ):
+                    if call_event["type"] == "text_delta":
+                        delta = call_event["delta"]
+                        if not streamed_text and accumulated_message:
+                            stream_prefix = (
+                                "" if accumulated_message.endswith("\n") else "\n\n"
+                            )
+                            if stream_prefix:
+                                streamed_payload += stream_prefix
+                                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': stream_prefix})}\n\n"
+                        streamed_text += delta
+                        streamed_payload += delta
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': delta})}\n\n"
+                    else:
+                        content_blocks, stop_reason, raw_content = call_event["result"]
             except llm_svc.LLMQuotaPauseError:
                 # Preserve the structured pause so the outer handler emits a
                 # visible warning and chat reply instead of a generic step error.
@@ -2211,6 +2727,21 @@ async def run_alice_turn_stream(
                 intent == "operational"
                 and any(block.get("name") == "done" for block in tool_use_blocks)
             )
+            combined_text = "".join(
+                str(block.get("text") or "") for block in text_blocks
+            )
+            streamed_is_final = bool(streamed_text) and combined_text == streamed_text
+            if streamed_text and (
+                has_tools
+                or "<think>" in streamed_text.lower()
+                or "<thinking>" in streamed_text.lower()
+            ):
+                yield f"data: {json.dumps({'type': 'message_retract', 'message': accumulated_message})}\n\n"
+                streamed_text = ""
+                streamed_payload = ""
+                streamed_is_final = False
+            elif streamed_is_final:
+                accumulated_message += streamed_payload
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -2234,6 +2765,8 @@ async def run_alice_turn_stream(
                     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': wrapped})}\n\n"
                 else:
                     # Final tool-less turn: this text is the actual answer.
+                    if streamed_is_final:
+                        continue
                     if accumulated_message and not accumulated_message.endswith("\n"):
                         accumulated_message += "\n\n"
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
@@ -2300,16 +2833,18 @@ async def run_alice_turn_stream(
                 if tool_name == "done":
                     if goal:
                         goal_checkpoint = dict(goal.get("checkpoint") or {})
-                        accepted, goal_status, missing_work = (
-                            await _check_goal_completion(
-                                llm_cfg,
-                                objective=goal["objective"],
-                                proposal=tool_input,
-                                evidence=goal_evidence,
-                                run_id=run_id,
-                                is_api=False,
-                                checkpoint=goal_checkpoint,
-                            )
+                        (
+                            accepted,
+                            goal_status,
+                            missing_work,
+                        ) = await _check_goal_completion(
+                            llm_cfg,
+                            objective=goal["objective"],
+                            proposal=tool_input,
+                            evidence=goal_evidence,
+                            run_id=run_id,
+                            is_api=False,
+                            checkpoint=goal_checkpoint,
                         )
                         if not accepted:
                             feedback = {
@@ -2405,7 +2940,7 @@ async def run_alice_turn_stream(
                     result_str = f"Tool execution error: {exc}"
 
                 # Cap result length to avoid blowing up context
-                limit = 30000 if tool_name == "context_tool" else 16000
+                limit = 30000 if tool_name == "context_tool" else 24000
                 if len(result_str) > limit:
                     omitted = len(result_str) - limit
                     result_str = result_str[:limit] + f"\n[{omitted} chars omitted]"
@@ -2469,12 +3004,8 @@ async def run_alice_turn_stream(
                 goal["id"], status="paused", pause_reason=str(exc)
             )
             yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
-        log.info("ALICE Codex allowance exhausted: %s", exc)
-        err_msg = (
-            "ChatGPT/Codex is temporarily unavailable because its allowance or "
-            "rate-limit window is full. AESPA paused this ALICE turn. Come back "
-            f"after the window resets and try again. Details: {exc}"
-        )
+        log.info("ALICE paused: %s", exc)
+        err_msg = _alice_pause_message(exc)
         yield f"data: {json.dumps({'type': 'warning', 'message': err_msg})}\n\n"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err_msg}'})}\n\n"
         accumulated_message += err_msg
@@ -2507,10 +3038,10 @@ async def run_alice_turn_stream(
                 from aespa.services import antigravity_provider as provider_adapter
 
             await provider_adapter.close_conversation(messages)
-        # Always unregister the workprogram finding hook, even on early exit
-        # or exception — mirrors scanner._do_thinking_scan cleanup.
+        # Always release the workprogram finding hook, even on early exit or
+        # exception. It stays registered while another chat tab is still working.
         try:
-            _finding_hooks.pop(run_id, None)
+            _release_alice_finding_hook(run_id)
         except Exception:
             pass
         # Close the live browser opened for any `browser` tool calls this turn.
@@ -2951,6 +3482,7 @@ def _run_api_context_tool(
                 from aespa.services.api_scanner import (
                     OWASP_API_CATEGORIES,
                     _match_endpoint_for_url,
+                    _request_method_from_evidence,
                     update_coverage_cell,
                 )
 
@@ -2967,7 +3499,10 @@ def _run_api_context_tool(
                         coll = s2.get(_AC, collection_id)
                         base = (coll.base_url if coll else "").rstrip("/")
                     ep = _match_endpoint_for_url(
-                        finding.affected_url or "", endpoints, base
+                        finding.affected_url or "",
+                        endpoints,
+                        base,
+                        method=_request_method_from_evidence(finding.request_evidence),
                     )
                     if ep is not None:
                         update_coverage_cell(
@@ -3314,7 +3849,9 @@ async def run_api_alice_turn_stream(
                     .where(_AE.in_scope == True)  # noqa: E712
                 ).all()
             )
-        ep = _match_endpoint_for_url(url, endpoints, base_url.rstrip("/"))
+        ep = _match_endpoint_for_url(
+            url, endpoints, base_url.rstrip("/"), method=method
+        )
         if ep is None:
             return
         update_coverage_cell(api_run_id, ep.id, cat, "in_progress")
@@ -3332,6 +3869,10 @@ async def run_api_alice_turn_stream(
             base_url=base_url,
             user_directive=user_instruction,
         )
+    elif intent == "finding_management":
+        system_message = ALICE_FINDING_MANAGEMENT_SYSTEM_PROMPT.format(
+            user_directive=user_instruction,
+        )
     else:
         system_message = ALICE_API_SYSTEM_PROMPT.format(
             collection_name=collection_name,
@@ -3339,9 +3880,7 @@ async def run_api_alice_turn_stream(
             user_directive=user_instruction,
         )
     if goal:
-        system_message += GOAL_MODE_INSTRUCTIONS.format(
-            objective=goal["objective"]
-        )
+        system_message += GOAL_MODE_INSTRUCTIONS.format(objective=goal["objective"])
 
     # Build login-credential block so ALICE knows how to authenticate.
     creds_text = ""
@@ -3390,7 +3929,7 @@ async def run_api_alice_turn_stream(
 
     # Build the initial user message, mirroring the scanner's pattern.
     initial_parts = [f"Target: {base_url}", run_status_block]
-    if intent != "operational":
+    if intent == "testing":
         initial_parts.extend(
             part for part in (creds_text, sessions_text, leads_block) if part
         )
@@ -3418,6 +3957,8 @@ async def run_api_alice_turn_stream(
         alice_tools = [
             tool for tool in alice_tools if tool["name"] in {"context_tool", "done"}
         ]
+    elif intent == "finding_management":
+        alice_tools = _finding_management_tools(alice_tools)
     if goal:
         alice_tools = _goal_mode_tools(alice_tools)
     accumulated_thought = ""
@@ -3457,13 +3998,25 @@ async def run_api_alice_turn_stream(
                 pass
 
             try:
-                (
-                    content_blocks,
-                    stop_reason,
-                    raw_content,
-                ) = await llm_svc._call_with_tools(
+                streamed_text = ""
+                streamed_payload = ""
+                async for call_event in llm_svc.stream_tools_call(
                     llm_cfg, system_message, messages, tools=alice_tools
-                )
+                ):
+                    if call_event["type"] == "text_delta":
+                        delta = call_event["delta"]
+                        if not streamed_text and accumulated_message:
+                            separator = (
+                                "" if accumulated_message.endswith("\n") else "\n\n"
+                            )
+                            if separator:
+                                streamed_payload += separator
+                                yield f"data: {json.dumps({'type': 'message_chunk', 'delta': separator})}\n\n"
+                        streamed_text += delta
+                        streamed_payload += delta
+                        yield f"data: {json.dumps({'type': 'message_chunk', 'delta': delta})}\n\n"
+                    else:
+                        content_blocks, stop_reason, raw_content = call_event["result"]
             except llm_svc.LLMQuotaPauseError:
                 # Preserve the structured pause so the outer handler emits a
                 # visible warning and chat reply instead of a generic step error.
@@ -3509,6 +4062,21 @@ async def run_api_alice_turn_stream(
                 intent == "operational"
                 and any(block.get("name") == "done" for block in tool_use_blocks)
             )
+            combined_text = "".join(
+                str(block.get("text") or "") for block in text_blocks
+            )
+            streamed_is_final = bool(streamed_text) and combined_text == streamed_text
+            if streamed_text and (
+                has_tools
+                or "<think>" in streamed_text.lower()
+                or "<thinking>" in streamed_text.lower()
+            ):
+                yield f"data: {json.dumps({'type': 'message_retract', 'message': accumulated_message})}\n\n"
+                streamed_text = ""
+                streamed_payload = ""
+                streamed_is_final = False
+            elif streamed_is_final:
+                accumulated_message += streamed_payload
             for tb in text_blocks:
                 text_content = tb.get("text") or ""
                 if not text_content:
@@ -3529,6 +4097,8 @@ async def run_api_alice_turn_stream(
                     yield f"data: {json.dumps({'type': 'thinking_chunk', 'delta': wrapped})}\n\n"
                 else:
                     # Final tool-less turn: this text is the actual answer.
+                    if streamed_is_final:
+                        continue
                     if accumulated_message and not accumulated_message.endswith("\n"):
                         accumulated_message += "\n\n"
                         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': '\n\n'})}\n\n"
@@ -3592,16 +4162,18 @@ async def run_api_alice_turn_stream(
                 if tool_name == "done":
                     if goal:
                         goal_checkpoint = dict(goal.get("checkpoint") or {})
-                        accepted, goal_status, missing_work = (
-                            await _check_goal_completion(
-                                llm_cfg,
-                                objective=goal["objective"],
-                                proposal=tool_input,
-                                evidence=goal_evidence,
-                                run_id=api_run_id,
-                                is_api=True,
-                                checkpoint=goal_checkpoint,
-                            )
+                        (
+                            accepted,
+                            goal_status,
+                            missing_work,
+                        ) = await _check_goal_completion(
+                            llm_cfg,
+                            objective=goal["objective"],
+                            proposal=tool_input,
+                            evidence=goal_evidence,
+                            run_id=api_run_id,
+                            is_api=True,
+                            checkpoint=goal_checkpoint,
                         )
                         if not accepted:
                             feedback = {
@@ -3701,7 +4273,7 @@ async def run_api_alice_turn_stream(
                     )
                     result_str = f"Tool execution error: {exc}"
 
-                limit = 30000 if tool_name == "context_tool" else 16000
+                limit = 30000 if tool_name == "context_tool" else 24000
                 if len(result_str) > limit:
                     omitted = len(result_str) - limit
                     result_str = result_str[:limit] + f"\n[{omitted} chars omitted]"
@@ -3765,12 +4337,8 @@ async def run_api_alice_turn_stream(
                 goal["id"], status="paused", pause_reason=str(exc)
             )
             yield f"data: {json.dumps({'type': 'goal_paused', 'goal': alice_goals.goal_out(paused_goal)})}\n\n"
-        log.info("ALICE API Codex allowance exhausted: %s", exc)
-        err_msg = (
-            "ChatGPT/Codex is temporarily unavailable because its allowance or "
-            "rate-limit window is full. AESPA paused this ALICE turn. Come back "
-            f"after the window resets and try again. Details: {exc}"
-        )
+        log.info("ALICE API paused: %s", exc)
+        err_msg = _alice_pause_message(exc)
         yield f"data: {json.dumps({'type': 'warning', 'message': err_msg})}\n\n"
         yield f"data: {json.dumps({'type': 'message_chunk', 'delta': f'\\n\\n⚠️ {err_msg}'})}\n\n"
         accumulated_message += err_msg

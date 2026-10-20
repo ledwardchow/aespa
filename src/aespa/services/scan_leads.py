@@ -351,6 +351,8 @@ def _copy_path_metadata(source: ScanLead, target: ScanLead) -> None:
         "trace_confidence",
     ):
         if hasattr(source, name) and hasattr(target, name):
+            if name == "origin_lead_id" and target.origin_lead_id is not None:
+                continue
             setattr(target, name, getattr(source, name))
 
 
@@ -443,62 +445,74 @@ def copy_lead_to_run(
 ) -> ScanLead:
     """Idempotently copy one reportable original lead into a dynamic run."""
     with Session(get_engine()) as s:
-        original = s.get(ScanLead, lead_id)
-        if (
-            original is None
-            or original.imported_into_run_id is not None
-            or not original.reportable
-        ):
-            raise ValueError("Lead is not eligible for dynamic handoff")
-        existing = s.exec(
-            select(ScanLead)
-            .where(ScanLead.imported_into_run_type == target_run_type)
-            .where(ScanLead.imported_into_run_id == target_run_id)
-            .where(ScanLead.producer_run_id == original.producer_run_id)
-            .where(ScanLead.fingerprint == original.fingerprint)
-        ).first()
-        if existing is not None:
-            s.expunge(existing)
-            return existing
-        ensure_lead_reference(s, original)
-        copied = ScanLead(
-            collection_id=original.collection_id,
-            producer_run_type=original.producer_run_type,
-            producer_run_id=original.producer_run_id,
-            source=original.source,
-            category=original.category,
-            severity=original.severity,
-            confidence=original.confidence,
-            title=original.title,
-            description=original.description,
-            location=original.location,
-            evidence=original.evidence,
-            fingerprint=original.fingerprint,
-            suggested_endpoint=original.suggested_endpoint,
-            source_trace_json=original.source_trace_json,
-            control_trace_json=original.control_trace_json,
-            sink_trace_json=original.sink_trace_json,
-            counterevidence_json=original.counterevidence_json,
-            proof_gaps_json=original.proof_gaps_json,
-            validation_status=original.validation_status,
-            validation_reasoning=original.validation_reasoning,
-            attack_path_json=original.attack_path_json,
-            reportable=True,
-            status="open",
-            imported_into_run_type=target_run_type,
-            imported_into_run_id=target_run_id,
-            origin_lead_id=original.id,
-            origin_reference=original.public_reference,
-            created_at=datetime.now(_UTC),
-            updated_at=datetime.now(_UTC),
-        )
-        _copy_path_metadata(original, copied)
-        s.add(copied)
-        ensure_lead_reference(s, copied)
+        copied = copy_lead_to_run_in_session(s, lead_id, target_run_type, target_run_id)
         s.commit()
         s.refresh(copied)
         s.expunge(copied)
         return copied
+
+
+def copy_lead_to_run_in_session(
+    s: Session, lead_id: int, target_run_type: str, target_run_id: int
+) -> ScanLead:
+    """Copy a lead within the caller's transaction, including its reference."""
+    original = s.get(ScanLead, lead_id)
+    if (
+        original is None
+        or original.imported_into_run_id is not None
+        or not original.reportable
+    ):
+        raise ValueError("Lead is not eligible for dynamic handoff")
+    existing = s.exec(
+        select(ScanLead)
+        .where(ScanLead.imported_into_run_type == target_run_type)
+        .where(ScanLead.imported_into_run_id == target_run_id)
+        .where(ScanLead.producer_run_id == original.producer_run_id)
+        .where(ScanLead.fingerprint == original.fingerprint)
+    ).first()
+    if existing is not None:
+        return existing
+    ensure_lead_reference(s, original)
+    copied = ScanLead(
+        collection_id=original.collection_id,
+        producer_run_type=original.producer_run_type,
+        producer_run_id=original.producer_run_id,
+        source_work_item_id=original.source_work_item_id,
+        source=original.source,
+        classification=original.classification,
+        discovery_strategy=original.discovery_strategy,
+        provenance_json=original.provenance_json,
+        category=original.category,
+        severity=original.severity,
+        confidence=original.confidence,
+        title=original.title,
+        description=original.description,
+        location=original.location,
+        evidence=original.evidence,
+        fingerprint=original.fingerprint,
+        suggested_endpoint=original.suggested_endpoint,
+        source_trace_json=original.source_trace_json,
+        control_trace_json=original.control_trace_json,
+        sink_trace_json=original.sink_trace_json,
+        counterevidence_json=original.counterevidence_json,
+        proof_gaps_json=original.proof_gaps_json,
+        validation_status=original.validation_status,
+        validation_reasoning=original.validation_reasoning,
+        attack_path_json=original.attack_path_json,
+        reportable=True,
+        note=original.note,
+        status="open",
+        imported_into_run_type=target_run_type,
+        imported_into_run_id=target_run_id,
+        origin_lead_id=original.id,
+        origin_reference=original.public_reference,
+        created_at=datetime.now(_UTC),
+        updated_at=datetime.now(_UTC),
+    )
+    _copy_path_metadata(original, copied)
+    s.add(copied)
+    ensure_lead_reference(s, copied)
+    return copied
 
 
 def prepend_frontend_context_to_copied_lead(
@@ -631,7 +645,9 @@ def get_lead_detail_for_run(
         return {
             "id": lead.id,
             "reference": lead.reference,
-            "source_sast_run_id": lead.producer_run_id,
+            "source_sast_run_id": (
+                lead.producer_run_id if lead.producer_run_type == "sast" else None
+            ),
             "source": lead.source,
             "fingerprint": lead.fingerprint,
             "category": lead.category,
@@ -823,6 +839,9 @@ def update_lead(
     investigated_by_run_id: int | None = None,
     linked_finding_id: int | None = None,
     link_coverage: bool = True,
+    outcome_reason: str | None = None,
+    baseline_evidence: object | None = None,
+    mutated_evidence: object | None = None,
 ) -> ScanLead | None:
     """Record the outcome of a dynamic investigation on a lead.
 
@@ -947,6 +966,22 @@ def update_lead(
             _link_promoted_finding_to_coverage(**cov_args)
         except Exception as exc:
             log.debug("update_lead: coverage link failed: %s", exc)
+
+    # Campaign validation cases own the more precise execution result. This
+    # hook is harmless for ordinary SAST leads because no case will match.
+    try:
+        from aespa.services.campaign_validation_cases import (
+            sync_case_outcome_from_lead,
+        )
+
+        sync_case_outcome_from_lead(
+            lead.id,
+            outcome_reason=outcome_reason,
+            baseline_evidence=baseline_evidence,
+            mutated_evidence=mutated_evidence,
+        )
+    except Exception as exc:
+        log.debug("update_lead: validation-case sync failed: %s", exc)
 
     return lead
 

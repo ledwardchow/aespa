@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
 import re
 import shutil
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,6 +30,7 @@ log = logging.getLogger("aespa.llm.codex")
 TURN_TIMEOUT_S = 600.0
 CONVERSATION_CLOSE_TIMEOUT_S = 3.0
 MAX_REQUIRED_TOOL_REPAIRS = 2
+MAX_INTERNAL_TOOL_RETRIES = 2
 MAX_RETRYABLE_TURN_ERRORS = 5
 # asyncio defaults subprocess streams to 64 KiB. Codex sends one JSON object per
 # line, and long scan contexts or tool payloads can make a valid line much larger.
@@ -72,6 +75,21 @@ class CodexUnavailableError(RuntimeError):
     """Codex is not installed, signed in, or compatible with AESPA."""
 
 
+class CodexCyberPolicyError(CodexUnavailableError):
+    """Codex rejected an agent turn for cybersecurity risk."""
+
+
+def _is_cyber_policy_turn_error(params: dict[str, Any]) -> bool:
+    error = params.get("error")
+    if not isinstance(error, dict):
+        return False
+    if error.get("code") == "cyber_policy":
+        return True
+    return not error.get("code") and str(error.get("message") or "").startswith(
+        "This content was flagged for possible cybersecurity risk."
+    )
+
+
 class CodexTurnTimeoutError(CodexUnavailableError):
     """A Codex turn stopped emitting events while the app-server stayed alive."""
 
@@ -84,12 +102,20 @@ class CodexToolSessionError(CodexTurnTimeoutError):
     """Codex completed a turn by reporting that AESPA tools were unavailable."""
 
 
+class CodexInternalToolError(CodexUnavailableError):
+    """Codex attempted one of its own tools during an AESPA turn."""
+
+
 class CodexTransportError(CodexUnavailableError):
     """The Codex app-server process or its event reader stopped."""
 
     def __init__(self, message: str, *, client: _JsonRpcClient | None = None) -> None:
         super().__init__(message)
         self.client = client
+
+
+class CodexOpenFileLimitError(CodexUnavailableError):
+    """Codex could not open another session because file handles were exhausted."""
 
 
 class CodexQuotaError(RuntimeError):
@@ -379,10 +405,40 @@ def _workspace() -> Path:
 
 
 def _child_env() -> dict[str, str]:
+    from aespa.services.llm_network import child_network_env
+
     current = os.environ
     env = {key: current[key] for key in _ENV_ALLOWLIST if current.get(key)}
     env["PATH"] = current.get("PATH", os.defpath)
-    return env
+    return child_network_env(env)
+
+
+def _is_open_file_limit_error(exc: BaseException) -> bool:
+    if isinstance(exc, OSError) and exc.errno in {errno.EMFILE, errno.ENFILE}:
+        return True
+    message = str(exc).lower()
+    return "too many open files" in message or "os error 24" in message
+
+
+def _is_unsupported_dynamic_tools_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return ("dynamictools" in message or "dynamic_tools" in message) and any(
+        marker in message
+        for marker in ("unknown", "unrecognized", "unsupported", "not supported")
+    )
+
+
+def _thread_start_error(exc: CodexUnavailableError) -> CodexUnavailableError:
+    if _is_open_file_limit_error(exc):
+        return CodexOpenFileLimitError(
+            "Codex could not start a session because it ran out of open files."
+        )
+    if _is_unsupported_dynamic_tools_error(exc):
+        return CodexUnavailableError(
+            "This Codex CLI does not support AESPA dynamic tools. "
+            "Upgrade Codex CLI and try again. Details: " + str(exc)
+        )
+    return exc
 
 
 def resolve_executable(path: str | None = None) -> str | None:
@@ -436,6 +492,7 @@ class _Conversation:
     )
     text: list[str] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
+    daybreak_program: str | None = None
 
 
 class _JsonRpcClient:
@@ -783,8 +840,7 @@ def _reports_dynamic_tool_failure(
         if str(tool.get("name") or "").strip()
     }
     mentions_named_tool = any(
-        re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalized)
-        for name in tool_names
+        re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalized) for name in tool_names
     )
     if not mentions_named_tool or "tool" not in normalized:
         return False
@@ -808,7 +864,7 @@ def _required_tool_repair_prompt(tools: list[dict[str, Any]]) -> str:
     available = ", ".join(names)
     return (
         "Your previous response ended without calling an AESPA dynamic tool, so "
-        "no scan action was executed. Call exactly one AESPA dynamic tool now and "
+        "no scan action was executed. Call an AESPA dynamic tool now and "
         "do not respond with prose alone. Available tools: "
         f"{available}."
     )
@@ -897,8 +953,11 @@ async def _start_thread(
 ) -> _Conversation:
     tool_rule = (
         "Call only the dynamic tools supplied by AESPA. Every response must "
-        "call exactly one of those dynamic tools. Never end a response with "
-        "prose alone; call the supplied completion tool when the work is done."
+        "call at least one of those dynamic tools. When several calls do not "
+        "depend on each other's results, such as reading several files, make "
+        "them all in the same response. Never end a response with prose "
+        "alone; call the supplied completion tool on its own when the work is "
+        "done."
         if tools
         else "Do not call any tool."
     )
@@ -909,7 +968,7 @@ async def _start_thread(
         "approvalPolicy": "never",
         "baseInstructions": (
             "You are embedded in AESPA as a model and tool caller, not as a "
-            "coding agent. Never use Codex-owned tools such as exec, shell, "
+            "coding agent. Never use Codex-owned tools such as js, exec, shell, "
             "wait, sleep, collaboration, file editing, MCP, or web search. " + tool_rule
         ),
         "developerInstructions": system_message,
@@ -921,10 +980,9 @@ async def _start_thread(
         result = await client.request("thread/start", params)
     except CodexUnavailableError as exc:
         if tools:
-            raise CodexUnavailableError(
-                "This Codex CLI does not support AESPA dynamic tools. "
-                "Upgrade Codex CLI and try again. Details: " + str(exc)
-            ) from exc
+            detail = _thread_start_error(exc)
+            if detail is not exc:
+                raise detail from exc
         raise
     thread_id = str((result or {}).get("thread", result or {}).get("id") or "")
     if not thread_id:
@@ -976,6 +1034,30 @@ async def _send_turn(
     }
     if getattr(config, "reasoning_effort", None):
         params["effort"] = config.reasoning_effort
+    try:
+        cached = getattr(client, "_daybreak_options", None)
+        if cached is None or cached[0] < time.monotonic():
+            options = await discover_model_options()
+            client._daybreak_options = (time.monotonic() + 900, options)
+        else:
+            options = cached[1]
+        option = next((item for item in options if item["id"] == config.model), None)
+        available = (option or {}).get("daybreak_programs", [])
+        preferred = (
+            "daybreak_red"
+            if config.model in {"gpt-daybreak-red-latest", "gpt-5.6-cyber"}
+            else "daybreak_blue"
+        )
+        if preferred in available:
+            params["cyberAccessProgram"] = (
+                "daybreakRed" if preferred == "daybreak_red" else "daybreakBlue"
+            )
+            conversation.daybreak_program = preferred
+        else:
+            conversation.daybreak_program = None
+    except Exception:
+        log.debug("Codex model access metadata is unavailable", exc_info=True)
+        conversation.daybreak_program = None
     await client.request(
         "turn/start",
         params,
@@ -1149,11 +1231,9 @@ async def _completion_with_tools_once(
         if event_type in {"item/started", "item/completed"}:
             internal_action = _internal_action_name(params)
             if internal_action:
-                raise CodexUnavailableError(
+                raise CodexInternalToolError(
                     f"Codex tried to use its internal '{internal_action}' tool. "
-                    "AESPA stopped the turn because only AESPA dynamic tools can "
-                    "be used during a scan. Try a different Codex model if this "
-                    "keeps happening."
+                    "Only AESPA dynamic tools can be used during a scan."
                 )
         if event_type in {"thread/tokenUsage/updated", "tokenUsage"}:
             delta = _usage_delta(conversation, params)
@@ -1163,6 +1243,14 @@ async def _completion_with_tools_once(
             _emit_usage(usage_callback, config.model, delta, quota)
             continue
         if event_type == "item/tool/call" or event_type == "tool":
+            if conversation.daybreak_program:
+                usage_callback(
+                    config.model,
+                    0,
+                    0,
+                    daybreak_program=conversation.daybreak_program,
+                )
+                conversation.daybreak_program = None
             call_id = str(params.get("callId") or params.get("id") or "")
             arguments = params.get("arguments") or {}
             if isinstance(arguments, str):
@@ -1204,6 +1292,16 @@ async def _completion_with_tools_once(
             _merge_completed_text(conversation, _event_text(params))
             continue
         if event_type in {"turn/completed", "turn/completion"}:
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            status = turn.get("status") or params.get("status")
+            if conversation.daybreak_program and status in {None, "completed"}:
+                usage_callback(
+                    config.model,
+                    0,
+                    0,
+                    daybreak_program=conversation.daybreak_program,
+                )
+            conversation.daybreak_program = None
             _merge_completed_text(conversation, _event_text(params))
             output = _take_conversation_text(conversation)
             if output:
@@ -1294,6 +1392,8 @@ async def _completion_with_tools_once(
                     details[:1000],
                 )
                 continue
+            if isinstance(params, dict) and _is_cyber_policy_turn_error(params):
+                raise CodexCyberPolicyError(details)
             raise CodexUnavailableError(details)
 
 
@@ -1305,12 +1405,13 @@ async def completion_with_tools(
     usage_callback: Callable[..., None],
     proxy_url: str | None = None,
 ) -> tuple[list[dict], str, list[dict]]:
-    """Run a turn with bounded rate-limit and stalled-client recovery."""
+    """Run a turn with bounded rate-limit and Codex session recovery."""
     max_rate_limit_retries = 3
     rate_limit_attempt = 0
     thread_retry_used = False
     client_restart_count = 0
     max_client_restarts = 2
+    internal_tool_retries = 0
     while True:
         try:
             return await _completion_with_tools_once(
@@ -1342,6 +1443,18 @@ async def completion_with_tools(
                 max_rate_limit_retries,
             )
             await asyncio.sleep(min(delay, 5.0))
+        except CodexInternalToolError:
+            # The model drifted into a Codex-owned tool. The current thread can
+            # no longer be trusted to follow AESPA's dynamic-tool instructions.
+            await _abandon_conversation(messages)
+            if internal_tool_retries >= MAX_INTERNAL_TOOL_RETRIES:
+                raise
+            internal_tool_retries += 1
+            log.warning(
+                "Codex attempted an internal tool; retrying in a fresh thread (%d/%d)",
+                internal_tool_retries,
+                MAX_INTERNAL_TOOL_RETRIES,
+            )
         except CodexTurnTimeoutError as exc:
             if not thread_retry_used:
                 thread_retry_used = True
@@ -1555,19 +1668,24 @@ async def status() -> dict[str, Any]:
         try:
             await _probe_dynamic_tools(client)
         except Exception as exc:
+            detail = (
+                _thread_start_error(exc)
+                if isinstance(exc, CodexUnavailableError)
+                else exc
+            )
             return info | {
                 "running": True,
                 "compatible": False,
                 "account": account,
                 "rate_limits": limits,
-                "error": "This Codex CLI does not support AESPA dynamic tools. Upgrade Codex CLI and try again. "
-                + str(exc),
+                "error": str(detail),
             }
         return info | {
             "running": True,
             "compatible": True,
             "account": account,
             "rate_limits": limits,
+            "daybreak": await _daybreak_access_summary(),
         }
     except Exception as exc:
         return info | {
@@ -1580,6 +1698,23 @@ async def status() -> dict[str, Any]:
 
 async def discover_models() -> list[str]:
     return [item["id"] for item in await discover_model_options()]
+
+
+async def _daybreak_access_summary() -> dict[str, bool] | None:
+    try:
+        options = await discover_model_options()
+    except Exception:
+        log.debug("Codex Daybreak access check failed", exc_info=True)
+        return None
+    if not any(option.get("daybreak_access_known") for option in options):
+        return None
+    programs = {
+        program for option in options for program in option.get("daybreak_programs", [])
+    }
+    return {
+        "blue": "daybreak_blue" in programs,
+        "red": "daybreak_red" in programs,
+    }
 
 
 async def discover_model_options() -> list[dict[str, Any]]:
@@ -1600,13 +1735,37 @@ async def discover_model_options() -> list[dict[str, Any]]:
                 or row.get("hidden", False)
             ):
                 continue
-            models.append(
-                {
-                    "id": str(row["id"]),
-                    "supportedReasoningEfforts": row.get("supportedReasoningEfforts"),
-                    "defaultReasoningEffort": row.get("defaultReasoningEffort"),
-                }
-            )
+            option = {
+                "id": str(row["id"]),
+                "supportedReasoningEfforts": row.get("supportedReasoningEfforts"),
+                "defaultReasoningEffort": row.get("defaultReasoningEffort"),
+                "daybreak_access_known": isinstance(
+                    row.get("availableAccessPrograms"), dict
+                ),
+                "daybreak_programs": sorted(
+                    {
+                        {
+                            "daybreakBlue": "daybreak_blue",
+                            "daybreakRed": "daybreak_red",
+                        }[program]
+                        for program in (row.get("availableAccessPrograms") or {}).get(
+                            "cyber", []
+                        )
+                        if program in {"daybreakBlue", "daybreakRed"}
+                    }
+                ),
+            }
+            for key in (
+                "context_window_tokens",
+                "context_length",
+                "contextWindow",
+                "context_window",
+                "max_input_tokens",
+                "inputTokenLimit",
+            ):
+                if row.get(key) is not None:
+                    option[key] = row[key]
+            models.append(option)
         next_cursor = result.get("nextCursor") or result.get("next_cursor")
         if not next_cursor or next_cursor == cursor:
             break
@@ -1621,3 +1780,28 @@ async def read_rate_limits() -> dict[str, Any]:
     client = await _get_client()
     result = await client.request("account/rateLimits/read", {})
     return result if isinstance(result, dict) else {}
+
+
+async def read_account_usage(
+    executable_path: str | None = None, timeout: float = 30
+) -> dict[str, Any]:
+    """Read the signed-in account and plan usage with a separate app-server.
+
+    The shared client belongs to the event loop that started it. This uses its
+    own short-lived process, so it can run from any thread or event loop.
+    """
+    executable = resolve_executable(executable_path)
+    if not executable:
+        raise CodexUnavailableError("Codex CLI is not installed")
+    client = _JsonRpcClient(executable)
+    try:
+        async with asyncio.timeout(timeout):
+            await client.start()
+            account = await client.request("account/read", {})
+            limits = await client.request("account/rateLimits/read", {})
+    finally:
+        await client.close()
+    return {
+        "account": account if isinstance(account, dict) else {},
+        "rate_limits": limits if isinstance(limits, dict) else {},
+    }

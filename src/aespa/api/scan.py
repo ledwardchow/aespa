@@ -20,13 +20,13 @@ from aespa.models import (
     TestRun,
 )
 from aespa.schemas import (
-    CoverageModeLiteral,
     ScanCheckpointStatusOut,
     ScanFindingImportIn,
     ScanFindingImportResult,
     ScanFindingOut,
     ScanFindingUpdateIn,
     ValidationStatusOut,
+    WebCoverageModeLiteral,
 )
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import crawler as crawler_svc
@@ -34,7 +34,9 @@ from aespa.services import findings as findings_svc
 from aespa.services import llm as llm_svc
 from aespa.services import scanner as scanner_svc
 from aespa.services import validator as validator_svc
+from aespa.services import web_runs_service as web_runs_svc
 from aespa.services.references import ensure_finding_reference
+from aespa.services.run_cleanup import detach_finding_dependents
 
 router = APIRouter(tags=["scan"])
 
@@ -47,10 +49,13 @@ def _get_run_or_404(session: Session, run_id: int) -> TestRun:
 
 
 class _StartScanBody(BaseModel):
-    coverage_mode: Optional[CoverageModeLiteral] = None
+    coverage_mode: Optional[WebCoverageModeLiteral] = None
     target_page_id: Optional[int] = None
     target_page_ids: Optional[list[int]] = None
     use_session: Optional[str] = None
+
+
+_reject_incompatible_scan_mode = web_runs_svc.reject_incompatible_scan_mode
 
 
 @router.post("/api/test-runs/{run_id}/thinking-scan/start")
@@ -60,49 +65,20 @@ async def start_thinking_scan(
     session: Session = Depends(get_session),
 ) -> dict:
     """Start an LLM-directed scan that dynamically chooses what to test next."""
-    run = _get_run_or_404(session, run_id)
-    if crawler_svc.is_running(run_id):
-        raise HTTPException(
-            status_code=409, detail="Crawl is still running — wait for it to finish"
-        )
-    if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-    if body and body.coverage_mode is not None:
-        run.coverage_mode = body.coverage_mode
+    _get_run_or_404(session, run_id)
+    target_ids = None
     if body:
         target_ids = body.target_page_ids or (
             [body.target_page_id] if body.target_page_id is not None else None
         )
-        if target_ids is not None:
-            pages = session.exec(
-                select(CrawledPage)
-                .where(CrawledPage.test_run_id == run_id)
-                .where(CrawledPage.id.in_(target_ids))
-            ).all()
-            if len(pages) != len(set(target_ids)):
-                raise HTTPException(status_code=404, detail="Target page not found")
-            run.target_page_ids_json = json.dumps(sorted(set(target_ids)))
-            run.target_session_label = body.use_session or None
-        session.add(run)
-        session.commit()
-    if run.coverage_mode != "sast_validate":
-        # Seed workprogram synchronously so it's populated before the response returns.
-        try:
-            from aespa.services.web_workprogram import seed_web_workprogram
-
-            seed_web_workprogram(run_id)
-        except Exception:
-            pass  # non-fatal
-    if run.coverage_mode == "sast_validate":
-        from aespa.services.scan_leads import get_leads_for_run
-
-        if not get_leads_for_run("web", run_id):
-            raise HTTPException(
-                status_code=409,
-                detail="No open imported SAST leads are available to validate",
-            )
-    await scanner_svc.start_thinking_scan(run_id)
-    return scanner_svc.get_thinking_scan_status(run_id)
+    return await web_runs_svc.start_scan(
+        session,
+        run_id,
+        coverage_mode=body.coverage_mode if body else None,
+        target_page_ids=target_ids,
+        use_session=body.use_session if body else None,
+        update_targets=body is not None,
+    )
 
 
 @router.post("/api/test-runs/{run_id}/pages/{page_id}/test")
@@ -161,6 +137,16 @@ def thinking_scan_status(run_id: int, session: Session = Depends(get_session)) -
     return scanner_svc.get_thinking_scan_status(run_id)
 
 
+@router.get("/api/test-runs/{run_id}/deep-queue")
+def deep_scan_queue(run_id: int, session: Session = Depends(get_session)) -> dict:
+    run = _get_run_or_404(session, run_id)
+    if run.coverage_mode != "deep":
+        raise HTTPException(status_code=409, detail="This run is not using Deep mode")
+    from aespa.services.deep_scan import get_queue
+
+    return get_queue(run_id)
+
+
 @router.get(
     "/api/test-runs/{run_id}/thinking-scan/checkpoint",
     response_model=ScanCheckpointStatusOut,
@@ -179,47 +165,7 @@ async def resume_thinking_scan(
     run_id: int, session: Session = Depends(get_session)
 ) -> dict:
     """Resume an interrupted dynamic scan from the last saved checkpoint."""
-    run = _get_run_or_404(session, run_id)
-    from aespa.services import run_pause as run_pause_svc
-
-    pause = run_pause_svc.get_pause("web", run_id)
-    if pause is not None:
-        if pause.reset_at and pause.reset_at > datetime.now(timezone.utc):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": pause.message,
-                    "reset_at": pause.reset_at.isoformat(),
-                },
-            )
-    if crawler_svc.is_running(run_id):
-        raise HTTPException(
-            status_code=409, detail="Crawl is still running — wait for it to finish"
-        )
-    if scanner_svc.is_thinking_running(run_id):
-        raise HTTPException(status_code=409, detail="Dynamic Scan already running")
-    status = checkpoint_svc.checkpoint_status(run_id)
-    if not status["exists"]:
-        raise HTTPException(status_code=404, detail="No checkpoint found for this run")
-    if run.coverage_mode == "sast_validate":
-        from aespa.services.scan_leads import get_leads_for_run
-
-        if not get_leads_for_run("web", run_id):
-            raise HTTPException(
-                status_code=409,
-                detail="No open imported SAST leads are available to validate",
-            )
-    else:
-        try:
-            from aespa.services.web_workprogram import seed_web_workprogram
-
-            seed_web_workprogram(run_id)
-        except Exception:
-            pass
-    await scanner_svc.start_thinking_scan_resume(run_id)
-    if pause is not None:
-        run_pause_svc.clear_pause("web", run_id)
-    return scanner_svc.get_thinking_scan_status(run_id)
+    return await web_runs_svc.resume_scan(session, run_id)
 
 
 @router.delete("/api/test-runs/{run_id}/findings/{finding_id}", status_code=204)
@@ -232,6 +178,7 @@ def delete_finding(
     finding = session.get(ScanFinding, finding_id)
     if finding is None or finding.test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Finding not found")
+    detach_finding_dependents(session, [finding_id])
     session.delete(finding)
     session.commit()
 
@@ -286,6 +233,7 @@ def delete_findings_group(
         ).all():
             page.scan_status = "pending"
             session.add(page)
+    detach_finding_dependents(session, [f.id for f in findings if f.id is not None])
     for f in findings:
         session.delete(f)
     session.commit()
@@ -717,8 +665,16 @@ def guided_login_status(run_id: int) -> dict:
     from aespa.services.crawler import _guided_ready_registry, _guided_registry
 
     return {
-        "pending_credential_ids": list(_guided_registry.keys()),
-        "awaiting_ready_credential_ids": list(_guided_ready_registry.keys()),
+        "pending_credential_ids": [
+            credential_id
+            for key_run_id, credential_id in _guided_registry
+            if key_run_id == run_id
+        ],
+        "awaiting_ready_credential_ids": [
+            credential_id
+            for key_run_id, credential_id in _guided_ready_registry
+            if key_run_id == run_id
+        ],
     }
 
 
@@ -730,7 +686,7 @@ async def ready_guided_login(run_id: int, credential_id: int) -> dict:
     """
     from aespa.services.crawler import _guided_ready_registry
 
-    event = _guided_ready_registry.get(credential_id)
+    event = _guided_ready_registry.get((run_id, credential_id))
     if event is None:
         raise HTTPException(
             status_code=404,
@@ -758,7 +714,7 @@ async def confirm_guided_login(run_id: int, credential_id: int) -> dict:
     """
     from aespa.services.crawler import _guided_registry
 
-    event = _guided_registry.get(credential_id)
+    event = _guided_registry.get((run_id, credential_id))
     if event is None:
         raise HTTPException(
             status_code=404,

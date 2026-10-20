@@ -4,7 +4,9 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { nav } from "../../shared/navigation/router.js";
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function ApiCollectionsList() {
   const [collections, setCollections] = useState(null);
@@ -134,16 +136,7 @@ export function ApiCollectionsList() {
         }
       />
       <div className="content scroll-content">
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 16,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <PageError error={error} inline={!collections} onDismiss={() => setError(null)} />
         {collections === null && <div className="subtle">Loading…</div>}
         {collections !== null && collections.length === 0 && (
           <EmptyState
@@ -217,7 +210,7 @@ export function ApiCollectionsList() {
               </thead>
               <tbody>
                 {sortedCollections.map((c) => (
-                  <tr key={c.id}>
+                  <NavigationRow key={c.id} href={`#/apis/${c.id}`} label={`Open ${c.name}`}>
                     <td>
                       <a
                         href={`#/apis/${c.id}`}
@@ -253,7 +246,7 @@ export function ApiCollectionsList() {
                         </button>
                       </div>
                     </td>
-                  </tr>
+                  </NavigationRow>
                 ))}
               </tbody>
             </table>

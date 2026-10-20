@@ -4,8 +4,40 @@ import json
 import pytest
 from sqlmodel import Session
 
-from aespa.models import Site, TestRun, TestRunStatus
+from aespa.models import Site, TestRun, TestRunStatus, UpstreamProxyConfig
 from aespa.services import crawler
+
+
+def test_next_page_data_is_not_promoted_as_api_endpoint():
+    assert not crawler._is_api_response_candidate(
+        "https://shop.example/p/widget?_rsc=abc123", "fetch", "text/x-component"
+    )
+    assert crawler._is_api_response_candidate(
+        "https://shop.example/api/products?category=widgets",
+        "fetch",
+        "application/json",
+    )
+
+
+def test_login_result_remains_in_crawl_progress(isolated_db_engine):
+    with Session(isolated_db_engine) as session:
+        site = Site(name="Progress target", base_url="https://target.local")
+        session.add(site)
+        session.commit()
+        run = TestRun(site_id=site.id, name="Progress run")
+        session.add(run)
+        session.commit()
+        run_id = run.id
+
+    crawler._update_credential_progress(
+        run_id, "alice", None, 0, login_status="success"
+    )
+    crawler._update_credential_progress(run_id, "alice", "https://target.local/", 1)
+
+    with Session(isolated_db_engine) as session:
+        progress = json.loads(session.get(TestRun, run_id).per_user_progress)
+    assert progress["alice"]["login_status"] == "success"
+    assert progress["alice"]["pages_visited"] == 1
 
 
 def test_page_function_label_removes_credential_possessive():
@@ -17,9 +49,41 @@ def test_page_function_label_removes_credential_possessive():
     )
 
 
-def test_cancelled_crawl_preserves_finished_scan_state(
-    isolated_db_engine, monkeypatch
+@pytest.mark.parametrize(
+    ("proxy_llm", "expected_proxy"),
+    [
+        (True, "http://llm-proxy.local:8080"),
+        (False, None),
+    ],
+)
+def test_crawl_applies_configured_llm_proxy(
+    isolated_db_engine, monkeypatch, proxy_llm, expected_proxy
 ):
+    with Session(isolated_db_engine) as session:
+        session.add(
+            UpstreamProxyConfig(
+                id=1,
+                llm_proxy_url="http://llm-proxy.local:8080",
+                proxy_llm=proxy_llm,
+            )
+        )
+        session.commit()
+
+    observed = []
+
+    async def fake_crawl_inner(run_id):
+        assert run_id == 41
+        observed.append(crawler.llm_svc._llm_proxy_var.get())
+
+    monkeypatch.setattr(crawler, "_do_crawl_inner", fake_crawl_inner)
+
+    asyncio.run(crawler._do_crawl(41))
+
+    assert observed == [expected_proxy]
+    assert crawler.llm_svc._llm_proxy_var.get() is None
+
+
+def test_cancelled_crawl_preserves_finished_scan_state(isolated_db_engine, monkeypatch):
     with Session(isolated_db_engine) as session:
         site = Site(name="Target", base_url="https://target.local")
         session.add(site)
@@ -1926,22 +1990,15 @@ def test_norm_netloc_strips_default_port_keeps_custom():
     assert crawler._norm_netloc("[::1]", "https") == "[::1]"
 
 
-def test_access_failure_text_detects_could_not_load_details():
-    assert (
-        crawler._looks_like_access_failure_text(
-            "Account details\nCould not load details\nTry again later"
-        )
-        is True
-    )
-
-
-def test_access_failure_text_ignores_normal_account_details():
-    assert (
-        crawler._looks_like_access_failure_text(
-            "Account details\nBalance GBP 1,204.55\nRecent transactions"
-        )
-        is False
-    )
+@pytest.mark.parametrize(
+    ("text", "is_failure"),
+    [
+        ("Account details\nCould not load details\nTry again later", True),
+        ("Account details\nBalance GBP 1,204.55\nRecent transactions", False),
+    ],
+)
+def test_access_failure_text(text, is_failure):
+    assert crawler._looks_like_access_failure_text(text) is is_failure
 
 
 def test_confirm_direct_page_access_rejects_failure_text_without_llm(monkeypatch):
@@ -2037,8 +2094,8 @@ def test_dedupe_api_calls_uses_method_and_normalized_url():
 
     deduped = crawler._dedupe_api_calls(calls)
 
-    assert len(deduped) == 2
-    assert [call["method"] for call in deduped] == ["GET", "POST"]
+    assert len(deduped) == 3
+    assert [call["method"] for call in deduped] == ["GET", "GET", "POST"]
 
 
 def test_url_has_object_ref_detects_path_and_query_ids():
@@ -2626,26 +2683,19 @@ def test_authenticate_does_not_reuse_unconfirmed_entra_session(monkeypatch):
     assert (12, 42) not in crawler._guided_session_cache
 
 
-def test_login_url_for_entra_credential_prefers_site_login_before_provider():
+@pytest.mark.parametrize(
+    ("site_login_url", "expected"),
+    [
+        ("https://target.local/login", "https://target.local/login"),
+        ("", "https://login.microsoftonline.com/"),
+    ],
+)
+def test_login_url_for_entra_credential(site_login_url, expected):
     class _Cred:
         auth_mode = "entra_id"
         login_url = "https://login.microsoftonline.com/"
 
-    assert (
-        crawler._login_url_for_credential("https://target.local/login", _Cred())
-        == "https://target.local/login"
-    )
-
-
-def test_login_url_for_entra_credential_keeps_provider_without_site_login():
-    class _Cred:
-        auth_mode = "entra_id"
-        login_url = "https://login.microsoftonline.com/"
-
-    assert (
-        crawler._login_url_for_credential("", _Cred())
-        == "https://login.microsoftonline.com/"
-    )
+    assert crawler._login_url_for_credential(site_login_url, _Cred()) == expected
 
 
 class _EntraContext:

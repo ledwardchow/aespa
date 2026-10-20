@@ -25,6 +25,29 @@
   content: "○";
   font-size: 8px;
 }
+.badge.deep {
+  flex-shrink: 0;
+  color: #a78bfa;
+  background: rgba(139, 92, 246, 0.15);
+  border-color: rgba(139, 92, 246, 0.3);
+}
+.run-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.site-run-profile {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-name strong,
+.run-name > a {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ── Form card ──────────────────────────────────────────────── */
 
@@ -213,6 +236,60 @@ textarea {
   resize: vertical;
 }
 
+/* Dark defaults for every other native control. :where() keeps specificity at
+   zero so feature-level classes can still size or compact them. */
+:where(
+  input[type="number"],
+  input[type="search"],
+  input[type="email"],
+  input[type="date"],
+  input[type="time"],
+  input[type="datetime-local"],
+  input:not([type]),
+  select
+) {
+  background-color: var(--panel-2);
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-family: inherit;
+  color-scheme: dark;
+  outline: none;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+:where(select) {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b7691' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+:where(select[multiple]) {
+  background-image: none;
+  padding-right: 10px;
+}
+:where(select option) {
+  background: #1d222d;
+  color: var(--text);
+}
+:where(select):focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+:where(select):disabled,
+:where(input):disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.field > :where(input[type="number"], select) {
+  width: 100%;
+}
+
 .toggle-row {
   display: flex;
   align-items: center;
@@ -241,6 +318,7 @@ textarea {
 }
 
 fieldset {
+  min-width: 0;
   border: 1px solid var(--border-2);
   border-radius: 8px;
   padding: 14px;
@@ -257,88 +335,16 @@ legend {
   letter-spacing: 0.6px;
 }
 
-.cred-row {
+.site-runs-section {
   display: flex;
+  flex: 1 1 0;
+  min-height: 280px;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 7px;
 }
-.cred-row .credential-login-field {
-}
-.cred-row .credential-remove-cell {
-  align-self: flex-end;
-  padding-bottom: 1px;
-}
-.login-fields-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-.login-fields-heading {
-  font-size: 12px;
-  font-weight: 700;
-}
-.login-field-row {
-  display: grid;
-  grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) auto minmax(140px, 1fr) auto;
-  gap: 8px;
-  align-items: end;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-}
-.login-field-sensitive {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 34px;
-  font-size: 12px;
-}
-@media (max-width: 900px) {
-  .login-field-row {
-    grid-template-columns: 1fr;
-  }
-}
-
-.site-credentials-list {
-  margin-top: 12px;
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.site-credential-row {
-  display: grid;
-  grid-template-columns: minmax(120px, 0.7fr) minmax(0, 1fr);
-  gap: 12px;
-  align-items: center;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--bg);
-}
-.site-credential-name {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--text);
-}
-.site-credential-user {
-  margin-top: 2px;
-  font-size: 11px;
-  color: var(--muted);
-}
-.site-credential-login {
-  color: var(--text-2);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.content.scroll-content.stack .site-runs-table {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 100%;
 }
 
 /* ── Alerts ─────────────────────────────────────────────────── */
@@ -358,6 +364,90 @@ legend {
   background: rgba(72, 187, 120, 0.12);
   border: 1px solid rgba(72, 187, 120, 0.35);
   color: #86efb0;
+}
+.alert.dismissible {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.alert-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.alert-dismiss {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin: -4px -7px -4px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: currentColor;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  opacity: 0.72;
+}
+.alert-dismiss:hover,
+.alert-dismiss:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  opacity: 1;
+  outline: none;
+}
+
+.alert.form-error {
+  margin: 12px 0;
+}
+
+.notice-stack {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: min(440px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.notice-stack:empty {
+  display: none;
+}
+.alert.notice {
+  pointer-events: auto;
+  width: max-content;
+  max-width: 100%;
+  max-height: 40vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  background: var(--panel-2, var(--panel));
+  color: var(--text);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.alert.notice.error {
+  border-color: rgba(224, 92, 92, 0.45);
+  border-left: 3px solid var(--danger);
+}
+.alert.notice.success {
+  border-color: rgba(72, 187, 120, 0.4);
+  border-left: 3px solid var(--ok, #48bb78);
+}
+@media (max-width: 640px) {
+  .notice-stack {
+    right: 16px;
+    bottom: 16px;
+    left: 16px;
+    align-items: stretch;
+    max-width: none;
+  }
+  .alert.notice {
+    width: auto;
+  }
 }
 
 /* ── Empty state ────────────────────────────────────────────── */
@@ -395,4 +485,14 @@ legend {
 }
 .mono {
   font-family: ui-monospace, "Cascadia Code", "SF Mono", monospace;
+}
+
+/* Uppercase heading above a list section inside a page (e.g. "Test runs"). */
+.section-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 12px;
 }

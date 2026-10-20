@@ -4,8 +4,20 @@ export type Route = {
   siteId?: number;
   campaignId?: number;
   tab?: string;
+  subTab?: string;
+  screen?: "list" | "new" | "edit";
+  providerId?: number;
+  modelName?: string;
+  extensionId?: string;
   findingRef?: string;
+  findingIds?: number[];
+  coverageReturn?: "owasp" | "workflows";
   leadRef?: string;
+  trafficCoverage?: {
+    cellIds: number[];
+    category?: string;
+    testClass?: string;
+  };
 };
 
 function cleanReference(value: string | null) {
@@ -16,15 +28,46 @@ function cleanReference(value: string | null) {
 export function parseRoute(hash = "#/"): Route {
   if (!hash || hash === "#/" || hash === "#") return { name: "list" };
 
-  const [routeHash, queryString = ""] = hash.split("?", 2);
+  const [rawRouteHash, queryString = ""] = hash.split("?", 2);
+  // Keep bookmarks created before Applications was renamed to Systems working.
+  const routeHash = rawRouteHash.replace(/^#\/applications(?=\/|$)/, "#/systems");
   const query = new URLSearchParams(queryString);
   const findingRef = cleanReference(query.get("finding"));
+  const findingIds = [
+    ...new Set(
+      (query.get("finding_ids") || "")
+        .split(",")
+        .filter((value) => /^[1-9]\d*$/.test(value))
+        .map(Number)
+        .filter(Number.isSafeInteger),
+    ),
+  ];
+  const coverageReturn =
+    query.get("from") === "workflows"
+      ? "workflows"
+      : query.get("from") === "coverage"
+        ? "owasp"
+        : undefined;
   const leadRef = cleanReference(query.get("lead"));
+  const cellIds = (query.get("coverage_cells") || "")
+    .split(",")
+    .map(Number)
+    .filter((value) => Number.isInteger(value) && value > 0);
+  const trafficCoverage = cellIds.length
+    ? {
+        cellIds,
+        category: cleanReference(query.get("coverage_category")),
+        testClass: cleanReference(query.get("test_class")),
+      }
+    : undefined;
   let m;
   if ((m = routeHash.match(/^#\/sites\/new$/))) return { name: "site-new" };
-  if ((m = routeHash.match(/^#\/sites\/(\d+)\/edit$/))) return { name: "site-edit", id: +m[1] };
+  if ((m = routeHash.match(/^#\/sites\/(\d+)\/edit$/)))
+    return { name: "site-detail", id: +m[1], tab: "details" };
   if ((m = routeHash.match(/^#\/sites\/(\d+)\/runs\/new$/)))
     return { name: "run-new", siteId: +m[1] };
+  if ((m = routeHash.match(/^#\/sites\/(\d+)\/(saved-crawls|details)$/)))
+    return { name: "site-detail", id: +m[1], tab: m[2] };
   if ((m = routeHash.match(/^#\/sites\/(\d+)$/))) return { name: "site-detail", id: +m[1] };
   if ((m = routeHash.match(/^#\/apis\/new$/))) return { name: "api-new" };
   if ((m = routeHash.match(/^#\/apis\/(\d+)\/edit$/))) return { name: "api-edit", id: +m[1] };
@@ -36,9 +79,18 @@ export function parseRoute(hash = "#/"): Route {
   if ((m = routeHash.match(/^#\/apis\/(\d+)$/))) return { name: "api-detail", id: +m[1] };
   if (routeHash === "#/apis") return { name: "api-list" };
   if ((m = routeHash.match(/^#\/api-runs\/(\d+)\/([a-z]+)$/)))
-    return { name: "api-run-detail", id: +m[1], tab: m[2], findingRef };
+    return {
+      name: "api-run-detail",
+      id: +m[1],
+      tab: m[2],
+      findingRef,
+      findingIds: findingIds.length ? findingIds : undefined,
+      coverageReturn,
+      leadRef,
+      trafficCoverage,
+    };
   if ((m = routeHash.match(/^#\/api-runs\/(\d+)$/)))
-    return { name: "api-run-detail", id: +m[1], findingRef };
+    return { name: "api-run-detail", id: +m[1], findingRef, leadRef };
   if (routeHash === "#/sast-runs/new") return { name: "sast-run-new" };
   if (routeHash === "#/sast-runs") return { name: "sast-list" };
   if ((m = routeHash.match(/^#\/sast-runs\/(\d+)\/([a-z-]+)$/)))
@@ -48,29 +100,98 @@ export function parseRoute(hash = "#/"): Route {
   if ((m = routeHash.match(/^#\/runs\/(\d+)\/alice-popout$/)))
     return { name: "alice-popout", id: +m[1] };
   if ((m = routeHash.match(/^#\/runs\/(\d+)\/([a-z]+)$/)))
-    return { name: "run-detail", id: +m[1], tab: m[2], findingRef, leadRef };
+    return {
+      name: "run-detail",
+      id: +m[1],
+      tab: m[2],
+      findingRef,
+      findingIds: findingIds.length ? findingIds : undefined,
+      coverageReturn,
+      leadRef,
+      trafficCoverage,
+    };
   if ((m = routeHash.match(/^#\/runs\/(\d+)$/)))
     return { name: "run-detail", id: +m[1], findingRef, leadRef };
-  if (routeHash === "#/applications/new") return { name: "app-new" };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)\/edit$/)))
-    return { name: "app-edit", id: +m[1] };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)\/campaigns\/new$/)))
+  if (routeHash === "#/systems/new") return { name: "system-new" };
+  if ((m = routeHash.match(/^#\/systems\/(\d+)\/edit$/))) return { name: "system-edit", id: +m[1] };
+  if ((m = routeHash.match(/^#\/systems\/(\d+)\/campaigns\/new$/)))
     return { name: "campaign-new", id: +m[1] };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)\/campaigns\/(\d+)\/([a-z]+)$/)))
+  if ((m = routeHash.match(/^#\/systems\/(\d+)\/campaigns\/(\d+)\/([a-z]+)$/)))
     return { name: "campaign-detail", id: +m[1], campaignId: +m[2], tab: m[3], findingRef };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)\/campaigns\/(\d+)$/)))
+  if ((m = routeHash.match(/^#\/systems\/(\d+)\/campaigns\/(\d+)$/)))
     return { name: "campaign-detail", id: +m[1], campaignId: +m[2], findingRef };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)\/([a-z-]+)$/)))
-    return { name: "app-detail", id: +m[1], tab: m[2] };
-  if ((m = routeHash.match(/^#\/applications\/(\d+)$/))) return { name: "app-detail", id: +m[1] };
-  if (routeHash === "#/applications") return { name: "app-list" };
+  if ((m = routeHash.match(/^#\/systems\/(\d+)\/([a-z-]+)$/)))
+    return { name: "system-detail", id: +m[1], tab: m[2] };
+  if ((m = routeHash.match(/^#\/systems\/(\d+)$/))) return { name: "system-detail", id: +m[1] };
+  if (routeHash === "#/systems") return { name: "system-list" };
   if (routeHash === "#/active-jobs") return { name: "active-jobs" };
   if (routeHash === "#/stats" || routeHash === "#/stats/usage") return { name: "stats" };
-  if (routeHash === "#/settings") return { name: "settings" };
-  if (routeHash === "#/scan-policy") return { name: "scan-policy" };
-  if (routeHash === "#/external-integrations") return { name: "external-integrations" };
-  if (routeHash === "#/debug") return { name: "debug" };
+  if (routeHash === "#/stats/chatgpt-plan") return { name: "chatgpt-plan-usage" };
+  if (routeHash === "#/settings" || routeHash === "#/settings/profiles")
+    return { name: "settings", tab: "profiles", screen: "list" };
+  if (routeHash === "#/settings/authentication")
+    return { name: "scan-policy", tab: "global", subTab: "authentication" };
+  if (routeHash === "#/settings/profiles/new")
+    return { name: "settings", tab: "profiles", screen: "new" };
+  if ((m = routeHash.match(/^#\/settings\/profiles\/(\d+)\/edit$/)))
+    return { name: "settings", tab: "profiles", screen: "edit", id: +m[1] };
+  if (routeHash === "#/settings/providers")
+    return { name: "settings", tab: "providers", screen: "list" };
+  if (routeHash === "#/settings/providers/new")
+    return { name: "settings", tab: "providers", screen: "new" };
+  if ((m = routeHash.match(/^#\/settings\/providers\/(\d+)\/edit$/)))
+    return { name: "settings", tab: "providers", screen: "edit", id: +m[1] };
+  if (routeHash === "#/settings/models/new") {
+    const providerId = Number(query.get("provider_id"));
+    const modelName = query.get("model")?.trim() || undefined;
+    return {
+      name: "settings",
+      tab: "models",
+      screen: "new",
+      providerId: Number.isInteger(providerId) && providerId > 0 ? providerId : undefined,
+      modelName,
+    };
+  }
+  if ((m = routeHash.match(/^#\/settings\/models\/(\d+)\/edit$/)))
+    return { name: "settings", tab: "models", screen: "edit", id: +m[1] };
+  if (routeHash === "#/scan-policy" || routeHash === "#/debug") return { name: "scan-policy" };
+  if (routeHash === "#/external-integrations")
+    return { name: "scan-policy", tab: "global", subTab: "proxy" };
+  if (routeHash === "#/scan-policy/systems" || routeHash === "#/scan-policy/sast")
+    return { name: "scan-policy", tab: routeHash.slice("#/scan-policy/".length) };
+  if (
+    (m = routeHash.match(
+      /^#\/scan-policy\/global\/(features|openai-refusals|debug|proxy|libraries|authentication)$/,
+    ))
+  )
+    return { name: "scan-policy", tab: "global", subTab: m[1] };
+  if (
+    (m = routeHash.match(
+      /^#\/scan-policy\/dast\/(scan-behaviour|headers|crawler|scanner|specialists|validator|reporting|code|deep)$/,
+    ))
+  )
+    return { name: "scan-policy", tab: "dast", subTab: m[1] };
+  if (routeHash === "#/extensions") return { name: "extensions" };
+  if ((m = routeHash.match(/^#\/extensions\/([a-z0-9_.-]+)\/settings$/)))
+    return { name: "extension-settings", extensionId: m[1] };
   if (routeHash === "#/reporting-debug") return { name: "reporting-debug" };
+  if (routeHash === "#/benchmark-lab/scoring-guide") return { name: "benchmark-scoring-guide" };
+  if ((m = routeHash.match(/^#\/benchmark-lab\/results\/(\d+)$/)))
+    return { name: "benchmark-lab", id: +m[1] };
+  if (routeHash === "#/benchmark-lab" || routeHash === "#/sast-benchmarking")
+    return { name: "benchmark-lab" };
+  if (
+    ["#/benchmark-lab/evaluations/new", "#/sast-benchmarking/evaluations/new"].includes(routeHash)
+  )
+    return { name: "benchmark-evaluation-new" };
+  if (
+    (m = routeHash.match(/^#\/(?:sast-benchmarking|benchmark-lab)\/evaluations\/(\d+)\/([a-z-]+)$/))
+  )
+    return { name: "benchmark-evaluation-detail", id: +m[1], tab: m[2] };
+  if ((m = routeHash.match(/^#\/(?:sast-benchmarking|benchmark-lab)\/evaluations\/(\d+)$/)))
+    return { name: "benchmark-evaluation-detail", id: +m[1] };
+  if ((m = routeHash.match(/^#\/(?:sast-benchmarking|benchmark-lab)\/comparisons\/(\d+)$/)))
+    return { name: "benchmark-comparison-detail", id: +m[1] };
 
   return { name: "not-found" };
 }

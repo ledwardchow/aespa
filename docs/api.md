@@ -1,0 +1,203 @@
+# AESPA API
+
+The API extension lets CI pipelines and other tools create Sites, run web and SAST scans, follow their progress, and read the results. The full definition, with every field, is on **Extensions → API → Settings** under **API definition**. Download the OpenAPI file there for Postman, Insomnia, or a client generator. Each endpoint there also has example `curl` calls, using your AESPA address, and example responses; the OpenAPI file includes the same request examples.
+
+## Set up
+
+1. Open **Extensions** and enable **API**.
+2. Open the API extension's **Settings** and create a token. Choose what it may do:
+   - **SAST scans** (`sast`)
+   - **Web scans** (`web`)
+   - **Create and change Sites** (`sites`)
+3. Choose which scans it can see:
+   - **Only scans it creates**. This is the default.
+   - **All scans in AESPA**: every web or SAST scan its permissions allow, including scans started in AESPA itself and by other tokens. Scans started in AESPA have no callbacks.
+4. Copy the token. You can show it again later from the token list, on this computer only.
+
+Use **Edit** on a token to change its name, permissions, which scans it can see, or its callback URL. Edit also lets you turn a token off, so apps can't use it until you turn it back on, and give it a new value, which stops the old value from working. Tokens created before AESPA kept token values can't be shown; give them a new value to get one you can show.
+
+`GET /token` returns the token's name, permissions (`scopes`), and which scans it can see (`scan_access`: `own` or `all`).
+
+Send the token with every request:
+
+```bash
+curl -H "Authorization: Bearer $AESPA_TOKEN" http://127.0.0.1:8000/extension/aespa.api/v1/scans
+```
+
+### Reaching AESPA from another machine
+
+AESPA's interface and management API require a browser session. This integration API uses its existing bearer tokens and does not require a browser login or the management authentication key. Token management also requires a signed-in management session and refuses requests from another machine or with proxy forwarding headers. Manage tokens in AESPA on its own computer.
+
+Outside Docker, set `AESPA_INTEGRATION_PORT=8001` to start a second listener that serves only `/extension/aespa.api/v1/`. Its default listening address is `127.0.0.1`. Set `AESPA_INTEGRATION_HOST` and `AESPA_ALLOWED_HOSTS` explicitly if a reverse proxy needs another address or hostname. The extension must be enabled. The second listener cannot serve the interface, core API, ordinary extensions, or token administration.
+
+Inside Docker, AESPA disables the second listener even when a port is configured. Integrations use the normal port. To let a CI runner reach AESPA, publish only `/extension/aespa.api/v1/` through an HTTPS reverse proxy or tunnel, and keep everything else private. The supplied Compose configuration binds the host port to `127.0.0.1`.
+
+A token sees the scans it created, or all scans if it is set to. Any token with the `sites` permission can read and change every Site.
+
+## SAST scan from a ZIP file
+
+```bash
+BASE=http://127.0.0.1:8000/extension/aespa.api/v1
+
+curl -sf -X POST "$BASE/sast/scans" \
+  -H "Authorization: Bearer $AESPA_TOKEN" \
+  -H "Idempotency-Key: $CI_PIPELINE_ID" \
+  -F file=@source.zip \
+  -F analysis_mode=deep
+```
+
+The response is the scan's status. Its `id` looks like `sast-17`.
+
+To use a source extension instead of a file, such as GitHub repository, first list the enabled sources and the parameters each one needs:
+
+```bash
+curl -s "$BASE/sast/sources" -H "Authorization: Bearer $AESPA_TOKEN"
+```
+
+Each source has an `id`, whether it is `available` with a `message` saying why, and its `fields`. Send the `id` as `provider_id` and the field values in `parameters`:
+
+```bash
+curl -sf -X POST "$BASE/sast/scans/from-source" \
+  -H "Authorization: Bearer $AESPA_TOKEN" -H "Content-Type: application/json" \
+  -d '{"provider_id": "aespa.githubrepository", "parameters": {"repository": "acme/shop", "ref": "main"}}'
+```
+
+## Web scan
+
+Send `site_id` for an existing Site, or describe the Site in `site`. Creating a Site needs the `sites` permission.
+
+```bash
+curl -sf -X POST "$BASE/web/scans" \
+  -H "Authorization: Bearer $AESPA_TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "site": {
+      "name": "Shop staging",
+      "base_url": "https://staging.shop.example",
+      "requires_auth": true,
+      "login_url": "https://staging.shop.example/login",
+      "scope_hosts": ["api.staging.shop.example"],
+      "scan_guidance": "Do not submit real payments.",
+      "credentials": [
+        {"label": "Admin", "username": "admin@example.com", "password": "..."},
+        {"label": "2FA user", "auth_mode": "totp", "username": "u2", "password": "...", "totp_seed": "JBSWY3DPEHPK3PXP"}
+      ]
+    },
+    "update_site": true,
+    "max_pages": 200,
+    "coverage_mode": "standard"
+  }'
+```
+
+- By default the crawl starts at once and the dynamic scan follows when the crawl succeeds. Set `scan_after_crawl` to `false` to crawl only, then call `POST /web/scans/{scan_id}/scan` later.
+- `update_site: true` replaces the Site with the same name. Without it, a name that already exists returns `409`.
+- Passwords, TOTP seeds, and sensitive login field values are never returned.
+- Accounts with `auth_mode: "guided"` need a person to sign in at the AESPA browser window. They are rejected unless you set `unattended: false`. When AESPA is waiting for a person, the scan's state is `needs_action`.
+
+If a crawl or dynamic scan pauses, check `resumable` in its status. When it is `true`, call `POST /web/scans/{scan_id}/resume`. AESPA continues the saved stage and keeps the existing crawl and scan results. If the scan was set to start after the crawl, it still starts when the resumed crawl finishes. A rate limit may prevent resume until its reset time; the response includes `reset_at` when known. A run that has reached its LLM budget needs a higher budget before it can resume.
+
+If a scan is created but cannot start, for example because no LLM is configured, the error includes its `scan_id`. Fix the problem and call `POST /scans/{scan_id}/start`.
+
+## Following a scan
+
+```bash
+curl -s "$BASE/scans/sast-17" -H "Authorization: Bearer $AESPA_TOKEN"
+```
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `queued`, `preparing`, `running`, `needs_action`, `paused`, `completed`, `failed`, or `stopped` |
+| `phase` | Web: `crawling`, `scanning`, `reviewing`, `crawled`, `finished`. SAST: `preparing_source`, `analyzing`, `finished` |
+| `percent` | Share of planned tests done, or `null` when AESPA cannot measure it |
+| `resumable` | `true` when the web or SAST scan can continue from saved progress |
+| `message`, `error`, `needs_action` | What is happening, why it failed, or what a person must do |
+| `counts.findings` | Findings so far by severity |
+
+`completed`, `failed`, and `stopped` are final. To avoid tight polling loops, add `?wait=30` and the previous response's `ETag` as `If-None-Match`. AESPA holds the request until the status changes or 30 seconds pass, and returns `304` if nothing changed.
+
+`GET /scans/{scan_id}/activity?after=<next_cursor>` returns the activity log. `POST /scans/{scan_id}/stop` stops a scan.
+
+A SAST scan can pause, for example when the LLM provider hits a rate limit. When its `resumable` field is `true`, `POST /sast/scans/{scan_id}/resume` continues it from its saved progress. `POST /scans/{scan_id}/start` starts it over from the beginning instead.
+
+## LLM profiles
+
+A scan profile chooses the LLM models AESPA uses. Scans use the active profile unless you send `llm_profile_id` when creating them.
+
+```bash
+curl -s "$BASE/llm-profiles" -H "Authorization: Bearer $AESPA_TOKEN"
+```
+
+Each profile has an `id`, a `name`, whether it is `active`, and its `default_model`. Any token can list profiles. Profiles are created and changed in AESPA under **Settings**.
+
+## Results
+
+| Route | Returns |
+| --- | --- |
+| `GET /scans/{scan_id}/findings` | Findings, most severe first. Filter with `severity=high,critical`. Add `include_dismissed=true` for false positives. |
+| `GET /scans/{scan_id}/summary?fail_on=high` | Counts by severity and category, and `gate.passed`: false when any finding is at or above `fail_on` |
+| `GET /scans/{scan_id}/sarif` | Web or SAST results as SARIF 2.1.0, for GitHub code scanning and other tools. Web results have one rule per OWASP category and use the affected URL as the location. Findings marked false positive are left out; add `include_dismissed=true` to include them as suppressed results. SAST results include reportable findings only. |
+
+Results are available while a scan runs, marked `partial: true`.
+
+## Callbacks
+
+Add `callbacks` when creating a scan (for an upload, send it as a JSON form field), or set a default callback URL on the token.
+
+```json
+"callbacks": {
+  "url": "https://ci.example.com/aespa-events",
+  "events": ["scan.started", "scan.needs_action", "scan.completed", "scan.failed", "scan.stopped"]
+}
+```
+
+Events: `scan.started`, `scan.phase_changed`, `scan.progress` (at most once a minute; not sent unless listed), `scan.needs_action`, `scan.paused`, `scan.completed`, `scan.failed`, `scan.stopped`. Every scan sends `scan.started` first. The body contains the event, a delivery ID, and the scan's status with links; fetch findings with your token.
+
+If you do not send a `secret`, AESPA uses the token's callback secret or creates one and returns it once in `callbacks.secret`. Check each request:
+
+```python
+import hashlib, hmac, time
+
+def verify(secret: str, header: str, body: bytes) -> bool:
+    parts = dict(item.split("=", 1) for item in header.split(","))
+    if abs(time.time() - int(parts["t"])) > 300:
+        return False
+    expected = hmac.new(secret.encode(), f"{parts['t']}.".encode() + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, parts["v1"])
+```
+
+Respond with any `2xx` status within 10 seconds. Other responses, timeouts, and redirects are retried after 30 seconds, then 2, 5, 15, and 30 minutes, then marked failed. `GET /scans/{scan_id}/deliveries` lists attempts, and `POST /deliveries/{id}/redeliver` sends one again. Failed callbacks also appear on the settings page. Turn off **Send callbacks** in the extension settings to pause sending.
+
+## Retrying safely
+
+Send an `Idempotency-Key` header on create requests. Repeating the request with the same key within 24 hours returns the first response instead of starting another scan. Reusing a key for a different request returns `422`.
+
+## GitHub Actions example
+
+```yaml
+- name: AESPA SAST scan
+  timeout-minutes: 120   # a paused or needs_action scan never reaches a final state on its own
+  env:
+    AESPA_URL: ${{ secrets.AESPA_URL }}   # https://aespa.example.com/extension/aespa.api/v1
+    AESPA_TOKEN: ${{ secrets.AESPA_TOKEN }}
+  run: |
+    git archive --format=zip -o source.zip HEAD
+    SCAN=$(curl -sf -X POST "$AESPA_URL/sast/scans" \
+      -H "Authorization: Bearer $AESPA_TOKEN" \
+      -H "Idempotency-Key: ${{ github.run_id }}-${{ github.run_attempt }}" \
+      -F file=@source.zip | jq -r .id)
+    while :; do
+      STATE=$(curl -sf "$AESPA_URL/scans/$SCAN?wait=30" -H "Authorization: Bearer $AESPA_TOKEN" | jq -r .state)
+      case "$STATE" in completed|failed|stopped) break ;; esac
+    done
+    curl -sf "$AESPA_URL/scans/$SCAN/sarif" -H "Authorization: Bearer $AESPA_TOKEN" -o aespa.sarif
+    curl -sf "$AESPA_URL/scans/$SCAN/summary?fail_on=high" -H "Authorization: Bearer $AESPA_TOKEN" \
+      | jq -e '.gate.passed'
+
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: aespa.sarif
+```
+
+## Versioning
+
+Paths start with `/v1`. Fields may be added to v1 responses; existing fields are not renamed or removed. A breaking change would use a new `/v2` path.

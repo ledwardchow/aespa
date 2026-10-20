@@ -2,6 +2,26 @@ export function ScannerPolicyFields({ form, upd, disabled = false }) {
   return (
     <>
       <div className="form-section-title">Agent</div>
+      <div className="field">
+        <label htmlFor="dast-max-concurrent-llm">Concurrent LLM requests</label>
+        <input
+          id="dast-max-concurrent-llm"
+          type="number"
+          disabled={disabled}
+          min="1"
+          max="100"
+          value={form.dast_max_concurrent_llm_requests}
+          onChange={(e) =>
+            upd({
+              dast_max_concurrent_llm_requests: e.target.value,
+            })
+          }
+        />
+        <div className="field-hint">
+          Maximum LLM requests that DAST agents can have in flight across a web or API run. Provider
+          request and token limits still apply. Default: 4.
+        </div>
+      </div>
       <label className="toggle-row">
         <input
           type="checkbox"
@@ -13,11 +33,11 @@ export function ScannerPolicyFields({ form, upd, disabled = false }) {
             })
           }
         />
-        <span>Disable all deterministic checks</span>
+        <span>Disable automatic security checks</span>
       </label>
       <div className="subtle" style={{ marginBottom: "10px" }}>
-        Skip automatic JavaScript sink, TLS, authentication, IDOR, and probe-result checks. The Test
-        Lead will continue with LLM-driven testing.
+        Skip automatic TLS, authentication, IDOR, and probe-result checks. JavaScript source is
+        still read for possible XSS paths, but those leads need browser confirmation.
       </div>
       <label className="toggle-row">
         <input
@@ -46,11 +66,10 @@ export function ScannerPolicyFields({ form, upd, disabled = false }) {
             })
           }
         />
-        <span>Enforce full coverage obligations</span>
+        <span>Require full test coverage before finishing</span>
       </label>
       <div className="subtle" style={{ marginBottom: "10px" }}>
-        Include strict task-graph completion rules in system prompt before allowing the agent to end
-        the scan.
+        Tell the agent it must finish every remaining test before it can end the scan.
       </div>
       <div className="field" style={{ marginTop: "8px" }}>
         <label>Standard mode coverage target (%)</label>

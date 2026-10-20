@@ -1,19 +1,24 @@
-export function CoverageStatusBadges({ mode = "track", percent, covered, total, live, enforce }) {
-  const modeLabel =
-    mode === "enforce"
-      ? "Full"
-      : mode === "standard"
-        ? "Standard"
-        : mode === "sast_validate"
-          ? "SAST Validate"
-          : "Quick";
+import { coverageModeLabel } from "../runs/coverageModes.js";
+
+export function CoverageStatusBadges({
+  mode = "track",
+  percent,
+  covered,
+  total,
+  live,
+  enforce,
+  unitLabel = "cells",
+}) {
+  const modeLabel = coverageModeLabel(mode);
   return (
     <>
       <span className={"badge " + (mode === "enforce" ? "warning" : "neutral")}>
         {modeLabel} mode
       </span>
       <span className="badge neutral">
-        {percent}% coverage ({covered}/{total} cells)
+        {percent == null
+          ? "Coverage unavailable"
+          : `${percent}% coverage (${covered}/${total} ${unitLabel})`}
       </span>
       {live && <span className="badge warning">● Live</span>}
       {enforce && enforce.phase !== "complete" && (

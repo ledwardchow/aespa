@@ -1,3 +1,7 @@
+import { fmtDate } from "../../shared/lib/dates.js";
+import { IconPlus } from "../../shared/ui/Icons.jsx";
+import { useBenchmarkLinks } from "../../shared/hooks/useBenchmarkLinks.js";
+import { BenchmarkBadge } from "../../shared/ui/BenchmarkBadge.jsx";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
 
@@ -6,8 +10,10 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { nav } from "../../shared/navigation/router.js";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { usePolling } from "../../shared/hooks/usePolling.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 export function SastRunsListPage() {
   const [runs, setRuns] = useState(null);
@@ -17,6 +23,8 @@ export function SastRunsListPage() {
   const importInputRef = useRef(null);
   const [sortField, setSortField] = useState("started_at");
   const [sortDir, setSortDir] = useState("desc");
+  const benchmarkLinks = useBenchmarkLinks();
+  const [deletingRunId, setDeletingRunId] = useState(null);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -63,6 +71,20 @@ export function SastRunsListPage() {
     }
   };
 
+  const onDelete = async (run) => {
+    if (!confirm(`Delete "${run.name}" and all its leads?`)) return;
+    setDeletingRunId(run.id);
+    setError(null);
+    try {
+      await sastRunsApi.deleteSastRun(run.id);
+      await loadRuns();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDeletingRunId(null);
+    }
+  };
+
   const sortArrow = (field) => {
     if (sortField !== field) return null;
     return (
@@ -81,9 +103,6 @@ export function SastRunsListPage() {
       if (sortField === "leads_count") {
         valA = a.leads_count || 0;
         valB = b.leads_count || 0;
-      } else if (sortField === "linked_scan") {
-        valA = a.triggered_by_run_id ? `API #${a.triggered_by_run_id}` : a.source_filename || "";
-        valB = b.triggered_by_run_id ? `API #${b.triggered_by_run_id}` : b.source_filename || "";
       } else if (sortField === "started_at") {
         valA = a.started_at ? new Date(a.started_at).getTime() : 0;
         valB = b.started_at ? new Date(b.started_at).getTime() : 0;
@@ -117,29 +136,20 @@ export function SastRunsListPage() {
               onChange={onImport}
             />
             <button
-              className="btn ghost sm"
+              className="btn secondary"
               disabled={importing}
               onClick={() => importInputRef.current?.click()}
             >
-              {importing ? "Importing…" : "Import SAST Run"}
+              {importing ? "Importing…" : "Import SAST scan"}
             </button>
-            <button className="btn primary sm" onClick={() => nav("#/sast-runs/new")}>
-              New SAST Scan
+            <button className="btn" onClick={() => nav("#/sast-runs/new")}>
+              <IconPlus /> New SAST scan
             </button>
           </>
         }
       />
       <div className="content scroll-content">
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 16,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <PageError error={error} inline={!runs} onDismiss={() => setError(null)} />
         {runs === null && <div className="subtle">Loading…</div>}
         {runs !== null && runs.length === 0 && (
           <EmptyState
@@ -156,27 +166,23 @@ export function SastRunsListPage() {
               <colgroup>
                 <col
                   style={{
-                    width: "24%",
+                    width: "30%",
                   }}
                 />
                 <col
                   style={{
-                    width: "12%",
+                    width: "13%",
                   }}
                 />
                 <col
                   style={{
-                    width: "10%",
+                    width: "9%",
                   }}
                 />
+                <col style={{ width: "8%" }} />
                 <col
                   style={{
-                    width: "18%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "18%",
+                    width: "22%",
                   }}
                 />
                 <col />
@@ -197,15 +203,15 @@ export function SastRunsListPage() {
                   </th>
                   <th
                     style={{ cursor: "pointer", userSelect: "none" }}
-                    onClick={() => toggleSort("leads_count")}
+                    onClick={() => toggleSort("analysis_mode")}
                   >
-                    Leads {sortArrow("leads_count")}
+                    Analysis {sortArrow("analysis_mode")}
                   </th>
                   <th
                     style={{ cursor: "pointer", userSelect: "none" }}
-                    onClick={() => toggleSort("linked_scan")}
+                    onClick={() => toggleSort("leads_count")}
                   >
-                    Linked scan {sortArrow("linked_scan")}
+                    Leads {sortArrow("leads_count")}
                   </th>
                   <th
                     style={{ cursor: "pointer", userSelect: "none" }}
@@ -218,7 +224,11 @@ export function SastRunsListPage() {
               </thead>
               <tbody>
                 {sortedRuns.map((r) => (
-                  <tr key={r.id}>
+                  <NavigationRow
+                    key={r.id}
+                    href={`#/sast-runs/${r.id}/progress`}
+                    label={`Open ${r.name}`}
+                  >
                     <td>
                       <a
                         href={`#/sast-runs/${r.id}/progress`}
@@ -245,33 +255,32 @@ export function SastRunsListPage() {
                           }
                         </div>
                       )}
+                      <BenchmarkBadge href={benchmarkLinks[`sast:${r.id}`]} />
                     </td>
                     <td>
                       <StatusBadge status={r.status} />
                     </td>
+                    <td>{r.analysis_mode === "light" ? "Light" : "Deep"}</td>
                     <td>{r.leads_count}</td>
                     <td>
-                      {r.triggered_by_run_id ? (
-                        <a href={`#/api-runs/${r.triggered_by_run_id}/status`}>
-                          API run #{r.triggered_by_run_id}
+                      {r.started_at ? fmtDate(r.started_at) : <span className="subtle">—</span>}
+                    </td>
+                    <td>
+                      <div className="row" style={{ justifyContent: "flex-end" }}>
+                        <a className="btn secondary sm" href={`#/sast-runs/${r.id}/progress`}>
+                          Open
                         </a>
-                      ) : (
-                        <span className="subtle">{r.source_filename || "standalone"}</span>
-                      )}
+                        <button
+                          type="button"
+                          className="btn danger-outline sm"
+                          disabled={deletingRunId === r.id}
+                          onClick={() => onDelete(r)}
+                        >
+                          {deletingRunId === r.id ? "Deleting…" : "Delete"}
+                        </button>
+                      </div>
                     </td>
-                    <td>
-                      {r.started_at ? (
-                        new Date(r.started_at).toLocaleString()
-                      ) : (
-                        <span className="subtle">—</span>
-                      )}
-                    </td>
-                    <td>
-                      <a className="btn ghost sm" href={`#/sast-runs/${r.id}/progress`}>
-                        View →
-                      </a>
-                    </td>
-                  </tr>
+                  </NavigationRow>
                 ))}
               </tbody>
             </table>

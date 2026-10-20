@@ -1,37 +1,111 @@
 # Configuration Settings
 
-AESPA has two kinds of configuration: a handful of **startup environment variables** (read once, on launch) and everything else, which lives in the database and is edited through the **Settings** screens in the UI. LLM provider/model setup has its own page — see [Setting up LLM providers](llm.md). This page covers the rest.
+AESPA reads a small set of startup environment variables. Other settings are
+stored in the database and edited through the application.
+
+LLM connections, models, and scan profiles are covered in
+[Setting up LLM providers](llm.md).
 
 ## Environment variables
-Copy `.env.example` to `.env` and adjust as needed — all are optional, prefixed `AESPA_`:
+
+Copy `.env.example` to `.env` if you need to change a startup setting. Every
+variable is optional and uses the `AESPA_` prefix.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AESPA_DATABASE_URL` | `sqlite:///./aespa.db` | SQLite connection string |
-| `AESPA_HOST` | `127.0.0.1` | Bind address for the server |
-| `AESPA_PORT` | `8000` | Bind port |
-| `AESPA_WEB_DIR` | `./src/aespa/web` | Path to static web UI assets |
-| `AESPA_DATA_DIR` | `./aespa_data` | Path to persistent uploads and temporary storage |
+| `AESPA_DATABASE_URL` | `sqlite:///./aespa_data/aespa.db` | Database connection string |
+| `AESPA_HOST` | `127.0.0.1` | Server bind address |
+| `AESPA_PORT` | `8000` | Server bind port |
+| `AESPA_AUTH_KEY_FILE` | Not set | Protected file containing the management authentication key, at least 32 characters |
+| `AESPA_ALLOWED_HOSTS` | `[]` | Additional accepted hostnames as a JSON list. Localhost and loopback IPs are always accepted. |
+| `AESPA_AUTH_COOKIE_SECURE` | `false` | Require HTTPS for browser cookies. HTTPS requests also set secure cookies automatically. |
+| `AESPA_INTEGRATION_PORT` | Not set | Optional second listener for the API extension. Disabled inside Docker. |
+| `AESPA_INTEGRATION_HOST` | `127.0.0.1` | Bind address for the optional integration listener |
+| `AESPA_WEB_DIR` | `./src/aespa/web` | Compiled frontend directory |
+| `AESPA_DATA_DIR` | `./aespa_data` | Databases and uploaded files |
 
-If you front AESPA with a Cloudflare Access reverse proxy, the app automatically verifies the `Cf-Access-Jwt-Assertion` header against Cloudflare's JWKS and shows the authenticated username — no extra config needed. There's no built-in auth otherwise; AESPA is designed to run on localhost.
+You can also set the data folder from **Console → Settings → Data Folder** in
+source runs and the macOS and Windows desktop builds. Restart AESPA after
+saving. The folder itself should contain `aespa.db`; AESPA creates a database
+for an empty folder and uses existing data without replacing it. Desktop builds
+save the choice in a writable application support settings file.
 
-## Agent Settings (Scanner / Specialist Agents / Validator)
-**Scanner** tab — `ScannerPolicy`, applies to the dynamic web/API scan:
-- **Scan mode**: `passive` (inspect only, no probes), `safe_active` (default — bounded non-destructive probes for XSS/injection/IDOR/auth), `aggressive` (broader fuzzing, higher-risk payloads), or `destructive`
-- **Allowed HTTP methods per mode**, **max probes per page**, **max scan steps**, **request timeout**, **min delay between requests**, **max request/response body size**
-- **Allowed schemes** (http/https), **blocked headers** (e.g. `host`, `cookie` — never overridden by probes), **follow redirects**, **allow subdomains**
-- **Require approval for destructive actions** — pauses the scan for manual confirmation before anything state-changing
+## Sign in to AESPA
 
-**Specialist Agents** tab — `SpecialistAgentConfig`: enable/disable specialist dispatch, max concurrent specialists, max steps per specialist, minimum lead priority to dispatch on, and a per-vulnerability-class toggle (IDOR, auth bypass, SQLi, XSS, business logic, SSRF, path traversal, CORS, crypto, config, file upload).
+The console shows an **Authentication key** beside the listening address.
+Press tilde (`~`) or backtick to open an authenticated browser. The console's
+**Settings > Authentication key** option also displays the key. Desktop apps sign in
+automatically. If you open the address manually, enter the key on the sign-in
+screen. In Docker, retrieve the key with `docker compose logs aespa` and open
+the published host address and port.
 
-**Validator** tab — `ValidatorConfig`: enable/disable the adversarial validator, max steps, minimum finding severity it runs on, whether it auto-validates inline, and whether it requires a concrete disproof (vs. just "couldn't reproduce") before downgrading a finding.
+Browsers remember authentication for 30 days at the same hostname and port.
+The key and session verification state are saved in `auth.json` under the
+data folder and survive restarts. Keep that file and console logs private.
+Clearing browser cookies, using a different browser, or changing the key
+requires another sign-in. To replace the generated key, stop AESPA, set
+`AESPA_AUTH_KEY_FILE` to a protected file with a new key, and restart.
 
-## External Integrations (Burp Suite / Upstream Proxy)
-**Burp Suite Integration** tab: enable Burp Suite Professional's REST API to run active scans alongside AESPA's own probing. Requires Burp running with the REST API enabled (Burp → Settings → Suite → REST API). Configure the API URL (default `http://127.0.0.1:1337`), API key, and named scan configuration, plus which vulnerability classes Burp should scan for (SQLi, XSS, command injection, path traversal, SSRF, XXE, SSTI). **Test connection** verifies reachability before you rely on it.
+Open **Settings > Authentication key** to show or copy the key. It grants
+access to AESPA settings and scan data. Other apps use the API extension's
+tokens instead. See [AESPA API](../../api.md) for integration access and the
+optional separate listener.
 
-**Upstream Proxy** tab: route the scanner's and/or the LLM client's traffic through an upstream HTTP(S) proxy (e.g. Burp's own proxy, for traffic inspection) — set the proxy URL and toggle which traffic flows through it independently.
+AESPA is designed to run on localhost. Behind an HTTPS reverse proxy,
+configure `AESPA_ALLOWED_HOSTS` and set `AESPA_AUTH_COOKIE_SECURE=true`.
+Cloudflare Access can still supply a verified display name through
+`Cf-Access-Jwt-Assertion`; AESPA's browser authentication remains required.
 
-## Debug page
-- **Global Extra HTTP Header** — injects one extra header into every scanner/crawler request (Playwright + HTTPX), not LLM calls. Leave the header name blank to disable. Useful for WAF bypass tokens or environment markers.
-- **Specialist Agent** — toggle to force a specialist agent to fire alongside every Burp active scan, for debugging dispatch behavior.
-- **Reporting Lab** — captures reporting-agent LLM messages from real scans into a separate SQLite file (not the main DB) and optionally shows a replay lab in the sidebar, for debugging report write-ups.
+## Agent Settings
+
+The **Agent Settings** page is divided into these tabs:
+
+- **Global**: Selects the request policy used by dynamic scans. The default is
+  `aggressive`. Other choices are `passive`, `safe_active`, and `destructive`.
+  This tab also configures HTTP methods and global HTTP headers. Multiple headers
+  can be added. They apply to Playwright and HTTPX traffic, not LLM requests.
+- **Crawler**: Controls JavaScript endpoint discovery, action suppression,
+  interactive replay safety, access reconciliation, and crawler LLM concurrency.
+- **Test Lead**: Controls deterministic checks, execution monitoring, full and
+  Standard coverage completion, SAST policy and phase budgets, maximum text-only
+  turns, scan steps, request pacing, body limits, allowed schemes, redirects,
+  subdomains, browser locator enforcement, and destructive-action approval.
+- **Specialist Agents**: Controls dispatch, concurrency, queue size, step budget,
+  minimum priority, enabled vulnerability classes, and the optional Burp trigger.
+- **Validator**: Controls adversarial validation, severity threshold, step budget,
+  concurrency, inline validation, and concrete-disproof requirements.
+- **Reporting**: Controls the finding write-up and final reporting stages.
+- **Component Mapper**: Sets source, fact, path, confidence, and concurrency limits
+  for cross-repository System matching.
+- **Python Sandbox**: Enables isolated `execute_python` runs and configures the
+  Docker image, allowed agent roles, time and resource limits, output limits,
+  request limits, and concurrency.
+
+## Connectivity
+
+Open **Settings > Global > Connectivity** to send scanner traffic, LLM traffic,
+or both through an HTTP or HTTPS proxy. Burp Suite settings are on the
+**Extensions** page.
+
+The same page accepts optional PEM CA bundle paths for application traffic and
+testing traffic. Enter paths on the computer running AESPA. When a path is set,
+those requests check the server certificate against that bundle. The bundle
+must contain all CA certificates needed for the destinations it will reach.
+Model lists, ChatGPT sign-in requests, Benchmark Lab model comparisons, and
+result publishing use the LLM proxy and CA bundle settings. Session checks use
+the testing proxy and CA bundle. Vulnerable-library list updates use the
+testing CA bundle. CLI based LLM providers receive the LLM proxy and CA path
+through environment variables, but each CLI decides how to use them.
+Browser based tests still accept HTTPS certificate errors.
+
+## System Settings
+
+The **System Settings** page contains feature visibility, debug settings, browser
+selection, database operations, and runtime information. Optional Reporting Lab
+and Systems entries appear in the sidebar only when enabled. Enable the optional
+Benchmark Lab workflow from **Extensions**; its sidebar entry and
+`/extension/aespa.benchmarking/` API are present only while it is enabled.
+
+The browser setting can use Playwright Chromium or installed stable Google Chrome.
+It can also make normal crawl, scan, and ALICE browser sessions visible for
+debugging. Guided login remains interactive regardless of this setting.

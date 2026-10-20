@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import json
-import uuid
-import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import (
     APIRouter,
@@ -14,6 +11,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     status,
@@ -23,7 +21,6 @@ from fastapi.responses import Response as HTTPResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from aespa.config import get_settings
 from aespa.db import get_session
 from aespa.models import (
     AgentLog,
@@ -41,16 +38,23 @@ from aespa.models import (
 from aespa.schemas import SastRunSummary, SastRunUpdate, ScanLeadOut
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
-from aespa.services import run_cleanup, sast_export
+from aespa.services import run_cleanup, sast_export, sast_sarif
+from aespa.services import sast_runs_service as sast_runs_svc
 from aespa.services.references import ensure_finding_reference, ensure_lead_reference
 
 _UTC = timezone.utc
 
-# Keep standalone uploads aligned with SAST export/import archives.
-_MAX_UPLOAD_BYTES = 250 * 1024 * 1024
-_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 router = APIRouter(tags=["sast-runs"])
+
+
+class SastSourceRunCreate(BaseModel):
+    provider_id: str
+    parameters: dict[str, object]
+    name: str | None = None
+    analysis_mode: str = "deep"
+    llm_profile_id: int | None = None
+    start_scan: bool = True
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -109,6 +113,7 @@ def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
         .where(SastWorker.sast_run_id == run_id)
         .order_by(SastWorker.id)
     ).all()
+    worker_by_agent_id = {f"sast-worker-{worker.id}": worker for worker in workers}
     for worker in workers:
         agent_id = f"sast-worker-{worker.id}"
         statuses = recorded_statuses.get(agent_id, set())
@@ -188,6 +193,71 @@ def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
             }
         )
 
+    # Runs completed before the dedicated panes were added still have durable
+    # phase rows. Use the latest phase event as a compact lifecycle snapshot so
+    # their agent roster does not appear untouched after an upgrade.
+    phase_agents = {
+        "repository_model": ("sast-repository-modeller", "Repository Modeller"),
+        "threat_model": ("sast-threat-modeller", "Threat Modeller"),
+        "closure": ("sast-closure-analyst", "Closure Analyst"),
+        "attack_path": ("sast-attack-path", "Attack Path Analyst"),
+    }
+    recorded_agent_ids = {entry["agent_id"] for entry in entries}
+    phase_rows = session.exec(
+        select(ScanLog)
+        .where(ScanLog.test_run_id == run_id)
+        .where(ScanLog.run_kind == "sast")
+        .order_by(ScanLog.id)
+    ).all()
+    latest_phase_rows = {
+        row.phase: row for row in phase_rows if row.phase in phase_agents
+    }
+    for phase, (agent_id, role) in phase_agents.items():
+        row = latest_phase_rows.get(phase)
+        if row is None or agent_id in recorded_agent_ids:
+            continue
+        entries.append(
+            {
+                "id": f"{agent_id}-phase-{row.id}",
+                "agent_id": agent_id,
+                "role": role,
+                "status": "active" if row.status == "running" else row.status,
+                "current_task": row.message,
+                "outcome": "Recovered from the saved phase history",
+                "created_at": row.created_at,
+            }
+        )
+
+    fixed_names = {
+        "sast-repository-modeller": "Repository Modeller",
+        "sast-threat-modeller": "Threat Modeller",
+        "sast-scanner": "SAST Analyst",
+        "sast-validator": "Candidate Validators",
+        "sast-closure-analyst": "Closure Analyst",
+        "sast-attack-path": "Attack Path Analyst",
+    }
+    for entry in entries:
+        agent_id = entry["agent_id"]
+        worker = worker_by_agent_id.get(agent_id)
+        if worker is not None:
+            entry["parent_id"] = f"sast-{worker.class_group}-workers"
+            entry["display_name"] = worker.worker_key
+            entry["worker_key"] = worker.worker_key
+            entry["class_group"] = worker.class_group
+            entry["tool_call_budget"] = worker.tool_call_budget or None
+            continue
+        if agent_id.startswith("sast-validator-"):
+            candidate_id = agent_id.removeprefix("sast-validator-")
+            entry["parent_id"] = "sast-validators"
+            entry["display_name"] = f"Candidate {candidate_id}"
+            entry["worker_key"] = f"validator:{candidate_id}"
+            entry["class_group"] = "validator"
+            continue
+        entry["parent_id"] = None
+        entry["display_name"] = fixed_names.get(agent_id, entry["role"])
+        entry["worker_key"] = None
+        entry["class_group"] = None
+
     status_order = {"spawned": 0, "active": 1}
     entries.sort(
         key=lambda entry: (
@@ -210,6 +280,7 @@ def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
 async def create_standalone_sast_run(
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
+    analysis_mode: str = Form(default="deep"),
     llm_config_id: int | None = Form(default=None),
     llm_profile_id: int | None = Form(default=None),
     session: Session = Depends(get_session),
@@ -219,60 +290,38 @@ async def create_standalone_sast_run(
     Not tied to an API collection — used by the SAST screen and consumed by web
     or API test runs, which explicitly import copies of the resulting leads.
     """
-    original_name = Path(file.filename or "source.zip").name or "source.zip"
-    base = Path(get_settings().data_dir) / "sast_uploads"
-    base.mkdir(parents=True, exist_ok=True)
-    ext = Path(original_name).suffix or ".zip"
-    upload_id = uuid.uuid4().hex
-    temp_path = base / f".{upload_id}.upload"
-    stored_path = base / f"{upload_id}{ext}"
-    bytes_written = 0
-    try:
-        with temp_path.open("wb") as destination:
-            while True:
-                chunk = await file.read(_UPLOAD_CHUNK_BYTES)
-                if not chunk:
-                    break
-                bytes_written += len(chunk)
-                if bytes_written > _MAX_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"File exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MiB "
-                            "upload limit."
-                        ),
-                    )
-                destination.write(chunk)
-
-        if bytes_written == 0:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-        if not zipfile.is_zipfile(temp_path):
-            raise HTTPException(
-                status_code=400, detail="Uploaded file is not a valid ZIP archive."
-            )
-        temp_path.replace(stored_path)
-    except HTTPException:
-        temp_path.unlink(missing_ok=True)
-        raise
-    except Exception:
-        temp_path.unlink(missing_ok=True)
-        raise
-
-    from aespa.services import sast_scanner
-
-    if llm_profile_id is not None:
-        from aespa.models import LLMProfile
-
-        if session.get(LLMProfile, llm_profile_id) is None:
-            raise HTTPException(status_code=404, detail="Scan profile not found")
-
-    run = sast_scanner.create_sast_run(
-        collection_id=None,
-        name=name or f"SAST – {original_name}",
-        source_archive_path=str(stored_path),
-        source_filename=original_name,
+    # Check the mode before reading a large upload.
+    sast_runs_svc.check_analysis_mode(analysis_mode)
+    archive = await sast_runs_svc.store_upload(file.read, file.filename)
+    run = sast_runs_svc.create_from_archive(
+        session,
+        archive,
+        name=name,
+        analysis_mode=analysis_mode,
         llm_config_id=llm_config_id,
         llm_profile_id=llm_profile_id,
+    )
+    return _to_summary(run)
+
+
+@router.post(
+    "/api/sast-runs/from-source",
+    response_model=SastRunSummary,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_sast_run_from_source(
+    payload: SastSourceRunCreate,
+    session: Session = Depends(get_session),
+) -> SastRunSummary:
+    """Create a SAST run whose immutable archive is prepared by an extension."""
+    run = await sast_runs_svc.create_from_source(
+        session,
+        provider_id=payload.provider_id,
+        parameters=payload.parameters,
+        name=payload.name,
+        analysis_mode=payload.analysis_mode,
+        llm_profile_id=payload.llm_profile_id,
+        start_scan=payload.start_scan,
     )
     return _to_summary(run)
 
@@ -306,6 +355,30 @@ def export_sast_run(
         headers={
             "Content-Disposition": f'attachment; filename="{safe}.aespa-sast.json"'
         },
+    )
+
+
+@router.get("/api/sast-runs/{run_id}/sarif")
+def export_sast_sarif(
+    run_id: int,
+    reportable_only: bool = False,
+    session: Session = Depends(get_session),
+) -> JSONResponse:
+    """Download SAST scan results in OASIS SARIF 2.1.0 format."""
+    run = _get_run_or_404(session, run_id)
+    try:
+        sarif_doc = sast_sarif.generate_sast_sarif(
+            session, run_id, reportable_only=reportable_only
+        )
+    except sast_sarif.SastSarifError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    name = run.name or f"sast-run-{run_id}"
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+    return JSONResponse(
+        content=sarif_doc,
+        media_type="application/sarif+json",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.sarif"'},
     )
 
 
@@ -360,10 +433,9 @@ def update_sast_run(
             detail="Cannot change the model profile while the SAST scan is running",
         )
     if payload.llm_profile_id is not None:
-        from aespa.models import LLMProfile
+        from aespa.services.settings_profiles import get_scan_profile
 
-        if session.get(LLMProfile, payload.llm_profile_id) is None:
-            raise HTTPException(status_code=404, detail="Scan profile not found")
+        get_scan_profile(session, payload.llm_profile_id)
     run.llm_profile_id = payload.llm_profile_id
     run.updated_at = datetime.now(_UTC)
     session.add(run)
@@ -384,18 +456,31 @@ def _json_object(value: str | None, default: dict) -> dict:
 def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> dict:
     """Return authoritative phase, coverage, and report state for the UI."""
     run = _get_run_or_404(session, run_id)
-    from aespa.services.sast_scanner import _empty_phase_state
+    if run.analysis_mode == "light":
+        from aespa.services.sast_scanner_light import _empty_phase_state
+    else:
+        from aespa.services.sast_scanner import _empty_phase_state
     from aespa.services.sast_workprogram import completion_decision
 
     completion_status, completion_reasons, work_program = completion_decision(run_id)
+    report = _json_object(run.report_json, {})
+    # New semantic runs persist the authoritative assurance decision in the
+    # report. Keep the legacy work-program calculation for older runs that have
+    # no semantic report yet.
+    if report.get("completion_status") in {"full", "partial"}:
+        completion_status = report["completion_status"]
+        completion_reasons = list(
+            report.get("completion_reasons") or completion_reasons
+        )
 
     return {
+        "analysis_mode": run.analysis_mode,
         "phases": _json_object(run.phase_state_json, _empty_phase_state()),
         "coverage": _json_object(
             run.coverage_json,
             {"files": [], "summary": {"files_total": 0, "files_reviewed": 0}},
         ),
-        "report": _json_object(run.report_json, {}),
+        "report": report,
         "work_program": work_program,
         "assurance": {
             "status": completion_status,
@@ -407,10 +492,12 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
 @router.delete("/api/sast-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
+    run_cleanup.ensure_sast_run_deletable(session, run_id)
     from aespa.services import campaigns as campaigns_svc
-    from aespa.services import sast_scanner
+    from aespa.services import sast_scanner, sast_sources
 
     await campaigns_svc.stop_member_tasks_for_run("sast", run_id)
+    await sast_sources.stop_source_preparation_and_wait(run_id)
     if sast_scanner.is_sast_scan_running(run_id):
         await sast_scanner.stop_sast_scan_and_wait(run_id)
     run_cleanup.cascade_delete_sast_run(session, run_id)
@@ -425,11 +512,31 @@ async def start_sast_scan(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> dict:
-    _get_run_or_404(session, run_id)
-    from aespa.services import sast_scanner
-
-    await sast_scanner.start_sast_scan(run_id)
+    await sast_runs_svc.start(session, run_id)
     return {"ok": True}
+
+
+@router.post(
+    "/api/sast-runs/{run_id}/source/resume",
+    response_model=SastRunSummary,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def resume_sast_source_preparation(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> SastRunSummary:
+    """Retry extension source preparation without replacing the SAST run."""
+    _get_run_or_404(session, run_id)
+    from aespa.services import sast_sources
+
+    try:
+        await sast_sources.resume_source_preparation(run_id, auto_start=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session.expire_all()
+    return _to_summary(_get_run_or_404(session, run_id))
 
 
 @router.post("/api/sast-runs/{run_id}/scan/stop")
@@ -437,10 +544,7 @@ async def stop_sast_scan(
     run_id: int,
     session: Session = Depends(get_session),
 ) -> dict:
-    _get_run_or_404(session, run_id)
-    from aespa.services import sast_scanner
-
-    stopped = await sast_scanner.stop_sast_scan(run_id)
+    stopped = await sast_runs_svc.stop(session, run_id)
     return {"ok": True, "stopped": stopped}
 
 
@@ -467,22 +571,25 @@ async def resume_sast_scan(
     """Resume a user, network, quota, or restart-paused SAST scan."""
     from aespa.services import sast_scanner
 
-    _get_run_or_404(session, run_id)
-    from aespa.services import run_pause as run_pause_svc
+    await sast_runs_svc.resume(session, run_id)
+    return sast_scanner.get_sast_status(run_id)
 
-    run = session.get(SastRun, run_id)
-    pause = run_pause_svc.get_pause("sast", run_id)
-    if run is None or pause is None or run.status != "paused":
-        raise HTTPException(status_code=409, detail="SAST scan is not paused")
-    if sast_scanner.is_sast_scan_running(run_id):
-        raise HTTPException(status_code=409, detail="SAST scan is already running")
-    if pause.reset_at and pause.reset_at > datetime.now(_UTC):
-        raise HTTPException(
-            status_code=409,
-            detail={"message": pause.message, "reset_at": pause.reset_at.isoformat()},
-        )
-    await sast_scanner.start_sast_scan(run_id, resume=True)
-    run_pause_svc.clear_pause("sast", run_id)
+
+@router.post("/api/sast-runs/{run_id}/leads/{lead_id}/revalidate")
+async def revalidate_sast_lead(
+    run_id: int,
+    lead_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Run a fresh validator pass for one inconclusive SAST lead."""
+    _get_run_or_404(session, run_id)
+    from aespa.services import sast_scanner
+
+    try:
+        sast_scanner.queue_lead_revalidation(run_id, lead_id)
+        await sast_scanner.start_sast_scan(run_id, resume=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return sast_scanner.get_sast_status(run_id)
 
 
@@ -492,9 +599,11 @@ def sast_scan_status(
     session: Session = Depends(get_session),
 ) -> dict:
     _get_run_or_404(session, run_id)
-    from aespa.services import sast_scanner
+    from aespa.services import sast_scanner, sast_sources
 
-    return sast_scanner.get_sast_status(run_id)
+    result = sast_scanner.get_sast_status(run_id)
+    result["preparing_source"] = sast_sources.is_source_preparation_running(run_id)
+    return result
 
 
 # ── SSE event stream ───────────────────────────────────────────────────────────
@@ -542,16 +651,26 @@ def get_scan_log(
         .where(ScanLog.run_kind == "sast")
         .order_by(ScanLog.created_at, ScanLog.id)
     ).all()
-    return [
-        {
-            "id": r.id,
-            "phase": r.phase,
-            "status": r.status,
-            "message": r.message,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-        }
-        for r in rows
-    ]
+    entries = []
+    for r in rows:
+        try:
+            data = json.loads(r.data_json) if r.data_json else None
+        except (TypeError, ValueError):
+            data = None
+        agent = data.get("_activity_agent") if isinstance(data, dict) else None
+        agent = agent if isinstance(agent, dict) else {}
+        entries.append(
+            {
+                "id": r.id,
+                "phase": r.phase,
+                "status": r.status,
+                "message": r.message,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "agent_id": agent.get("agent_id"),
+                "role": agent.get("role"),
+            }
+        )
+    return entries
 
 
 @router.get("/api/sast-runs/{run_id}/agent-log")
@@ -697,6 +816,106 @@ class SastLeadHandoffRequest(BaseModel):
     run_id: int
 
 
+class SastLiveTestRunCreate(BaseModel):
+    target_type: str
+    target_id: int
+
+
+@router.get("/api/sast-runs/{run_id}/live-targets")
+def get_sast_live_targets(
+    run_id: int, session: Session = Depends(get_session)
+) -> list[dict]:
+    """List saved applications that can receive a new live test run."""
+    _get_run_or_404(session, run_id)
+    sites = session.exec(select(Site).order_by(Site.name)).all()
+    collections = session.exec(select(ApiCollection).order_by(ApiCollection.name)).all()
+    return [
+        {
+            "target_type": "site",
+            "target_id": site.id,
+            "name": site.name,
+            "url": site.base_url,
+        }
+        for site in sites
+    ] + [
+        {
+            "target_type": "api_collection",
+            "target_id": collection.id,
+            "name": collection.name,
+            "url": collection.base_url,
+        }
+        for collection in collections
+    ]
+
+
+@router.post("/api/sast-runs/{run_id}/leads/{lead_id}/live-test-runs", status_code=201)
+def create_sast_live_test_run(
+    run_id: int,
+    lead_id: int,
+    body: SastLiveTestRunCreate,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Create a SAST Validate run containing one independent finding copy."""
+    source_run = _get_run_or_404(session, run_id)
+    lead = session.get(ScanLead, lead_id)
+    if (
+        lead is None
+        or lead.producer_run_type != "sast"
+        or lead.producer_run_id != run_id
+        or lead.imported_into_run_id is not None
+    ):
+        raise HTTPException(status_code=404, detail="SAST finding not found")
+    if not lead.reportable or lead.validation_status != "confirmed":
+        raise HTTPException(
+            status_code=409, detail="Only confirmed findings can be tested live"
+        )
+    if body.target_type == "site":
+        target = session.get(Site, body.target_id)
+        run_type = "web"
+    elif body.target_type == "api_collection":
+        target = session.get(ApiCollection, body.target_id)
+        run_type = "api"
+    else:
+        raise HTTPException(
+            status_code=422, detail="target_type must be site or api_collection"
+        )
+    if target is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    name = f"Live test {lead.reference or f'#{lead.id}'}"
+    if run_type == "web":
+        new_run = TestRun(
+            site_id=target.id,
+            name=name,
+            llm_profile_id=source_run.llm_profile_id,
+            coverage_mode="sast_validate",
+        )
+    else:
+        new_run = ApiTestRun(
+            collection_id=target.id,
+            name=name,
+            llm_profile_id=source_run.llm_profile_id,
+            coverage_mode="sast_validate",
+        )
+    from aespa.services.scan_leads import copy_lead_to_run_in_session
+
+    try:
+        session.add(new_run)
+        session.flush()
+        copied = copy_lead_to_run_in_session(session, lead_id, run_type, new_run.id)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    return {
+        "run_type": run_type,
+        "run_id": new_run.id,
+        "lead_id": copied.id,
+        "lead_reference": copied.reference,
+        "target_name": target.name,
+    }
+
+
 @router.post("/api/sast-runs/{run_id}/leads/{lead_id}/handoff")
 def handoff_sast_lead(
     run_id: int,
@@ -785,10 +1004,24 @@ def get_api_run_leads(
 def list_api_run_available_sast_runs(
     run_id: int,
     session: Session = Depends(get_session),
-) -> list[dict]:
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=10, ge=1, le=50),
+    q: str = Query(default="", max_length=200),
+) -> list[dict] | dict:
     """Completed standalone SAST runs available for explicit lead import."""
     if session.get(ApiTestRun, run_id) is None:
         raise HTTPException(status_code=404, detail="API test run not found")
+    if page is not None:
+        from aespa.services.sast_imports import search_import_sources
+
+        return search_import_sources(
+            session,
+            run_kind="api",
+            run_id=run_id,
+            query=q,
+            page=page,
+            page_size=page_size,
+        )
     runs = session.exec(
         select(SastRun)
         .where(SastRun.status == "completed")

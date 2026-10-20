@@ -23,6 +23,7 @@ log = logging.getLogger("aespa.llm.capabilities")
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 PROVIDER_CAPABILITY_STRATEGIES = {
     "anthropic": "provider_model_list_then_documented_family_then_openrouter",
+    "claude_cli": "documented_family_then_openrouter",
     "factory_droid": "droid_sdk_model_metadata_then_openrouter",
     "github_copilot": "copilot_sdk_model_metadata_then_openrouter",
     "openai_codex": "codex_app_server_model_metadata_then_openrouter",
@@ -31,6 +32,7 @@ PROVIDER_CAPABILITY_STRATEGIES = {
     "openai_compatible": "endpoint_model_metadata_then_openrouter",
     "openrouter": "openrouter_model_metadata",
     "google": "google_model_list_then_documented_family_then_openrouter",
+    "google_vertex": "vertex_publisher_model_list_then_documented_family_then_openrouter",
     "bedrock": "bedrock_model_list_then_documented_family_then_openrouter",
     "bedrock_mantle": "mantle_model_list_then_documented_family_then_openrouter",
     "azure_openai": "azure_openai_model_list_then_documented_family_then_openrouter",
@@ -153,6 +155,12 @@ def _native_capability(raw: Any) -> dict[str, Any] | None:
         raw.get(supported_key) if supported_key else reasoning.get("supported_efforts")
     )
     if raw_supported is None and not reasoning:
+        if context_window is not None:
+            return {
+                "context_window_tokens": context_window,
+                "source": "native",
+                "confidence": "provider",
+            }
         return None
     efforts = normalize_efforts(raw_supported) if raw_supported is not None else None
     default = (
@@ -233,7 +241,79 @@ def gemini_capability(model: str) -> dict[str, Any] | None:
 
 
 def documented_model_capability(api_format: str, model: str) -> dict[str, Any] | None:
-    if api_format == "google":
+    if api_format == "openai_chatgpt_plan":
+        # The ChatGPT-plan model catalog does not include context or output
+        # limits. Keep this list to models with published OpenAI specifications.
+        specifications = {
+            "gpt-6-astra": (
+                1_050_000,
+                128_000,
+                ["low", "medium", "high", "xhigh", "max"],
+                None,
+            ),
+            "gpt-6.1-sol": (
+                1_050_000,
+                128_000,
+                ["low", "medium", "high", "xhigh", "max"],
+                "medium",
+            ),
+            "gpt-6-sol": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh", "max"],
+                "medium",
+            ),
+            "gpt-6-luna": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh", "max"],
+                "xhigh",
+            ),
+            "gpt-5.6-sol": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh", "max"],
+                "medium",
+            ),
+            "gpt-5.6-terra": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh", "max"],
+                None,
+            ),
+            "gpt-5.6-luna": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh", "max"],
+                "xhigh",
+            ),
+            "gpt-5.5": (
+                1_050_000,
+                128_000,
+                ["none", "low", "medium", "high", "xhigh"],
+                None,
+            ),
+            "gpt-daybreak-blue-latest": (1_050_000, 128_000, None, None),
+            "gpt-5.6-cyber": (400_000, 128_000, None, None),
+            "gpt-daybreak-red-latest": (400_000, 128_000, None, None),
+        }
+        if model not in specifications:
+            return None
+        context, output, efforts, default = specifications[model]
+        capability = {
+            "context_window_tokens": context,
+            "max_output_tokens": output,
+            "context_window_source": "openai_documentation",
+            "source": "native",
+            "confidence": "documented",
+            "strategy": "documented_registry",
+        }
+        if efforts is not None:
+            capability["supported_efforts"] = efforts
+        if default is not None:
+            capability["default_effort"] = default
+        return capability
+    if api_format in {"google", "google_vertex"}:
         capability = gemini_capability(model)
         if capability is not None:
             capability["strategy"] = "documented_registry"
@@ -280,6 +360,34 @@ def documented_model_capability(api_format: str, model: str) -> dict[str, Any] |
         "bedrock_mantle",
     }:
         name = normalize_model_name(model)
+        if api_format == "openai" and name == "gpt-6-astra":
+            return {
+                "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+                "context_window_tokens": 1_050_000,
+                "context_window_source": "openai_documentation",
+                "source": "native",
+                "confidence": "documented",
+                "strategy": "documented_registry",
+            }
+        if api_format == "openai" and (
+            name == "gpt-5-6"
+            or name.startswith(("gpt-5-6-luna", "gpt-5-6-terra", "gpt-5-6-sol"))
+        ):
+            return {
+                "supported_efforts": [
+                    "none",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max",
+                ],
+                "context_window_tokens": 1_050_000,
+                "context_window_source": "openai_documentation",
+                "source": "native",
+                "confidence": "documented",
+                "strategy": "documented_registry",
+            }
         if name.startswith(("gpt-5", "o3", "o4")):
             return {
                 "supported_efforts": ["low", "medium", "high"],
@@ -350,7 +458,9 @@ async def fetch_openrouter_catalog(*, force: bool = False) -> list[dict[str, Any
             and now - _catalog_cache[0] < _CATALOG_TTL_S
         ):
             return _catalog_cache[1]
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        from aespa.services.llm_network import httpx_options
+
+        async with httpx.AsyncClient(timeout=10.0, **httpx_options()) as client:
             response = await client.get(
                 "https://openrouter.ai/api/v1/models",
                 headers={"Accept": "application/json"},
@@ -370,29 +480,37 @@ async def enrich_model_options(
     *,
     catalog_fetcher: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Return per-model metadata, using OpenRouter only when native metadata is absent."""
+    """Return per-model metadata, filling missing native fields from OpenRouter."""
     native_capabilities = native_capabilities or {}
     result: dict[str, dict[str, Any]] = {}
-    missing: list[str] = []
+    incomplete: list[str] = []
     for model in models:
         native = _native_capability(native_capabilities.get(model))
         if native is not None:
             native.setdefault("strategy", "native_metadata")
             result[model] = native
-        else:
-            missing.append(model)
-    if not missing:
+        if native is None or "context_window_tokens" not in native:
+            incomplete.append(model)
+    if not incomplete:
         return result
     try:
         catalog = await (catalog_fetcher or fetch_openrouter_catalog)()
     except Exception as exc:
         log.debug("OpenRouter capability fallback unavailable: %s", exc)
         return result
-    for model in missing:
+    for model in incomplete:
         matched = fuzzy_match_model(model, catalog)
         if matched is not None:
-            matched["strategy"] = "openrouter_fuzzy_fallback"
-            result[model] = matched
+            existing = result.get(model)
+            if existing is None:
+                matched["strategy"] = "openrouter_fuzzy_fallback"
+                result[model] = matched
+            else:
+                for key, value in matched.items():
+                    existing.setdefault(key, value)
+                if "context_window_tokens" in matched:
+                    existing["context_window_source"] = "openrouter"
+                    existing["strategy"] = "native_metadata_with_openrouter_context"
     return result
 
 
@@ -410,9 +528,43 @@ def validate_effort(
     value = effort.strip().lower()
     if value not in EFFORT_ORDER:
         raise ValueError(f"Unknown reasoning level: {effort}")
-    if capability is not None and capability.get("supported_efforts") is not None:
-        if value not in capability["supported_efforts"]:
-            raise ValueError(
-                f"Reasoning level '{effort}' is not supported by this model"
-            )
+    supported = capability.get("supported_efforts") if capability else None
+    if not isinstance(supported, list):
+        raise ValueError(
+            "This model does not list any thinking levels. "
+            "Set Thinking level to Default."
+        )
+    if value not in supported:
+        raise ValueError(f"Reasoning level '{effort}' is not supported by this model")
+    return value
+
+
+def has_effort_list(capability: dict[str, Any] | None) -> bool:
+    return isinstance(capability, dict) and isinstance(
+        capability.get("supported_efforts"), list
+    )
+
+
+SERVICE_TIER_PROVIDERS = {"openai_chatgpt_plan"}
+
+
+def validate_service_tier(
+    api_format: str, capability: dict[str, Any] | None, tier: str | None
+) -> str | None:
+    """Return a supported speed tier, or None for the provider's standard speed."""
+    if tier is None or not tier.strip():
+        return None
+    value = tier.strip().lower()
+    if api_format not in SERVICE_TIER_PROVIDERS:
+        raise ValueError("This provider does not support speed settings")
+    tiers = (capability or {}).get("service_tiers")
+    if not isinstance(tiers, list):
+        raise ValueError(
+            "Speed options for this model are unknown. "
+            "Load models for the provider again."
+        )
+    if value not in {
+        str(item.get("id", "")).lower() for item in tiers if isinstance(item, dict)
+    }:
+        raise ValueError(f"Speed '{tier}' is not supported by this model")
     return value

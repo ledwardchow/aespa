@@ -1,11 +1,11 @@
 # AESPA — Architecture & Internal Workings
 
-AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security scanner. It covers three distinct surfaces:
+AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security scanner. It covers four related surfaces:
 
-- **Web application scanning** — discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage with Track/Enforce modes, while SAST Validate focuses only on imported SAST leads.
+- **Web application scanning** - discovers endpoints through an intelligent crawl, then probes them via an **agentic dynamic scan**: the LLM acts as an autonomous Test Lead agent, deciding what to attack next in a loop, and can spawn focused **Specialist Agents** to deep-dive on confirmed leads. An **OWASP Coverage** matrix tracks per-page OWASP Top-10 coverage in Quick, Standard, Full, and experimental Team modes, while SAST Validate focuses only on imported SAST leads.
 - **API scanning** — parses OpenAPI/Swagger/Postman specs and source ZIP archives into a structured **API collection**, drives the same agentic scan loop against REST endpoints without a browser, and tracks OWASP API Top-10 coverage in a per-endpoint matrix.
-- **SAST assistance** — a standalone agentic static-analysis pass over an uploaded source ZIP that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
-- **Multi-repository applications** — when a product's code is split across several repositories/micro-frontends, an **Application** groups them (with immutable uploaded ZIP snapshots) alongside the existing Sites/API Collections that make up the live product. An **AssessmentCampaign** coordinates ordinary SAST/web/API child runs for that application, joins compact per-repository interface facts into a cross-repository map, and proposes which live target should receive each SAST lead — subject to human review before any dynamic scan starts.
+- **SAST assistance** - a standalone agentic static-analysis pass over an uploaded source ZIP or an immutable repository snapshot that identifies high-confidence vulnerability **leads**. Users explicitly import completed SAST results into either a web or API test run. Leads are unproven hypotheses the dynamic loop reproduces against the live target before writing a finding.
+- **Multi-repository systems** - when a product's code is split across several repositories/micro-frontends, a **System** groups them (with immutable uploaded ZIP snapshots) alongside the existing Sites/API Collections that make up the live product. An **AssessmentCampaign** coordinates ordinary SAST/web/API child runs for that system, joins compact per-repository interface facts into a cross-repository map, and proposes which live target should receive each SAST lead, subject to human review before any dynamic scan starts.
 
 ---
 
@@ -15,11 +15,10 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 2. [How to Run](#2-how-to-run)
 3. [System Overview](#3-system-overview)
 4. [Configuration](#4-configuration)
-   - [LLM Configuration (`LLMProviderConfig` & `LLMConfig`)](#llm-configuration-llmproviderconfig--llmconfig-models)
-   - [LLM Profiles (`LLMProfile`)](#llm-profiles-llmprofile-model)
+   - [LLM Configuration (`LLMProviderConfig`, `LLMConfig`, and `LLMProfile`)](#llm-configuration-llmproviderconfig-llmconfig--llmprofile-models)
+   - [LLM Profiles (`LLMProfile`)](#3-multi-role-model-profile-llmprofile-model)
    - [Scanner Policy](#scanner-policy-scannerpolicy-model)
    - [Python Sandbox](#python-sandbox-codeexecutionconfig-model)
-   - [Burp Suite REST API Config](#burp-suite-rest-api-config-burprestapiconfig-model)
    - [Upstream Proxy Config](#upstream-proxy-config-upstreamproxyconfig-model)
    - [Specialist Agent Config](#specialist-agent-config-specialistagentconfig-model)
    - [Adversarial Validator Config](#adversarial-validator-config-adversarialvalidatorconfig-model)
@@ -41,15 +40,14 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
    - [Recon summary](#recon-summary)
 9. [LLM Integration](#9-llm-integration)
    - [Agent tool sets](#agent-tool-sets) · [WSTG skills](#wstg-skills) · [Prompt caching](#prompt-caching)
-   - [Upstream proxy](#upstream-proxy) · [Rate Limiting & Pacing](#rate-limiting--pacing) · [Token Usage Telemetry](#token-usage-telemetry--telemetry-persistence)
+   - [Upstream proxy](#upstream-proxy) · [Rate Limiting & Pacing](#rate-limiting--pacing) · [Usage statistics](#independent-usage-statistics)
 10. [Burp Suite Integration](#10-burp-suite-integration)
-    - [Workflow](#workflow) · [Scope pinning](#scope-pinning) · [Per-class routing](#per-class-routing) · [Connection test](#connection-test)
 11. [Findings & Validation](#11-findings--validation)
     - [Deduplication](#deduplication) · [Validation](#validation)
 12. [API Layer](#12-api-layer)
     - [Key route groups](#key-route-groups)
 13. [Frontend & Real-time Events](#13-frontend--real-time-events)
-    - [WebSocket event types](#websocket-event-types-emitted-by-serviceseventspy) · [UI tabs](#ui-tabs)
+    - [SSE event types](#sse-event-types-emitted-by-serviceseventspy) · [UI tabs](#ui-tabs)
 14. [Concurrency & State Management](#14-concurrency--state-management)
 15. [A.L.I.C.E. — Interactive Pentesting Chat](#15-alice--interactive-pentesting-chat)
     - [Architecture overview](#architecture-overview) · [Background task registry](#background-task-registry-alice_taskspy)
@@ -62,7 +60,8 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 17. [SAST Scanner & Scan Leads](#17-sast-scanner--scan-leads)
     - [Architecture overview](#architecture-overview-1) · [File tools](#file-tools-all-path-jailed-to-the-extraction-root) · [Lead lifecycle](#lead-lifecycle)
     - [ScanLead entity](#scanlead-entity-servicesscan_leadspy) · [Lead consumption (API vs web)](#lead-consumption-api-vs-web) · [Concurrency](#concurrency)
-18. [Applications & Multi-Repository Campaigns](#18-applications--multi-repository-campaigns)
+18. [Extensions](#18-extensions)
+19. [Systems & Multi-Repository Campaigns](#19-systems--multi-repository-campaigns)
     - [Data model](#data-model) · [Component facts](#component-facts-servicescomponent_factspy)
     - [Correlation](#correlation-servicescorrelationpy) · [Review gate](#review-gate) · [Campaign lifecycle](#campaign-lifecycle-servicescampaignspy)
     - [Cleanup & restart recovery](#cleanup--restart-recovery)
@@ -70,6 +69,8 @@ AESPA (AI-Enabled Security Pentesting Agent) is an LLM-driven automated security
 ---
 
 ## 1. Repository Layout
+
+The main files are listed below. Provider adapters and supporting scan modules are described in their own sections.
 
 ```
 src/aespa/
@@ -84,20 +85,26 @@ src/aespa/
 │   ├── scan.py            # /api/test-runs/{id}/thinking-scan/* and crawl
 │   ├── test_runs.py       # /api/test-runs/* — CRUD, status, site map graph
 │   ├── sites.py           # /api/sites/* — target website management
-│   ├── settings.py        # /api/settings/* — LLM, policy, Burp, proxy, specialists, headers
+│   ├── settings.py        # /api/settings/* - LLM, policy, proxy, specialists, headers
 │   ├── traffic.py         # /api/traffic/* — HTTP traffic log
-│   ├── events.py          # WebSocket event stream
+│   ├── events.py          # Server-Sent Events (SSE) stream
 │   ├── alice.py           # /api/test-runs/{id}/alice/* — A.L.I.C.E. chat
 │   ├── api_collections.py # /api/api-collections/* — collections, documents, endpoints
 │   ├── api_test_runs.py   # /api/api-collections/{id}/test-runs/* — API scan runs
 │   ├── sast_runs.py       # /api/sast-runs/* and dynamic-run lead import routes
+│   ├── systems.py         # Systems, campaign control, review, and activity
+│   ├── extensions.py      # Extension discovery and settings
+│   ├── statistics.py      # Daily and monthly LLM usage and prices
 │   └── reporting_debug.py # /api/reporting-debug/* — reporting-prompt editing & replay
 └── services/
     ├── active_jobs.py     # Active job summaries for the UI
     ├── campaign_results.py # Campaign finding grouping and mapping response data
+    ├── campaigns.py       # Multi-repository campaign orchestration
+    ├── correlation.py     # Component mapping and lead-to-target matching
     ├── sites.py           # CRUD service layer for Site and Credential
     ├── crawler.py         # LLM-guided parallel web crawl
     ├── scanner.py         # Dynamic agentic scan engine, specialist dispatch, finding dedup
+    ├── deep_scan.py       # Persistent Deep scan queue, planning, and workers
     ├── llm.py             # Multi-provider LLM client, agent tools, rate limiting, token telemetry
     ├── prompts/           # Extracted modular prompt templates
     │   ├── reporting.py   # Reporting / post-scan review prompts
@@ -113,7 +120,7 @@ src/aespa/
     ├── api_documents.py   # Document upload, storage, and doc_type sniffing
     ├── api_readiness.py   # LLM-driven readiness gap analysis for collections
     ├── api_scanner.py     # API scan orchestration — OWASP Top-10 coverage matrix
-    ├── burp_rest.py       # Burp Suite Professional REST API client
+    ├── external_scans.py  # Web active scanner extension tasks and finding writes
     ├── checkpoint.py      # Scan resume — persist and restore LLM conversation state
     ├── findings.py        # Finding CRUD operations & validation status management
     ├── recon_summary.py   # Structured attack-surface summary from crawl data
@@ -125,13 +132,13 @@ src/aespa/
     ├── scan_leads.py      # ScanLead CRUD and confidence-threshold filtering
     ├── scanner_sessions.py# Auth session vault (cookies, tokens)
     ├── scope.py           # Scan scope boundaries and out-of-scope filtering
-    ├── settings.py        # LLM config / profiles / policy / Burp / proxy / specialist config
+    ├── settings.py        # LLM config / profiles / policy / proxy / specialist config
     ├── tls_scan.py        # Pure stdlib + cryptography TLS/SSL security posture probe
     ├── traffic.py         # HTTP capture (Playwright intercept + httpx)
     ├── validator.py       # Adversarial validator agent (LLM-assisted finding validation)
     ├── web_route_inventory.py # Web route inventory classification & dynamic enrichment
     ├── web_workprogram.py # Web OWASP Top-10 matrix & per-class obligation tracking
-    └── events.py          # WebSocket event emission
+    └── events.py          # SSE event bus and activity persistence
 ```
 
 ---
@@ -145,21 +152,48 @@ uv run aespa          # starts the server at http://127.0.0.1:8000
 Runtime configuration is read from a `.env` file:
 
 ```
-AESPA_DATABASE_URL = sqlite:///./aespa.db
+AESPA_DATABASE_URL = sqlite:///./aespa_data/aespa.db
 AESPA_HOST         = 127.0.0.1
 AESPA_PORT         = 8000
 ```
 
+Desktop builds also read a writable `settings.env` in the per-user AESPA
+application support directory. The console's Data Folder setting writes there
+on desktop builds and to `.env` for source runs; it takes effect after restart.
+
 ---
 
 ## 3. System Overview
+
+### Local authentication
+
+`local_auth.py` checks management requests before they reach the routers,
+including extension routes, event streams, and WebSockets. The sign-in page
+and minimal startup endpoints remain available without a session. Ordinary
+management requests require a signed browser cookie. Changes also require a
+session-specific CSRF header. The frontend adds that header to management
+requests and returns to sign-in when a session expires.
+
+The management key and signing secret live in `auth.json` under the data
+folder. Browser sessions last 30 days and survive restarts at the same port.
+Console and desktop launchers create single-use links through the same
+in-process authentication manager. The link secret stays in a URL fragment
+until the frontend exchanges it and removes it from the address.
+
+`/extension/aespa.api/v1/` keeps the API extension's bearer-token checks.
+Its administrative routes require a management session and retain local
+request restrictions. `integration_server.py` optionally serves only the
+public integration routes on another port. It shares the extension manager
+and does not run the main startup jobs again. Docker disables this listener.
+
+### Request flow
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Browser / API client                                       │
 │  (Web UI SPA or raw HTTP)                                   │
 └─────────────────┬───────────────────────────────────────────┘
-                  │  HTTP + WebSocket
+                  │  HTTP + SSE
 ┌─────────────────▼───────────────────────────────────────────┐
 │  FastAPI application  (src/aespa/main.py)                   │
 │  Routers: sites · settings · test_runs · scan · alice       │
@@ -176,7 +210,7 @@ AESPA_PORT         = 8000
 │  findings   │
 │  validator  │       ┌─────────────────────────────────────┐
 │  recon      │       │  Burp Suite Professional            │
-│  burp_rest  │──────►│  REST API  (default :1337)          │
+│  extensions│──────►│  REST API  (default :1337)          │
 │  traffic    │       └─────────────────────────────────────┘
 │  events     │
 └──────┬──────┘
@@ -188,14 +222,22 @@ AESPA_PORT         = 8000
 │  TrafficEntries · ScanFindings · ScannerSessions            │
 │  TargetIntelItems · PageOwaspTests · ScanCheckpoints        │
 │  ScanLogs · AliceChatSessions · AliceChatMessages           │
-│  BurpRestApiConfig · UpstreamProxyConfig                    │
+│  ExtensionSetting · ExtensionSecret · UpstreamProxyConfig   │
 │  ApiCollections · ApiDocuments · ApiEndpoints               │
 │  ApiCredentials · ApiTestRuns · ApiEndpointTests            │
 │  SastRuns · ScanLeads                                       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-A **test run** is the central unit of work. It ties together a target site, its credentials, the LLM config, the scanner policy, and all results (crawled pages, traffic, findings, hypotheses). A run progresses through phases: `created → crawling → crawled → scanning → scanned` (plus `thinking_scanning`).
+A **test run** is the central unit of work. It ties together a target site, its credentials, the LLM config, the scanner policy, and its pages, traffic, findings, coverage, and imported leads.
+
+Web runs store lifecycle information in separate fields:
+
+- `status`: `pending`, `running`, `complete`, `incomplete`, `failed`, `stopped`, or `paused`.
+- `phase`: the current stage, such as `created`, `crawling`, `crawled`, `scanning`, `reporting`, `validating`, or `finished`.
+- `outcome` and `terminal_reason`: the saved result and reason the scan ended.
+
+A completed crawl leaves the run ready for scanning. Scan completion can still be incomplete when required work remains.
 
 ---
 
@@ -207,21 +249,21 @@ LLM settings are structured into three entities to separate reusable provider co
 
 #### 1. Reusable Provider Config (`LLMProviderConfig` model)
 
-Defines API connections, optional project identifiers, and rate limits for LLM backends:
+Defines API connections, optional project identifiers, and model discovery settings for LLM backends:
 
 | Field | Default | Description |
 |---|---|---|
 | `name` | `Default Provider` | Label for the provider |
-| `api_format` | `anthropic` | API format: `factory_droid`, `github_copilot`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
+| `api_format` | `anthropic` | API format: `claude_cli`, `factory_droid`, `github_copilot`, `openai_codex`, `openai_chatgpt_plan`, `google_antigravity`, `anthropic`, `openai`, `openai_compatible`, `openrouter`, `google`, `google_vertex`, `bedrock`, `bedrock_mantle`, `azure_openai`, `azure_foundry`, `azure_foundry_openai`, `azure_foundry_anthropic` |
 | `api_key` | — | Provider API key (stored in DB; masked and excluded from non-localhost exports) |
 | `base_url` | — | Override endpoint URL |
 | `username` | — | Optional Copilot CLI account login; blank uses Copilot CLI's selected default account |
-| `project_id` | — | Bedrock Mantle project ID (sent as `OpenAI-Project` header for cost/usage attribution) |
-| `models_json` | `[]` | JSON list of available model names for this provider |
-| `max_tpm` | — | Optional Token-Per-Minute rate limit for this provider |
-| `max_rpm` | — | Optional Request-Per-Minute rate limit for this provider |
+| `project_id` | — | Bedrock Mantle project ID, or Google Cloud project ID for Vertex AI |
+| `aws_profile` | - | Named AWS credentials profile for Bedrock Runtime and Mantle |
+| `location` | — | Google Vertex AI location; defaults to `global` |
+| `models_json` | `[]` | JSON list of available model names for this provider. Removing a name deletes unused saved model settings; names used by a scan profile cannot be removed until the profile is updated. API model refreshes keep names used by scan profiles. |
 
-#### 2. Saved LLM Profile (`LLMConfig` model)
+#### 2. Saved LLM Model Configuration (`LLMConfig` model)
 
 Defines execution parameters linked to a provider:
 
@@ -231,9 +273,12 @@ Defines execution parameters linked to a provider:
 | `is_active` | `false` | Global active switch (only one profile active globally) |
 | `provider_id` | — | Foreign key linking to the `LLMProviderConfig` connection |
 | `model` | `claude-opus-4-5` | Specific model identifier to run |
-| `max_tokens` | `70000` | Maximum output tokens per LLM call |
-| `max_context_tokens` | `200000` | Total model context window, including prompts, tools, conversation history, and the output allowance |
+| `max_tpm` | — | Optional token-per-minute limit shared by saved configurations using this provider and model |
+| `max_rpm` | — | Optional request-per-minute limit shared by saved configurations using this provider and model |
+| `max_tokens` | `16384` | Maximum output tokens per LLM call |
+| `max_context_tokens` | `200000` | Total model context window, including prompts, tools, conversation history, and the output allowance. Auto mode stores the latest provider-discovered value, follows later provider metadata refreshes, and uses a conservative fallback only when discovery has no context limit. |
 | `temperature` | — | Unset by default (falls through to provider/model default) |
+| `reasoning_effort` | - | Optional reasoning or thinking level; unset uses the provider default |
 | `use_vision` | `false` | Include Playwright screenshots in prompts |
 | `force_tool_choice` | `false` | Force tool selection through the provider wire format where supported. Codex app-server does not expose a per-turn tool-choice field, so AESPA repairs prose-only Codex scan turns inside its adapter. |
 
@@ -255,17 +300,21 @@ Runs (`TestRun`, `ApiTestRun`, `SastRun`) can override model routing via an `llm
 | Field | Default | Description |
 |---|---|---|
 | `execution_monitor_enabled` | `false` | Enable duplicate-action and stalled-progress supervision by the Mentor |
-| `disable_deterministic_checks` | `false` | Skip automatic JavaScript sink, TLS, authentication, IDOR, and probe-result checks |
+| `openai_refusal_recovery_enabled` | `false` | In web and API scans, retry an OpenAI cybersecurity refusal once with a shorter prompt. Set under **Settings → Global → OpenAI Refusals**. |
+| `disable_deterministic_checks` | `false` | Skip automatic TLS, authentication, IDOR, and probe-result checks. Passive JavaScript source analysis still runs in ordinary Test Lead scans. |
 | `max_consecutive_text_turns` | `0` | Stop after this many text-only Test Lead turns; `0` allows unlimited turns |
 | `enforce_full_coverage_obligations` | `false` | Require every coverage obligation to be resolved before the Test Lead can finish |
-| `scan_mode` | `safe_active` | `passive` (GET/HEAD only) · `safe_active` (+ POST) · `aggressive` (all methods) · `destructive` |
+| `standard_coverage_percent` | `60` | Percentage of applicable coverage cells required in Standard mode |
+| `scan_mode` | `aggressive` | Default method lists: `passive` allows GET/HEAD; `safe_active` adds POST; `aggressive` adds PUT/PATCH/OPTIONS; `destructive` also allows DELETE. Lists are configurable through `methods_by_mode`. |
 | `max_probes_per_page` | `50` | Cap on probe attempts per crawled page |
 | `thinking_max_steps` | `120` | Legacy compatibility setting; the active Test Lead loop is deliberately uncapped and does not read this value |
-| `request_timeout` | `10` | HTTP timeout per probe (seconds) |
-| `min_delay` | `0.05` | Minimum delay between probes (rate-limiting) |
-| `max_request_body` | `65536` | Probe body size cap (bytes) |
+| `dast_max_concurrent_llm_requests` | `4` | Maximum concurrent LLM requests per web or API scan |
+| `request_timeout_s` | `10` | HTTP timeout per probe (seconds) |
+| `min_delay_s` | `0.05` | Minimum delay between probes (rate-limiting) |
+| `max_request_body_bytes` | `65536` | Probe body size cap (bytes) |
 | `follow_redirects` | `true` | |
 | `allow_subdomains` | `true` | Allow crawling/probing subdomains of the target |
+| `retire_auto_update` | `true` | Download the latest Retire.js vulnerable-library list at scan start (at most once a day). When off, or when the download fails, scans use the last downloaded copy, or the copy shipped with AESPA. Edited under **Settings → Global → Vulnerable Libraries**. |
 
 ### Python Sandbox (`CodeExecutionConfig` model)
 
@@ -310,31 +359,16 @@ profile and verifies that the non-root harness can write to its private tmpfs
 workspace. An incompatible Docker installation therefore fails readiness before
 an agent attempts execution.
 
-### Burp Suite REST API Config (`BurpRestApiConfig` model)
-
-Singleton row (id = 1). Configures the optional Burp Suite Professional active-scan integration.
-
-| Field | Default | Description |
-|---|---|---|
-| `enabled` | `false` | Enable Burp integration |
-| `api_url` | `http://127.0.0.1:1337` | Burp REST API base URL |
-| `api_key` | — | Bearer token for the Burp REST API (optional) |
-| `scan_configuration_name` | `Audit checks - all except time-based detection methods` | Named Burp scan config to apply |
-| `scan_sqli` | `true` | Route SQLi findings to Burp active scan |
-| `scan_xss` | `true` | Route XSS findings to Burp active scan |
-| `scan_command_injection` | `true` | Route command injection findings |
-| `scan_path_traversal` | `true` | Route path traversal findings |
-| `scan_ssrf` | `true` | Route SSRF findings |
-| `scan_xxe` | `true` | Route XXE findings |
-| `scan_ssti` | `true` | Route SSTI findings |
-
 ### Upstream Proxy Config (`UpstreamProxyConfig` model)
 
-Singleton row (id = 1). Routes scanner and/or LLM traffic through an upstream HTTP proxy.
+Singleton row (id = 1). Routes scanner and/or LLM traffic through independently configured upstream HTTP proxies.
 
 | Field | Default | Description |
 |---|---|---|
-| `proxy_url` | — | `http://host:port` proxy URL |
+| `scanner_proxy_url` | — | `http://host:port` proxy URL for testing traffic |
+| `llm_proxy_url` | — | `http://host:port` proxy URL for LLM traffic |
+| `scanner_ca_bundle_path` | — | PEM CA bundle for scanner HTTP certificate checks |
+| `llm_ca_bundle_path` | — | PEM CA bundle for application traffic, including LLM and Benchmark Lab requests |
 | `proxy_scanner` | `false` | Route scanner HTTP and Playwright traffic through proxy |
 | `proxy_llm` | `false` | Route LLM API calls through proxy |
 
@@ -371,7 +405,6 @@ Singleton row (id = 1). Controls when and how Specialist Agents are dispatched d
 | `dispatch_crypto` | `true` | Dispatch specialists for cryptography/secrets leads |
 | `dispatch_config` | `false` | Dispatch specialists for misconfiguration leads |
 | `dispatch_file_upload` | `true` | Dispatch specialists for file upload leads |
-| `trigger_specialist_on_burp` | `false` | Also dispatch a specialist alongside each Burp active scan |
 
 ### Adversarial Validator Config (`AdversarialValidatorConfig` model)
 
@@ -423,12 +456,13 @@ All models are defined in `src/aespa/models.py` using **SQLModel** (SQLAlchemy +
 | Model | Purpose |
 |---|---|
 | `Site` | Target website (base URL, auth settings, associated credentials) |
+| `SavedCrawl` | Gzip-compressed crawl archive kept on a site so new runs can load it instead of crawling |
 | `Credential` | Login credentials tied to a site (username, password, login URL) |
-| `LLMProviderConfig` | Reusable LLM provider connection settings (API keys, base URLs, rate limits, project IDs) |
+| `LLMProviderConfig` | Reusable LLM provider connection settings (API keys, base URLs, account, cloud project, and model discovery) |
 | `LLMConfig` | Saved LLM configuration/execution profile linked to a provider |
 | `LLMProfile` | Named per-agent-role model routing profile mapping roles to specific `LLMConfig` IDs |
 | `ScannerPolicy` | Scan behaviour policy for a test run |
-| `BurpRestApiConfig` | Singleton — Burp Suite REST API connection and routing settings |
+| `ExtensionSetting` / `ExtensionSecret` | Extension settings and namespaced secret values, including Burp Suite configuration |
 | `UpstreamProxyConfig` | Singleton — upstream HTTP proxy settings for scanner and LLM traffic |
 | `GlobalHttpHeaderConfig` | Singleton — custom HTTP header added to all scanner and crawler requests |
 | `ReportingDebugConfig` | Singleton — reporting prompt execution capture and debug settings |
@@ -493,9 +527,9 @@ start_crawl(run_id)
   └─ _do_crawl(run_id)
        1. Load site config, credentials, and upstream proxy settings
        2. Build crawl phases:
-            • Phase 0 — always unauthenticated (even if credentials exist)
-            • Phase 1..N — one phase per stored Credential
-       └─ Per phase:
+            • Default: one anonymous phase, plus one per Credential when auth is required
+            • Pinned credential: only that credential's phase, without an anonymous phase
+       └─ Run phases concurrently; per phase:
             a. Authenticate via Playwright (or skip for unauthenticated phase)
             b. Export auth cookies → ScannerSession
             c. Spawn N parallel browser workers (_CrawlShared state)
@@ -507,13 +541,59 @@ start_crawl(run_id)
                  v.   Enqueue new URLs (in-scope, within depth/page limits)
                  vi.  Persist CrawledPage + PageLinks + TrafficEntries
        3. Extract TargetIntelItems (endpoints, forms, inputs, IDs, scripts, JWT hints)
-       4. Update TestRun status → crawled
+       4. List reached functions and ask the crawler model about workflows suggested by the page inventory
+          • Try a few visible browser actions to reach them, except deletion
+          • Save newly reached pages with replay steps and record workflow notes
+          • Record deletion or blocked workflows without exercising them
+       5. Update TestRun status → crawled
 ```
 
 The run view reports the crawl in plain-language stages. Each page event includes
 the credential in use, the phase number, the URL, and the current step: opening
 the page, checking access, analyzing content and links, or moving to the next
 URL. Navigation errors and login-blocked pages are recorded too.
+
+The Workflows subtab under Attack Surface & Coverage groups retry attempts under
+their original workflow and shows live retry progress. Status
+shows a notice when a workflow needs input and has a Notifications subtab for
+workflows that stopped because the crawler lacked
+sample data or instructions. Users can supply test data there to continue one
+workflow. Submitting the data opens Workflows so the user can watch the retry.
+The workflow inventory includes the latest named crawl note for each retry chain.
+When the crawl groups similar pages, a workflow keeps the page where it was found
+as an example. Before trying it, AESPA chooses an exact saved link from the same
+confirmed group and reserves that item for the workflow. Other workflows choose
+different items. The choice is saved for retries, and the browser checks access
+and the action before changing anything. If the item cannot be opened, the
+crawler can try another saved link. The scanner uses the same reservations for
+named workflow checks, including Deep mode. Each test still records the exact
+item and traffic it used. Delete workflows remain blocked during the crawl.
+Input fields, business-logic tags, and navigation clicks alone do not create workflows.
+Unreached workflows appear in coverage with crawl progress and no security checks.
+Reached named workflows seed security checks. Each check belongs to the original note, so
+a retry updates the same workflow. A04 covers the sequence;
+an authenticated or object-specific workflow also gets an A01 access check. The
+crawler reaching a workflow does not count as a security test.
+The retry keeps the same deletion checks and adds its result
+to the workflow notes. The retry status endpoint reports the current browser
+step, page path, completed actions, and final result. A completed retry clears the earlier notification. If
+the crawler needs more information, it adds a new notification with the specific
+request and the submitted instructions ready to edit. Ordinary workflows and retries generate missing sample values by default.
+Generated values are added to the editable instructions. Payment workflows do
+not generate data, and deletion workflows remain blocked. Payment details,
+existing passwords, verification codes, and API keys require supplied values.
+Clearly new passwords for test accounts can be generated. Account-opening and
+contact forms can use generated values without being classified as payments.
+The action guard checks the chosen control and its target, and the browser
+blocks DELETE requests and delete paths. Other ordinary state changes, such as
+submitting a review, are allowed.
+The Site saves each workflow's name, goal, and starting page when the crawl
+records its result, including when the workflow needs input. It saves sample
+data and instructions only after the workflow is reached and the user chooses
+to save them. Site configuration lists these workflows and lets the user edit
+or remove them. Future crawls load saved instructions and try those workflows again,
+even if the normal page crawl did not rediscover their starting URL. The URL
+must still belong to the site's host, and deletion remains blocked.
 
 For authenticated sites with multiple credentials, an optional **cross-user
 access check** can follow the crawl. AESPA loads known pages again for each
@@ -523,9 +603,30 @@ enabled, the UI labels this as access verification, shows progress such as
 `Access check 12/168`, and keeps each page check in the activity log. This is
 verification of known pages, not new page discovery.
 
-The unauthenticated phase is always run first so the crawler maps the public attack surface before logging in. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
+By default, the crawler schedules an anonymous phase alongside the authenticated phases. All phases run concurrently, so public pages are not guaranteed to be visited before authenticated pages. A run pinned to a valid `crawl_credential_id` uses only that credential when the site requires authentication. When a dynamic scan discovers valid credentials, they are persisted to the site's credential store and a `credential_discovered` event is emitted, prompting the user to re-crawl with the new account.
 
 **`max_pages` caps the total site-map size.** All phases run concurrently and share `_CrawlShared` (the `crawled_norms` dedup map + a `pages_done` counter, guarded by an `asyncio.Lock`). New nodes — both HTML pages and promoted API endpoints — are only created while `pages_done < max_pages`, so the number of distinct `CrawledPage` nodes in the site map never exceeds `max_pages` regardless of how many credential phases run. Already-discovered URLs still fall through the cap so every phase records its own access view of them (this is the differential broken-access-control signal); they don't create new nodes.
+
+URL crawls can optionally use **Group similar pages** (`services/route_sampling.py`). It uses no site-specific rules.
+
+- **Routes.** Before adding links to the browser queue, the crawler groups them into routes by URL shape. A path segment or query value that contains digits, is 20 or more characters long, or joins three or more words is treated as changing (an ID or slug); other segments are fixed words. A route can vary one segment, every changing segment together (`/{slug}/p/{id}`, `/2024/10/23/{id}/{slug}`), or its ID-like query values (`?p=123`, `?page=7`). A path route may group links that have different query values, but each complete URL remains a separate member. Single top-level pages are never grouped. Action words (account, admin, cart, checkout, login, search, new, edit, delete and similar) may be fixed parts of a route, such as `/admin/products/{slug}`, but never the part that varies; a URL ending in an action, such as `/admin/products/new` or `/orders/{id}/edit`, varies only its ID-like parts, so forms for different kinds of record are each visited. The target inventory keeps query order, repeated and empty query values, trailing slashes, fragments, and explicit browser state keys.
+- **When a route forms.** Links are counted per route across the whole crawl. A route forms at 10 links, or at 2 when other routes of the same URL shape already add up to 10 links or one has formed. This lets a news site's many small sections join quickly.
+- **Examples.** The crawler holds the route's other links, and visits examples it has not already queued ahead of ordinary links. It starts with three spread-out examples, then two more. Among candidate routes of one shape, only the largest takes examples; the others wait for its decision.
+- **Comparing pages.** Pages are compared by layout: a bottom-k sketch (256 hashes) of the element tag, id and class-name tokens, with digits and hex runs normalised. The typical example is the one most similar to the rest. An example belongs with it when its similarity is at least 0.75 of the typical similarity, and at least 0.5. This adapts to sites whose pages of one template are 0.65 similar as well as to those at 0.95. A route is confirmed when at least 75% of five or more examples belong together. The others are reported as examples that looked different.
+- **Rejection.** If no two of the first three examples match, or 12 examples are not enough, the route is rejected and its held links are crawled normally. Examples that fail to load are replaced (up to two). A mix of login-blocked and loaded examples rejects the route. A route whose links have all been visited is confirmed from three matching examples.
+- **Templates.** A confirmed route's typical page becomes a template for that account. A new route whose first example matches it is confirmed from that one page, so each further news section or product family costs one visit.
+- **Accounts.** Each account compares its own examples and reuses another account's example URLs, needing three. Accounts may see different pages.
+- **Leftover checks.** When an account's queue empties, any check that cannot finish releases its held links, so links are never silently dropped.
+- **Saving state.** Sampler state, including 256-hash sketches only for undecided examples and templates, is saved on the run when a route's status changes, otherwise at most every five seconds and when the crawl ends.
+- **Results.** Confirmed routes are shown in the site map and listed in the scan's recon context. Grouping limits crawl visits and indexing only. The Test Lead can test other in-scope URLs and object IDs without first indexing every page, including records outside the crawl sample for access control, ownership, and business-logic checks. Matching layouts do not prove that records share access rules. Traffic and finding evidence retain the concrete URLs tested. Route-level coverage does not prove that every record in a group was tested. The default **Visit each URL** mode and Interactive SPA mode do not use this grouping.
+
+The exact link inventory lives in `DiscoveredTarget`, with link sightings in `TargetDiscovery` and direct responses in `TargetAccessObservation`. A link sighting records which account saw the link. It does not prove access or ownership. The crawler saves eligible links before sampling. Inventory reads use SQL filters and cursor paging rather than a fixed list in the lead prompt.
+
+Object checks use `ScanObligation` with an exact target, method, and ordered pair of accounts. A successful response under an identified account supplies the baseline for a comparison. The comparison keeps its own execution and evidence. Unknown access and missing ownership evidence remain inconclusive. Discovered links alone create no coverage work or page records.
+
+`web_workprogram.web_completion` counts applicable page checks and deliberately selected object checks. An exact object check attaches to a page check only when that page match is unambiguous. A selected check on an uncrawled target adds one separate unit. Pending child checks remain pending even when the page has an earlier covered result. Grouped rows are a display view and do not decide completion.
+
+Attack Surface expands each group into a searchable, paged list of exact links. OWASP Coverage expands selected object checks inside their route. Finding markers remain visible while other checks are pending. Saved crawl archives retain the inventory and provenance. Older archives cannot recover links that were never saved.
 
 Interactive mode also explores bounded, replayable browser workflows. It can
 select radio buttons, checkboxes, and select options, then follow controls that
@@ -616,6 +717,12 @@ selector heuristics miss. Credential values are kept out of this LLM call: the
 model returns named placeholders such as `{{credential.policy_number}}` and the
 crawler substitutes the real values locally.
 
+### Reusing a crawl (export, import, and saved crawls)
+
+`services/crawl_archives.py` serializes a run's crawl into an `aespa-crawl-export` archive. The archive holds pages, links, per-credential views, target intelligence, traffic, scanner sessions, OWASP applicability, and crawl activity, including workflow notes and retries. `import_into_run()` restores an archive into a new pending run with no crawl data. It checks that the archive's base URL matches the site, reconnects workflow retries to their original notes, rebuilds the recon summary, and seeds a fresh coverage workprogram. Coverage results are not copied.
+
+Saved crawls (`SavedCrawl`, `services/saved_crawls.py`) store such an archive, gzip-compressed, on the **site** instead of in a file. They are created from a run (`POST /api/test-runs/{id}/crawl/save`) or from an uploaded export file (`POST /api/sites/{id}/saved-crawls/upload`), and loaded with `POST /api/test-runs/{id}/crawl/load/{saved_id}`. A saved crawl keeps `source_run_id` only as a plain reference, so it outlives the run it came from. Saved crawls are deleted when their site is deleted. List endpoints never return the archive itself.
+
 ---
 
 ## 7. Dynamic Scan
@@ -631,10 +738,11 @@ The dynamic scan is an **autonomous agentic loop**: the LLM is given a toolkit a
 start_thinking_scan(run_id)
   └─ _do_thinking_scan(run_id)
        1. Load crawl data, prior findings, TargetIntelItems
-       2. Unless deterministic checks are disabled, run JS sink analysis (_analyse_js_sinks) — fetches each
-          discovered JS file (TargetIntelItem kind=script), regex-scans
-          for unsanitized innerHTML/outerHTML/document.write sinks,
-          saves TargetIntelItem(kind=xss_sink) and info-severity findings
+       2. On fresh ordinary Test Lead scans, run JS sink analysis (_analyse_js_sinks)
+          - reads discovered scripts and identifies possible unsafe rendering paths;
+          saves TargetIntelItem(kind=xss_sink), without creating findings.
+          This passive inventory still runs when deterministic checks are disabled.
+          SAST Validate skips it; Team runs it for the first member only.
        3. Authenticate → ScannerSession
        4. Build attack-surface projection (_build_thinking_context_from_recon_summary)
           — canonical routes, real parameters, access observations, evidence
@@ -646,6 +754,114 @@ start_thinking_scan(run_id)
           (TLS/SSL posture, auth matrix, IDOR matrix)
        └─ _do_agentic_thinking_loop(...)   ← main loop
 ```
+
+### Deep web DAST mode
+
+Deep is an optional web scan mode implemented in `services/deep_scan.py`. Quick,
+Standard, Full, and SAST Validate continue through the Test Lead flow described
+above. Deep takes a separate branch at the start of `_do_thinking_scan`.
+
+Deep builds a persistent queue from three sources:
+
+- deterministic `ScanObligation` rows derived from the crawl and traffic;
+- extra recon checks for routes, headers, CORS, browser components, and saved
+  interactive workflows;
+- open `ScanLead` copies imported from SAST.
+
+The planner builds all candidates, then groups coverage checks by canonical HTTP
+operation. The UI calls each grouped unit a Tester. A saved workflow, a site-wide
+recon check, or one imported SAST lead is also one tester. Individual vulnerability classes, inputs, coverage items,
+and identity comparisons are stored as child `DeepScanCheck` rows. The task limit
+is applied after grouping, with SAST and site-wide recon work placed ahead of the
+general operation inventory.
+
+The queue has stable fingerprints, priorities, attempt records, worker ownership,
+child check status, and direct finding links. Each tester starts with one saved
+baseline variant. Matching crawl traffic can complete that baseline without
+another request. After the baseline, the specialist model proposes a small set of
+distinct execution variants using the tester checks and shared evidence. Independent
+planner calls run concurrently under a configurable limit, and attack workers can
+start as soon as the first plan is saved. Provider RPM and TPM settings continue to
+pace the calls. The planner validates, limits, and deduplicates this JSON before saving it. A
+deterministic grouping by test type is used if the model output is unavailable or
+invalid. SAST testers always get an explicit live-validation variant.
+
+A configured pool of `Deep Attack Worker` agents claims variants one at a time.
+Each variant has an assigned purpose, identity requirements, a statement of how it
+differs from the others, and its own retry and resume checkpoint. Workers can read
+probe and confirmed-claim evidence produced by earlier variants in the tester.
+A new response signal can add one bounded confirmation variant when adaptive
+follow-up is enabled. Worker changes in direction are stored as pivot history.
+Workers use the existing specialist execution engine, so they keep
+the same scope checks, scanner policy, browser state replay, session vault, traffic
+provenance, finding write-up, and adversarial validation. Worker traffic is
+attached to the matching child coverage item through `ProbeExecution` and
+`CoverageEvidence` rows. HTTP, browser, and Python probes also update the matching
+`PageOwaspTest` cell while they run. Completed probes are promoted to covered at
+the end of the scan. A tester can link to several findings, and each link records
+the variant that produced it. Findings use the existing finding hook to update the
+affected page and OWASP category.
+
+Deep resume state is the queue rather than the Test Lead conversation checkpoint.
+When a user stops the scan, in-flight variant attempts are recorded as cancelled
+and return to `queued` without consuming the retry allowance. Their purpose,
+traffic references, and progress are retained. Completed variants remain terminal,
+and completed planning is not repeated. Resume starts the worker pool again and
+claims only the remaining queued variants.
+
+The Test Lead records queue construction, concurrent planning progress, worker
+assignment, and variant completion in the activity log. Work Queue also shows how
+many testers are planned and how many planner calls are active.
+
+Imported SAST leads remain unproven until live testing finishes. A linked finding
+marks the copied lead confirmed. A completed task without proof marks it
+inconclusive. Failed or unprocessed lead tasks leave the run incomplete.
+
+The web run Activity panel changes its secondary tabs based on the saved run mode:
+
+- ordinary DAST: Agents, Workers, Log;
+- Deep DAST: Agents, Work Queue, Log.
+
+Expanding a Deep Work Queue tester shows its variants, checks, and the saved live
+worker trace. A run cannot switch between Deep and non-Deep scanning after its
+first dynamic scan starts. Non-Deep modes can still be changed among Quick,
+Standard, Full, and SAST Validate.
+
+Deep worker count, task cap, step budget, initial and maximum variants, run-wide
+variant cap, adaptive follow-up threshold, baseline reuse, recon-task generation,
+and SAST-lead inclusion have separate settings. They do not modify the normal
+specialist-agent settings.
+
+Each saved worker step includes a readable description of the intended check,
+followed by its request or tool details and any observation. The Work Queue
+restores Deep worker traces from the scan log after navigation or restart.
+
+### Team web DAST mode
+
+Team is an experimental web scan mode that reuses the Standard Test Lead instead
+of the Deep worker engine. It runs three Test Lead conversations in sequence so
+state-changing browser workflows do not interfere with each other:
+
+1. The Test Co-ordinator runs the normal broad Standard scan and shared preflight
+   checks.
+2. The Pair Tester starts with a fresh conversation and browser context.
+   It uses a different route and test order and revisits high-risk authorization,
+   injection, authentication, and business-logic assumptions.
+3. The QA Tester starts with another fresh context, reads the
+   remaining coverage gaps and saved evidence, and tests unresolved gaps and
+   possible cross-route chains.
+
+The members share persisted routes, traffic, sessions, findings, coverage, and
+specialist handoffs. They do not share conversation history or mutable browser
+state. Findings use the normal deduplication path. JS sink analysis and
+deterministic site checks run for the first member only. Each member waits for its
+specialists and runs the normal finding review before the next member starts.
+
+Completed member markers use phase checkpoints. Stopping or pausing Team leaves
+the current Test Lead checkpoint in place, while resuming skips members that
+already finished. Starting a fresh Team scan clears the old member markers. A run
+cannot switch between Team, Deep, and the ordinary scan engine after its first
+dynamic scan starts. Team is hidden until enabled under Experimental Features.
 
 **TLS/SSL posture (deterministic).** Unless deterministic checks are disabled, any
 `https://` target runs `_run_tls_posture_module` first through
@@ -697,6 +913,16 @@ The loop terminates when:
 - The Execution Monitor reaches a bounded rejection limit after the Test Lead keeps
   retrying a hard-blocked duplicate or refuses an active Mentor Strategy Shift Contract.
 
+When OpenAI refusal recovery is on, the first Test Lead or web specialist request is unchanged.
+An explicit `cyber_policy` refusal from ChatGPT-plan or Codex starts one retry with a shorter
+prompt for the same assignment. The retry keeps completed tool results, scope checks, and
+the configured tools. Codex starts a new native thread for that retry. If the shorter retry
+is also refused, the loop tries once more with a fresh conversation built from the run brief
+or specialist handoff. It asks the model to use `context_tool` for saved scan data and choose
+another in-scope test. A further refusal leaves the step unresolved. The scan has no fixed
+refusal count limit.
+Other providers and other refusal types keep their existing behavior.
+
 The Execution Monitor is disabled by default and can be enabled in the Scanner settings.
 When enabled, `execution_monitor.py` fingerprints meaningful tool inputs while removing
 known transport noise. A second consecutive normalized duplicate invokes the run-scoped
@@ -725,7 +951,7 @@ checks and evictions are tagged `Session Validator`; completion challenges are t
 `Test Lead Completion Gate` rather than the generic `Completion_Policy`.
 
 `done` is mediated by a bounded policy rather than an open-ended completeness gate.
-An active session that has never been attempted may trigger one challenge, and Track
+An active session that has never been attempted may trigger one challenge, and Quick
 mode may trigger at most two compact live coverage rounds. A 401/403 counts as a
 session attempt and evicts that session. The same completion condition can therefore
 never reject `done` indefinitely.
@@ -734,20 +960,25 @@ never reject `done` indefinitely.
 
 | Action | Description |
 |---|---|
-| `http` | Issue an arbitrary HTTP request (method, URL, headers, body) |
+| `http_request` | Issue a scoped HTTP request with session, page, and coverage attribution |
 | `execute_python` | Run bounded Python computation; target HTTP is available only through the policy-enforcing `aespa_runtime` broker and is traffic-logged |
-| `browser` | Playwright commands including `goto`, `fill`, `click`, `wait`, `snapshot`, read-only `inspect_element`, and non-forced `recover_click` |
-| `jwt` | Forge a signed HS256 JWT from a discovered secret |
+| `browser` | Playwright commands including navigation, form controls, snapshots, read-only inspection, recovery clicks, and exact DOM checks |
+| `forge_jwt` | Forge a signed HS256 JWT from a discovered secret |
 | `decode_jwt` | Decode a JWT's header and payload; optionally verify the HS256 signature against a known secret |
 | `credential_check` | Test a login URL with candidate credentials |
-| `finding_write` | Record a confirmed vulnerability |
+| `write_finding` | Record a confirmed vulnerability |
+| `remove_finding` | Remove a finding written in error, duplicated, or invalidated |
 | `update_lead` | Record the outcome (`confirmed`/`dismissed`/`inconclusive`) of investigating a SAST lead; a confirmed lead with no linked finding is auto-promoted to one. Present only when SAST leads are in context (see §17) |
 | `agent_dispatch` | Dispatch a Specialist Agent to deep-dive on a high-confidence lead (see §8) |
-| `tool` | Call a read-only context tool (see below) |
+| `context_tool` | Call a read-only context command (see below) |
+| `skip_coverage` | Resolve an inapplicable or technically blocked web coverage obligation |
 | `done` | Finish the scan with a summary |
 
-The existing `coverage_mode` selector has three values: `track` (Quick), `enforce`
-(Full), and `sast_validate` (SAST Validate). SAST Validate does not seed or resolve
+The web `coverage_mode` selector has six values: `track` (Quick), `standard`
+(Standard), `enforce` (Full), `deep` (Deep), `team` (Team), and
+`sast_validate` (SAST Validate). Standard
+requires the configured percentage of applicable coverage cells before accepting
+completion. SAST Validate does not seed or resolve
 normal coverage obligations, dispatch specialists, schedule Burp work, or run the
 general post-scan reporting pass. It loads every open imported lead as a compact
 index, requires the Test Lead to fetch each lead's complete evidence with
@@ -792,6 +1023,10 @@ off by default; guided login remains visible when it requires user interaction.
 
 The scanner follows same-scope redirects one hop at a time. It does not retry a
 blocked request with payload mutations just to obtain a successful status.
+Explicit named-session requests isolate both the shared client's cookie jar and
+default credential headers for the duration of the request. In particular,
+`use_session="anonymous"` cannot inherit the primary session's Authorization,
+Cookie, or custom credential headers through HTTPX's default-header merge.
 
 ### Context tools (read-only reconnaissance)
 
@@ -804,9 +1039,14 @@ targeted scan round will change the next action.
 |---|---|
 | `site_map` | Filtered list of crawled pages |
 | `page_detail` | Full metadata, flags, text for a page |
+| `run_status` | Current crawl, scan, phase, and finding state |
+| `specialist_status` | Current specialist handoffs |
 | `history_search` | Query prior HTTP requests/responses by keyword |
 | `finding_list` | Already-confirmed findings |
-| `target_inventory` | Extracted endpoints, forms, inputs, IDs, scripts, and pre-identified `xss_sink` items (unsanitized innerHTML sinks found by static JS analysis) |
+| `lead_list` | Imported SAST leads and their status |
+| `lead_detail` | Full evidence, traces, validation data, and attack path for an imported lead |
+| `target_inventory` | Extracted endpoints, forms, inputs, IDs, scripts, and possible XSS rendering paths recorded as `xss_sink` items. Source analysis alone does not prove exploitable XSS. |
+| `search_assets` | Search-oriented view of the web crawl inventory |
 | `traffic_search` | Search the HTTP traffic log |
 | `endpoint_detail` | Combined page + intel + traffic for a URL |
 | `compare_responses` | Diff two prior responses |
@@ -814,7 +1054,6 @@ targeted scan round will change the next action.
 | `auth_matrix` | Test a set of endpoints across auth boundaries |
 | `extract_entities` | Parse URLs, IDs, JWTs, error strings from text |
 | `coverage_gaps` | Compact live list of high-value uncovered web route/category cells |
-| `lead_detail` | Full evidence, traces, validation data, and attack path for an imported SAST lead owned by the current run |
 
 ### Web OWASP Coverage (OWASP Top-10 matrix)
 
@@ -827,8 +1066,35 @@ Input-bearing A03 cells additionally persist class-level states in `test_classes
 - `seed_web_workprogram(run_id)` creates the cells; it runs synchronously when a dynamic scan starts (and on resume) via `api/scan.py`, and can be re-triggered through `POST /api/test-runs/{id}/coverage/seed`.
 - `_make_web_post_probe_fn` / `_make_web_post_finding_fn` update cells as the agentic loop probes pages and writes findings (findings flip the cell to `finding` and record the `ScanFinding.id`).
 - `web_route_inventory.enrich_dynamic_route` classifies routes first observed during the dynamic scan from their request/response evidence. It OR-merges deterministic and LLM-derived applicability into the canonical `CrawledPage`, reseeds newly applicable cells, and leaves the current probe hook to mark the exercised category `in_progress`. Browser-observed routes are enriched too; passive JavaScript route literals remain target intelligence until actively reached.
-- `TestRun.coverage_mode` selects **Track** (`track`, the Quick mode), **Enforce** (`enforce`, the Full mode), or **SAST Validate** (`sast_validate`). In Enforce mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop, classifying each `(page, category)` as probe-worthy or skippable up to a budget. SAST Validate does not use the work program; it validates only open imported SAST leads and retains the HTTPS TLS posture check.
-- `get_web_coverage_matrix(run_id)` powers the **OWASP Coverage** UI tab (`GET /api/test-runs/{id}/coverage`).
+- `TestRun.coverage_mode` selects **Quick** (`track`), **Standard** (`standard`), **Full** (`enforce`), or **SAST Validate** (`sast_validate`). Standard requires the configured coverage percentage. In Full mode `_enforce_web_coverage_loop` drives every still-uncovered cell to a terminal state after the main loop. SAST Validate does not use the work program; it validates only open imported SAST leads and retains the HTTPS TLS posture check.
+- `get_web_coverage_matrix(run_id)` powers the coverage view inside the **Attack Surface & Coverage** tab (`GET /api/test-runs/{id}/coverage`).
+
+OWASP Coverage has **Pages** and **Workflows** tabs. The Pages tab keeps the
+page-by-category matrix and progress from applicable page and selected object checks. The Workflows tab reads
+workflow inventory and `WorkflowCoverageItem` rows from
+`GET /api/test-runs/{id}/workflow-coverage`. Crawl progress is separate from
+security check status. Reaching a page confirms the function or state was
+observed, not that a transaction was completed or security was tested.
+The Test Lead records a workflow result with expected and observed behavior and
+scan traffic IDs. Full mode keeps an untested or inconclusive workflow check
+open; a concrete blocker can close the check without counting it as covered.
+Standard mode lists the checks for the Test Lead but keeps its page coverage
+percentage unchanged. Deep mode creates named workflow testers from these same
+rows. The Test Lead's `coverage_gaps` view includes remaining workflow checks
+alongside page gaps, and the Full mode checklist names those checks.
+
+### Outdated JavaScript libraries (Retire.js)
+
+**Files**: `src/aespa/services/js_libraries.py`, `src/aespa/services/retire_repository.py`
+
+A deterministic module (`_run_outdated_js_module` in `scanner.py`) runs with the other site-level checks, including in passive mode. It reads script responses captured during the crawl, re-fetches in-scope scripts whose stored body was truncated (CDN scripts are judged from their URL and stored body only), and asks the live browser page for library versions. Versions are matched against the Retire.js list, and each outdated library version becomes one A06 finding naming the matched CVEs, where the version was found, and the version to upgrade to.
+
+SAST uses the same detector: Deep scans match npm/bower manifests and lockfiles from the repository model and scan vendored `.js` files; Light scans run the same checks after discovery (`browser_library_candidates`). Results become pending leads that go through normal validation.
+
+- The list is the Retire.js `jsrepository-v6.json`. A copy ships in `services/data/retire/` and is refreshed by the weekly `update-retire.yml` workflow (`scripts/update_retire_repository.py`).
+- When `retire_auto_update` is on, `retire_repository.ensure_fresh()` downloads the latest list into `<data_dir>/retire/` at scan start if the cached copy is more than a day old, using the ETag to skip unchanged files. A download is used only after `validate()` accepts it; any failure leaves the current copy in place.
+- **Settings → Global → Vulnerable Libraries** shows which copy is in use (`GET /api/settings/retire-list`) and has a **Refresh now** button (`POST /api/settings/retire-list/refresh`) that downloads the latest list immediately, even when automatic updates are off.
+- Supported extractors: `uri`, `filename`, `filecontent`, `filecontentreplace`, `hashes`, and browser-only `func` expressions. Retire.js `ast` extractors are not used, and the rare pattern Python cannot compile is skipped. Libraries that share a package (jQuery UI and its widgets) are reported together.
 
 ---
 
@@ -858,7 +1124,7 @@ A.L.I.C.E. (Interactive chat — user-directed, runs as persistent background ta
   └── Can dispatch Specialist Agents via agent_dispatch tool
   └── Can write findings directly via write_finding tool
 
-Burp active scans  (dispatched from scanner, surfaced in Agents panel)
+Burp active scans  (bundled extension, surfaced in Agents panel when active)
 Reporting agent    (post-scan LLM pre-screen pass over new findings)
 ```
 
@@ -866,7 +1132,7 @@ Reporting agent    (post-scan LLM pre-screen pass over new findings)
 
 The Test Lead calls `agent_dispatch` when a promising lead needs deeper confirmation or impact testing. The scanner can also create a handoff automatically from a small set of strong request and response signals. An issue that is already fully proven is written directly without a specialist.
 
-Each handoff is stored in `SpecialistHandoff` and owns a vulnerability class, canonical route, optional parameter, and session. While that handoff is queued or running, the Test Lead cannot probe or write the same scope. This keeps it working through other coverage gaps. Completed outcomes are attached to the next Test Lead tool result. If both agents support the same finding, the specialist evidence is merged into the existing finding.
+Each handoff is stored in `SpecialistHandoff` and owns a vulnerability class, canonical route, canonical page ID for web scans, optional parameter, and session. The exact target URL is retained separately as request evidence. Traffic, coverage, specialist dispatch, and findings use the same page resolver so query payloads remain attached to the crawled route instead of creating separate site-map pages. While that handoff is queued or running, the Test Lead cannot probe or write the same scope. This keeps it working through other coverage gaps. Completed outcomes are attached to the next Test Lead tool result. If both agents support the same finding, the specialist evidence is merged into the existing finding.
 
 **Dispatch flow:**
 
@@ -883,12 +1149,13 @@ Test Lead calls agent_dispatch
      )
        1. Build opening brief from the explicit dispatch payload
        2. Run focused agentic loop using SPECIALIST_AGENT_TOOLS
-          (no agent_dispatch — no recursive dispatch; no JWT/register tools)
+          (no recursive dispatch or account-registration tools;
+           crypto specialists also receive forge_jwt and decode_jwt)
        3. Write findings directly to DB under the same run_id
        4. Emit specialist_step + agent_status events throughout
 ```
 
-Specialists can also be triggered alongside Burp active scans via the `trigger_specialist_on_burp` config flag.
+The Burp extension can request a specialist alongside an active scan when its specialist setting is enabled.
 
 **`SpecialistAgentConfig` fields:**
 
@@ -896,7 +1163,7 @@ See [§4 Configuration](#4-configuration) for the full `SpecialistAgentConfig` f
 
 ### Adversarial validator
 
-After a normal web finding is written, the validator service (`validator.py`) can run an independent check. The validator is told to try to disprove the finding and records the evidence it used. A timeout, provider error, missing verdict, or malformed verdict is saved as **unconfirmed**, never as confirmed; the finding can be retried from the finding row's **Retry validation** button. Applications SAST validation keeps its existing lead workflow and does not run this separate validator.
+After a normal web finding is written, the validator service (`validator.py`) can run an independent check. The validator is told to try to disprove the finding and records the evidence it used. A timeout, provider error, missing verdict, or malformed verdict is saved as **unconfirmed**, never as confirmed; the finding can be retried from the finding row's **Retry validation** button. Systems SAST validation keeps its existing lead workflow and does not run this separate validator.
 
 Manual finding validation uses the same inline validator as scan-time findings. Each clicked finding is tracked separately, repeated clicks for the same finding are ignored, and more findings can be added while validation is already running. The bulk **Validate Issues** action processes both `unvalidated` findings and `unconfirmed` findings that need another attempt. Manual validators run concurrently up to `end_scan_max_concurrent`; the run-level status and stop action cover both these inline tasks and the managed end-of-scan batch.
 
@@ -908,7 +1175,7 @@ Validation outcomes:
 
 ### Post-scan review (Reporting agent)
 
-After the dynamic scan loop ends, a final **Reporting agent** pass (`_run_post_scan_llm_review`) reviews all `unvalidated` findings created in the current run in batches of 10. Findings where the evidence is too vague, the payload is reflected as plain text without execution, or the response status contradicts the claim are moved to `low_confidence`. This is a lightweight pre-screen; per-finding adversarial validation runs separately.
+After the dynamic scan loop ends, a final **Reporting agent** pass (`_run_post_scan_llm_review`) reviews all `unvalidated` findings created in the current run in batches of 10. Batches run concurrently up to the saved DAST LLM request limit. A failed batch leaves its findings unvalidated, and all batch calls settle before the review finishes. Findings where the evidence is too vague, the payload is reflected as plain text without execution, or the response status contradicts the claim are moved to `low_confidence`. Per-finding validation runs separately.
 
 ### Recon summary
 
@@ -954,64 +1221,88 @@ The LLM service provides a **provider-agnostic client** that maps onto:
 
 | Provider | SDK used |
 |---|---|
+| `claude_cli` | Installed Claude Code CLI, using its signed-in account |
 | `factory_droid` | Official Factory Droid SDK, using the account signed in through Droid CLI |
 | `github_copilot` | Official GitHub Copilot SDK, using Copilot CLI authentication or a GitHub user token |
 | `openai_codex` | External Codex app-server, using the local Codex CLI's default ChatGPT login |
+| `openai_chatgpt_plan` | OpenAI Responses API with the selected signed-in ChatGPT account |
+| `google_antigravity` | Local Antigravity CLI/SDK adapter |
 | `anthropic` | `anthropic` Python SDK (native tool-use supported) |
 | `openai` | `openai` Python SDK |
-| `google` | `google-generativeai` |
+| `google` | `google-genai` with a Gemini Developer API key |
+| `google_vertex` | `google-genai` for Gemini models and the `openai` SDK for other publisher models, using Google Cloud Application Default Credentials |
 | `bedrock` | `boto3` / `anthropic` Bedrock adapter |
-| `bedrock_mantle` | `openai` SDK with Bedrock Mantle endpoint (`project_id` sent as `OpenAI-Project` header) |
+| `bedrock_mantle` | `anthropic` SDK for Claude Messages; `openai` SDK for Responses or Chat Completions, selected by model (`project_id` sent as `anthropic-workspace-id` or `OpenAI-Project`) |
 | `azure_openai` | `openai` SDK with Azure base URL |
+| `azure_foundry` / `azure_foundry_openai` | `openai` SDK for Azure Foundry endpoints |
+| `azure_foundry_anthropic` | `anthropic` SDK for Azure Foundry Claude endpoints |
 | `openai_compatible` | `openai` SDK with custom base URL |
 | `openrouter` | `openai` SDK with OpenRouter base URL |
+
+The Google Vertex AI provider saves only the Google Cloud project and location. It reads Application Default Credentials from the AESPA process and does not copy credentials into the database. Gemini models use Vertex `generateContent`. All other serverless publisher models use Vertex's OpenAI-compatible Responses endpoint. User-managed endpoint resources, tuned models, and self-deployed Model Garden models are rejected. Model discovery lists Google publisher models available in the configured project and location; compatible Model-as-a-Service publisher IDs can be entered manually.
 
 When both the provider token and username are blank, the GitHub Copilot SDK reads Copilot CLI's real home directory and uses the account selected there. A configured username resolves that account's stored Copilot CLI credential, while an explicit provider token takes precedence over both choices. The provider form lists locally authenticated Copilot accounts and can launch Copilot CLI's device-code login command; AESPA exposes only the verification URL, one-time code, completion state, and account login to the browser, while Copilot CLI stores the resulting credential in its normal credential store. Named-account and explicit-token sessions get a temporary Copilot home. Every path keeps scans isolated: they use a temporary working directory, remove Copilot's repository environment from the prompt, disable instructions, skills, memory, hooks, embeddings, telemetry, host Git operations, and session storage, and expose only the custom tools AESPA explicitly registers. One Copilot session stays alive for the full AESPA agent conversation, allowing the provider to reuse conversation state and prompt caches. When Copilot requests a tool, its SDK handler pauses while AESPA applies the existing scope checks, execution monitoring, checkpointing, and tool-result limits. AESPA returns the real result to that handler and the same Copilot session continues.
 
 Copilot usage events arrive through the SDK's background JSON-RPC callback, so each callback is bound explicitly to the AESPA run that created the session. AESPA records AI credits, model-call counts, token/cache details, and legacy premium requests when GitHub supplies them. The latest available Copilot allowance percentage and reset date are also included in the run telemetry. AESPA waits briefly for the ephemeral usage event before returning or closing a model turn so final-call usage is not lost.
 
-### Independent monthly statistics
+### Independent usage statistics
 
-In addition to the run-level `token_usage_json`, `services/statistics.py` records every provider usage event in an independent monthly ledger. Rows are grouped by the local calendar month, canonical transport provider, and exact model string, while also retaining the endpoint base URL captured at call time. This means deleting a scan or changing a model setting cannot remove historical usage. An OpenRouter endpoint configured through the OpenAI-compatible adapter is labelled as OpenRouter. Input is normalized to mean uncached input; provider adapters subtract cached subsets only for APIs whose input counter includes them. The Statistics page can download the LiteLLM model price map, edit monthly prices, and estimate token and native-credit costs. Statistics reset deletes usage rows but keeps downloaded and manual price data.
+In addition to the run-level `token_usage_json`, `services/statistics.py` records every provider usage event in independent monthly and daily ledgers. Monthly rows keep the editable price history and endpoint base URL. Daily rows keep the local date, provider, model, service tier, and usage counters. Deleting a scan or changing a model setting does not remove these usage rows. An OpenRouter endpoint configured through the OpenAI-compatible adapter is labelled as OpenRouter. Input is normalized to mean uncached input; provider adapters subtract cached subsets only for APIs whose input counter includes them.
+
+`GET /api/statistics/llm` defaults to a monthly view and still accepts `month=YYYY-MM`. `view=all_time` returns every monthly row. `view=daily` and `view=weekly` use `date=YYYY-MM-DD` as an anchor; weeks run Monday through Sunday. `view=custom` accepts inclusive `start` and `end` dates. Date-range rows use daily counters and the corresponding monthly price, so changing a monthly price updates their estimates. `legacy_months` lists months with usage recorded before the daily ledger; that older usage remains in monthly and all-time totals but cannot be assigned to a date. Statistics reset deletes both usage ledgers while keeping downloaded and manual price data.
 
 Factory Droid uses the installed CLI's encrypted login state; AESPA never reads or stores its credential. The settings endpoint opens a short SDK session and uses `initialize_session().available_models` as the account-specific model catalog, including custom models. Each active AESPA message list owns an isolated persistent Droid session. All sessions use the same empty `aespa-droid-workspace` temporary directory so Factory groups them under one UI project instead of creating a project per loop. The child receives only an environment allowlist needed for CLI authentication, networking, and locale; built-in skills and non-AESPA tools are denied.
 
 Codex uses the same subscription-provider lifecycle through `services/codex_provider.py`, but AESPA starts the user's separately installed `codex app-server` and communicates over JSONL JSON-RPC. The child uses the normal Codex CLI home, including an explicitly configured `CODEX_HOME`, so it automatically uses the CLI's default ChatGPT login when one exists. It still runs in an empty working directory and receives only the environment values needed for CLI authentication, networking, and certificates. Codex dynamic tools are experimental and are required for scans; an incompatible CLI produces an upgrade error. Model discovery, account status, allowance windows, and manual login/logout are exposed through Settings. Codex token and prompt-cache counters are recorded, but subscription usage is never converted into a dollar estimate.
 
+The ChatGPT plan provider uses the account selected in Settings. It combines the account's model list with small requests that verify models missing from that list. For known models, Settings uses OpenAI's published context and output sizes. The output budget helps AESPA plan how much context to keep; ChatGPT plan requests do not accept the `max_output_tokens` field.
+
 Codex app-server advertises dynamic tools at thread start but does not provide a per-turn `tool_choice` field. AESPA therefore enforces the scan contract in the adapter. A prose-only completion receives a bounded correction asking for exactly one AESPA tool. Messages that say an advertised AESPA tool is unavailable replace the Codex thread, while unavailable target infrastructure remains ordinary scan evidence. Only recovery exhaustion reaches the shared agent loop as a no-tool response.
 
 Droid tool calls pass through a minimal authenticated loopback MCP relay. The relay advertises only the current AESPA tool schemas and suspends each call while AESPA performs its existing validation, scope checks, execution, checkpointing, and result truncation. Supplying the canonical `tool_result` resumes the same Droid session. A checkpoint restored into a new process starts a fresh session seeded from the canonical message history. Factory-reported input, output, cache-read, cache-write, and Droid credit counters feed normal AESPA telemetry. AESPA records per-turn deltas from Droid's cumulative session counters, so persistent sessions preserve prompt-cache reporting without double-counting tokens or credits.
 
-Structured outputs such as probe lists, finding objects, and page analysis are requested as JSON or produced through tool calls. AESPA does not parse free-form model text with regular expressions.
+Structured outputs such as probe lists, finding objects, and page analysis are usually requested as JSON or produced through tool calls. Some older paths still parse constrained text replies, including the post-scan ACCEPT/LOW_CONFIDENCE review.
 
 ### Agent tool sets
 
 Different agent roles receive different tool sets:
 
 - **Test Lead** — full tool set including `agent_dispatch`, `jwt`, `credential_check`, `browser`, `http`, all context tools
-- **Specialist** — `SPECIALIST_AGENT_TOOLS`: `http`, `browser`, context tools; no `agent_dispatch` (prevents recursive dispatch), no JWT/credential/register tools (specialist is narrowly focused)
+- **Specialist** - HTTP, browser, Python, context lookup, finding creation, and completion tools. Specialists cannot dispatch more agents or use credential/account-registration tools. Crypto specialists additionally receive `forge_jwt` and `decode_jwt` through `get_specialist_tools("crypto")`.
 - **Adversarial validator** — purpose-built prompt and tool set focused on re-running and disproving a specific finding
 
 ### WSTG skills
 
-The LLM service dynamically selects a subset of OWASP Web Security Testing Guide (WSTG) technique descriptions relevant to the target's attack surface and injects them into the Test Lead's system prompt. This gives the scanner domain-specific testing guidance without overloading the context with irrelevant techniques.
+The LLM service dynamically selects a subset of OWASP Web Security Testing Guide (WSTG) technique descriptions relevant to the target's attack surface and adds them to the Test Lead's first user message. This gives the scanner testing guidance for the discovered routes. The shorter OpenAI retry leaves those broad examples out while keeping the route and input inventory.
 
-Vision support (when `enable_vision=true`) attaches base64-encoded Playwright screenshots to prompts, giving the LLM visual context about what a page looks like.
+Vision support (when `use_vision=true`) attaches base64-encoded Playwright screenshots to prompts, giving the LLM visual context about what a page looks like.
+
+### Context limits and compaction
+
+Before each tool-using agent turn, AESPA estimates the complete request, including the system prompt, tool definitions, messages, reasoning blocks, structured tool data, and image allowances. It reserves a safety margin and an output allowance inside the model's configured context window.
+
+When the request is too large, completed older tool exchanges are replaced with one bounded context journal. Existing journals from earlier checkpoints are merged into that journal instead of being appended indefinitely. AESPA keeps recent complete tool-call and tool-result pairs when they fit, but can remove all completed exchanges when necessary. The initial scan brief and any exchange that is still incomplete remain intact. Full findings, traffic, coverage, and other scan evidence stay in the database and can be retrieved again through context tools.
+
+Bedrock thinking blocks carry signatures tied to the preceding conversation. Compaction removes those blocks because the earlier messages have changed. Resuming an older compacted checkpoint also removes its stale thinking blocks before the next request. New thinking blocks can then be replayed against the shortened conversation.
+
+If the compacted request fits only with a smaller response allowance, AESPA creates a request-only model configuration with a reduced `max_tokens` value. Saved model settings are not changed. Plain completion calls apply the same context budget and trim variable user content while preserving their system instructions. AESPA raises a context-limit error only when the fixed request and minimum response allowance cannot fit.
 
 ### Prompt caching
 
-The LLM service uses Anthropic prompt caching for large, repeated context blocks (crawl summaries, system prompts). This significantly reduces token usage on multi-step dynamic scans where the same context is sent across many loop iterations.
+The LLM service uses Anthropic prompt caching for large, repeated context blocks (crawl summaries, system prompts). Vertex-hosted Grok conversations receive a stable cache-routing key derived from the model, system instructions, tool set, and opening message. The key stays unchanged as the agent appends turns, while separate Test Lead, Specialist, and Validator conversations use different keys. AESPA also requests and replays Grok's encrypted reasoning output because Vertex AI does not support stateful response chaining for these models. Response-only metadata is removed before replay so the saved output remains valid as Vertex input. This keeps the earlier prompt prefix unchanged across tool steps and improves cache reuse during multi-step scans. Each response records input, output, cached and uncached token counts, cache-hit percentage, safe fingerprints for the requested and echoed cache keys, and the provider system fingerprint in the LLM response log and persisted scan telemetry. These diagnostic entries do not appear in the live activity feed. The cache key itself is never logged.
 
 ### Upstream proxy
 
-All LLM SDK clients (GitHub Copilot, Anthropic, OpenAI, Azure, OpenRouter, Bedrock) honour an optional upstream proxy URL injected via a `ContextVar` (`_llm_proxy_var`). Copilot receives this through its child-process `HTTP_PROXY` and `HTTPS_PROXY` environment. The direct HTTP clients use the proxy configuration described in `llm.py`.
+LLM SDK clients honour the saved application proxy and CA bundle. Bedrock credential refresh and model discovery use those settings too. Direct model discovery, model metadata, and ChatGPT sign-in requests use the same settings. CLI providers receive the proxy and CA path in their child-process environment. The CLI decides which certificate environment variables it supports. Scanner session checks use the testing proxy and CA bundle; Retire.js list updates use the testing CA bundle.
 
 ### Rate Limiting & Pacing
 
-To prevent exceeding upstream LLM API limits (which can cause active scans to fail or encounter transient errors), `llm.py` implements a provider-level **Rate Limiting & Pacing** layer:
+To prevent exceeding upstream LLM API limits (which can cause active scans to fail or encounter transient errors), `llm.py` implements a model-level **Rate Limiting & Pacing** layer:
 
-- **Token Bucket Algorithm:** Uses an asynchronous token-bucket rate limiter (`AsyncTokenBucketLimiter`) linked to each unique `(provider, model)` pair.
-- **Coverage:** Pacing wraps **both** the non-agentic path (`_call` — page analysis, probe planning, reporting) **and** the agentic tool-using path (`_call_with_tools`, used by every dynamic / API / SAST / ALICE scan loop), so a configured `max_tpm` / `max_rpm` applies to the whole run, not just page analysis.
+- **Per-run concurrency:** DAST and SAST have separate maximum concurrent LLM request settings. The DAST limit covers web and API scan agents, including reporting. The SAST limit covers discovery and validation agents. These settings bound requests that are waiting on provider responses; provider TPM and RPM pacing still applies separately.
+
+- **Token Bucket Algorithm:** Uses an asynchronous token-bucket rate limiter (`AsyncTokenBucketLimiter`) linked to each unique provider connection and model pair.
+- **Coverage:** Pacing wraps **both** the non-agentic path (`_call` - page analysis, probe planning, reporting) **and** the agentic tool-using path (`_call_with_tools`, used by every dynamic / API / SAST / ALICE scan loop), so configured `max_tpm` / `max_rpm` values apply to every call using that provider and model pair.
 - **Estimated Pre-allocation:**
   - Before making an API request, the limiter estimates token usage (`estimate_tokens`) for prompt text (1.1x scaling of character count divided by 4) and vision payloads (765–1600 tokens depending on the provider). The agentic path flattens the running message history to estimate input size.
   - It also includes the configured `max_tokens` (or a 4096 default) for the model's response.
@@ -1024,40 +1315,13 @@ To prevent exceeding upstream LLM API limits (which can cause active scans to fa
 
 ## 10. Burp Suite Integration
 
-**File**: `src/aespa/services/burp_rest.py`
+**Files**: `extensions/builtin/burp_suite/`, `src/aespa/services/external_scans.py`
 
-When enabled, aespa can hand off targeted active scans to **Burp Suite Professional** via its REST API (default `http://127.0.0.1:1337`). This augments aespa's own probing with Burp's full active-scan engine for injection-class vulnerabilities.
+Burp Suite active scanning is a bundled extension. It is disabled by default and is configured on its Settings page, reached from the Extensions list. Existing Burp connection details, vulnerability class switches, API key, and specialist option are copied to the extension during database upgrade. The old Burp settings routes and table are removed.
 
-### Workflow
+The web scanner offers saved findings and HTTP investigation notes to registered `web.active_scanner` extensions. The Burp extension selects SQL injection, XSS, command injection, path traversal, SSRF, XXE, and SSTI candidates based on its settings. It launches a targeted Burp REST API scan, polls for issues, and returns normalized results. AESPA checks the target against the run's scope, suppresses duplicate scans, saves findings with `finding_source="burp_active_scan"`, and emits activity events. Existing authenticated cookies and headers are passed to the extension for the target scan.
 
-```
-Finding written by aespa scanner
-  └─ _finding_burp_vuln_class(finding)
-       • Maps finding to a Burp vulnerability class (sqli, xss, cmdi, etc.)
-       • Checks BurpRestApiConfig to see if that class is enabled
-  └─ _run_burp_active_scan_for_target(run_id, url, vuln_class)
-       1. burp_rest.launch_active_scan(config, url, cookies=..., extra_headers=...)
-            POST /v0.1/scan  →  returns integer task_id
-       2. burp_rest.wait_for_scan(config, task_id)
-            Polls GET /v0.1/scan/{task_id} with adaptive back-off:
-              • 0–60 s  →  every 5 s
-              • 60–180 s →  every 15 s
-              • 180–600 s → every 30 s
-            Returns when status ∈ {succeeded, failed, cancelled}
-       3. Normalised Burp issues → ScanFinding rows (finding_source = "burp_active_scan")
-```
-
-### Scope pinning
-
-Each Burp scan is scoped to the exact URL path prefix being tested so Burp does not re-crawl the whole site. Cookies and bearer tokens from the active `ScannerSession` are forwarded to Burp as custom headers so authenticated endpoints are tested with valid sessions.
-
-### Per-class routing
-
-Each vulnerability class can be toggled independently in `BurpRestApiConfig` (e.g. enable only SQLi and SSRF, skip XSS). The scanner also deduplicates Burp targets: if a `(run_id, url, vuln_class)` triple has already been dispatched in the current run, a second Burp scan is not launched.
-
-### Connection test
-
-`POST /api/settings/burp-rest-api/test-connection` probes `GET /v0.1/scan/0` and returns `{ok, message}`. A 404 from Burp counts as success (server is reachable; the scan ID just doesn't exist).
+Active scan tasks are tracked by run. Stopping a run or disabling the extension cancels in-flight polling. The extension can request a specialist scan alongside its own scan through a generic core callback. Check connection on the Burp settings page tests the REST API connection.
 
 ---
 
@@ -1070,11 +1334,17 @@ Each vulnerability class can be toggled independently in `BurpRestApiConfig` (e.
 Findings are deduplicated as they are written, on the dynamic finding-write path in `scanner.py`:
 
 1. **Title normalisation** — before a finding is persisted, `llm.normalize_finding_titles` asks the LLM to rewrite its title to a canonical form so near-identical findings (same vulnerability class, different parameter name) collapse to the same heading. ALICE findings skip this pass (`skip_normalize=True`) because they already carry specific, human-readable titles — see §15.
-2. **Exact-title deduplication** — `_dynamic_finding_exists` then rejects any finding whose (normalised) title already exists at the same URL for the run, so genuinely identical findings are not written twice.
+2. **Matching saved findings** — The scanner compares the normalised title and exact affected URL within the run. If the new finding has higher severity in the same OWASP category, it replaces the earlier report's title, evidence, rating, and write-up while keeping its finding ID and public reference. The updated finding is validated again. Lower-severity repeats are skipped. Specialist reports with matching severity can still add supporting evidence.
 
 ### Validation
 
 Each finding starts with `validation_status = unvalidated`. The adversarial validator agent (`validator.py`) re-runs the probe with a mandate to disprove the finding. See §8 for full detail.
+
+Dynamic and reporting-generated findings that claim unauthenticated access,
+missing authentication, or access without credentials pass an additional
+deterministic evidence gate before persistence. The supporting request must show
+that neither an Authorization header nor cookies were present on the wire; probe
+labels and natural-language notes are not accepted as proof of the actor.
 
 All findings carry a `finding_source` field that records their origin:
 
@@ -1103,7 +1373,7 @@ When the validator confirms a finding, `validator.py` tries to attach a **reprod
 
 **Files**: `src/aespa/api/`
 
-The API is a **FastAPI** application. All routes are async and use SQLModel sessions injected via `Depends`.
+The API is a **FastAPI** application with both synchronous and asynchronous route handlers. Database-backed routes generally use SQLModel sessions injected via `Depends`.
 
 ### Key route groups
 
@@ -1116,8 +1386,6 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/settings/code-execution` | `settings.py` | Get/set Python sandbox limits and allowed roles |
 | `/api/settings/code-execution/status` | `settings.py` | Report Docker and executor-image readiness |
 | `/api/settings/specialist-agent` | `settings.py` | Get/set specialist agent config |
-| `/api/settings/burp-rest-api` | `settings.py` | Get/set Burp Suite REST API config |
-| `/api/settings/burp-rest-api/test-connection` | `settings.py` | Test connectivity to Burp REST API |
 | `/api/settings/upstream-proxy` | `settings.py` | Get/set upstream proxy config |
 | `/api/settings/global-http-header` | `settings.py` | Get/set global custom HTTP header appended to scanner requests |
 | `/api/settings/reporting-debug` | `reporting_debug.py` | Get/set reporting prompt debug capture settings |
@@ -1137,7 +1405,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/test-runs/{id}/alice/status` | `alice.py` | Check whether an ALICE task is running |
 | `/api/test-runs/{id}/alice/sessions` | `alice.py` | `GET`/`PUT` chat session persistence |
 | `/api/traffic/` | `traffic.py` | Paginated HTTP traffic log |
-| `/ws/events/{run_id}` | `events.py` | WebSocket event stream |
+| `/api/test-runs/{run_id}/events` | `events.py` | SSE stream for web crawl and scan events |
 | `/api/api-collections/` | `api_collections.py` | CRUD for API collections; document upload and parse; endpoint and credential management |
 | `/api/api-collections/{id}/export` · `/api/api-collections/import` | `api_collections.py` | Export a collection (endpoints, credentials, metadata) as a JSON bundle and re-import it elsewhere |
 | `/api/api-collections/{id}/readiness` | `api_collections.py` | `POST` run · `GET` retrieve LLM gap analysis |
@@ -1154,20 +1422,21 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 | `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
 | `/api/sast-runs/{id}/leads` | `sast_runs.py` | List the *original* `ScanLead` rows for a SAST run (imported copies excluded) |
 | `/api/sast-runs/{id}/agent-log` | `sast_runs.py` | SAST agent activity log |
-| `/api/statistics/llm` | `statistics.py` | Monthly, provider/model-grouped LLM token and native-credit usage |
+| `/api/statistics/llm` | `statistics.py` | Monthly, all-time, and date-range LLM token and native-credit usage |
 | `/api/statistics/llm/prices/refresh` | `statistics.py` | Download the latest LiteLLM price map |
 | `/api/statistics/llm/prices` | `statistics.py` | Save a monthly or future price override |
-| `/api/statistics/llm` (`DELETE`) | `statistics.py` | Reset all usage months while retaining price data |
-| `/api/applications/` | `applications.py` | CRUD for applications, code components, ZIP snapshots, targets, explicit target component links, and code-to-target routing associations |
-| `/api/applications/{id}/campaigns/` | `applications.py` | Create/list/get/delete campaigns; `start`/`stop`/`resume`/`retry`/`continue` lifecycle actions |
-| `/api/applications/{id}/campaigns/{id}/status` | `applications.py` | Campaign progress (status, warnings, source/target member states) |
-| `/api/applications/{id}/campaigns/{id}/events` | `applications.py` | Live SSE stream (same event bus as web/API/SAST runs, scoped `run_kind="campaign"`) |
-| `/api/applications/{id}/campaigns/{id}/activity` | `applications.py` | Persisted campaign activity — merged, chronological `AgentLog`/`ScanLog` history (§18) |
-| `/api/applications/{id}/campaigns/{id}/activity/stream` | `applications.py` | Cursor-safe SSE replay-then-follow of the same activity feed — no fetch→subscribe gap (§18) |
-| `/api/applications/{id}/campaigns/{id}/connections` | `applications.py` | The campaign's cross-repository application map (`ComponentConnection` rows) |
-| `/api/applications/{id}/campaigns/{id}/mappings` | `applications.py` | Lead-target mapping proposals, enriched with lead/component context for review (§18) |
-| `/api/applications/{id}/campaigns/{id}/review` | `applications.py` | Submit approve/reject decisions for pending mappings |
-| `/api/applications/{id}/campaigns/{id}/findings` | `applications.py` | Combined findings across every child run, with resolved component provenance (§18) |
+| `/api/statistics/llm` (`DELETE`) | `statistics.py` | Reset all usage while retaining price data |
+| `/api/systems/` | `systems.py` | CRUD for systems, code components, ZIP snapshots, targets, explicit target component links, and code-to-target routing associations |
+| `/api/systems/{id}/campaigns/` | `systems.py` | Create/list/get/delete campaigns; `start`/`stop`/`resume`/`retry`/`continue` lifecycle actions |
+| `/api/systems/{id}/campaigns/{id}/status` | `systems.py` | Campaign progress (status, warnings, source/target member states) |
+| `/api/systems/{id}/campaigns/{id}/events` | `systems.py` | Live SSE stream (same event bus as web/API/SAST runs, scoped `run_kind="campaign"`) |
+| `/api/systems/{id}/campaigns/{id}/activity` | `systems.py` | Persisted campaign activity: merged, chronological `AgentLog`/`ScanLog` history (§19) |
+| `/api/systems/{id}/campaigns/{id}/activity/stream` | `systems.py` | Cursor-safe SSE replay-then-follow of the same activity feed, with no fetch-to-subscribe gap (§19) |
+| `/api/systems/{id}/campaigns/{id}/connections` | `systems.py` | The campaign's cross-repository system map (`ComponentConnection` rows) |
+| `/api/systems/{id}/campaigns/{id}/mappings` | `systems.py` | Lead-target mapping proposals, enriched with lead/component context for review (§19) |
+| `/api/systems/{id}/campaigns/{id}/validation-cases` | `systems.py` | Resolved paths, readiness blockers, live bindings, and execution outcomes for approved mappings (§19) |
+| `/api/systems/{id}/campaigns/{id}/review` | `systems.py` | Submit approve/reject decisions for pending mappings |
+| `/api/systems/{id}/campaigns/{id}/findings` | `systems.py` | Combined findings across every child run, with resolved component provenance (§19) |
 
 ---
 
@@ -1175,7 +1444,7 @@ The API is a **FastAPI** application. All routes are async and use SQLModel sess
 
 The web UI is a **single-page application** served from `src/aespa/web/`. It communicates with the backend over:
 - **REST** for CRUD and control operations
-- **WebSocket** (`/ws/events/{run_id}`) for real-time progress updates
+- **Server-Sent Events (SSE)** for real-time progress updates. Web runs use `/api/test-runs/{run_id}/events`; API and SAST runs have their own `/events` routes. The frontend subscribes through `EventSource`.
 
 ### Telemetry rendering (`TokenUsageBar`)
 
@@ -1183,15 +1452,14 @@ Detail views for Web runs, API runs, and SAST runs embed the `TokenUsageBar` com
 
 The sidebar's **Stats → Usage** page is independent of those detail views. It shows one month at a time, with totals and a provider/model table for uncached input, output, cache reads, cache writes, native credits, and estimated USD cost. It uses the operating system's local month boundary and asks for confirmation before clearing all usage months.
 
-### WebSocket event types (emitted by `services/events.py`)
+### SSE event types (emitted by `services/events.py`)
 
 Events are emitted at key points during crawling and scanning:
 
 - Crawl progress (pages discovered, depth reached)
 - Thinking-scan step (action taken, tool called, finding written)
 - Finding created / updated
-- Task graph changes (hypothesis seeded, task status update)
-- `agent_status` — emitted by every agent type (Test Lead, Specialist, Burp, Validator, Reporting) with `agent_id`, `role`, `status`, `current_task`, `outcome`; persisted to `ScanLog` so the Agents panel survives page reload
+- `agent_status` - emitted by scan agents with `agent_id`, `role`, `status`, `current_task`, and `outcome`; persisted to `AgentLog` so the Agents panel survives page reload
 - `specialist_step` — per-step event from a running specialist (action type, method, URL, hypothesis)
 - `scanner_phase` — scanner lifecycle events (scan started, JS sink analysis, stored XSS sweep, post-scan review, etc.)
 - `llm_response` / `llm_protocol` scanner phases persist provider/model, native stop reason, usable block counts, context size, retry state, and safe Bedrock request/usage metadata
@@ -1206,57 +1474,70 @@ Events are emitted at key points during crawling and scanning:
 
 | Tab | Content |
 |---|---|
-| **Status** | Scan controls, run metadata, `TokenUsageBar` telemetry; sub-tabs: **Agents** (all agent rows with status), **Specialists** (specialist-only thread view), **Log** (raw timestamped event feed) |
+| **Status** | Scan controls, run metadata, `TokenUsageBar` telemetry; sub-tabs: **Agents**, **Workers** (specialist threads for ordinary scans) or **Work Queue** (Deep testers and worker traces), and **Log** |
 | **Site Map** | Interactive graph of `CrawledPage` nodes and `PageLink` edges |
-| **Intelligence** | `TargetIntelItems` — endpoints, forms, inputs, IDs, scripts, `xss_sink` items |
 | **Attack Surface & Coverage** | Live evidence projection — canonical routes/methods/parameters, access observations, workprogram gaps, provenance, signals, and observed technologies |
 | **Sessions** | `ScannerSession` records — auth cookies and tokens captured during crawl/scan |
 | **Findings** | `ScanFinding` list sorted by severity, with CVSS scores, evidence, validation controls, and export/import (markdown) |
 | **Traffic Log** | All `TrafficEntry` records (request + response) |
-| **OWASP Coverage** | Web OWASP Top-10 coverage matrix (`PageOwaspTest` cells), updated live; Track/Enforce mode |
 | **SAST Leads** | Import a completed SAST run's leads into this run (dropdown), then list the imported copies; per-row delete, clear-all, and export (markdown). Originals on the SAST run are untouched |
-| **A.L.I.C.E.** | Interactive chat panel; supports multiple named sessions (tabs); see §15 |
+
+ALICE is an expandable panel on the run screen rather than a separate primary tab.
+It supports multiple named chat sessions; see section 15.
 
 #### API collection view
 
 | Panel | Content |
 |---|---|
-| **Documents** | Uploaded spec/source files with parse status and re-parse trigger |
+| **Manage files page** | Uploaded spec/source files with parse status and re-parse trigger |
 | **Endpoints** | Parsed `ApiEndpoint` rows with scope toggles and readiness indicators |
 | **Credentials** | `ApiCredential` rows discovered from documents or entered manually |
-| **Readiness** | LLM gap-analysis output (auth coverage, missing data, per-endpoint prereq status) |
 | **Test Runs** | List of `ApiTestRun` records with scan controls |
-| **SAST Runs** | List of `SastRun` records with scan controls and lead summary |
+
+Endpoints, Credentials, and Test Runs are tabs. Manage files is a page opened from
+the collection header. Readiness results are shown with the endpoint inventory.
 
 #### API scan run view
 
 | Tab | Content |
 |---|---|
-| **Status / Log** | Agent activity log, scan controls, `TokenUsageBar` telemetry, real-time phase events |
-| **OWASP Coverage** | OWASP API Top-10 coverage matrix — per-endpoint × per-category status badges, updated live |
+| **Status** | Agent activity log, scan controls, `TokenUsageBar` telemetry, real-time phase events |
 | **Findings** | `ScanFinding` list for this API run |
-| **Traffic** | HTTP traffic captured during the API scan |
-| **A.L.I.C.E.** | Interactive ALICE chat tab (same surface as web scans) |
+| **SAST Leads** | Leads imported from a completed standalone SAST run |
+| **Sessions** | Named API credentials and sessions captured during testing |
+| **Traffic Log** | HTTP traffic captured during the API scan |
+| **Endpoints** | Parsed endpoint inventory for the run's collection |
+| **OWASP Coverage** | OWASP API Top-10 coverage matrix with per-endpoint and per-category status badges, updated live |
+
+ALICE is an expandable panel on the API run screen rather than a primary tab.
 
 #### SAST run view
 
 A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Scan** button that uploads a source ZIP and starts a standalone scan.
 
-| Panel | Content |
+| View | Content |
 |---|---|
-| **Status / Log** | Agent activity log, scan controls, `TokenUsageBar` telemetry |
-| **Leads** | Original `ScanLead` rows with severity, confidence score, location, and evidence; exportable to markdown |
+| **Coverage** | Direct source-read receipts, legacy work-program totals, and semantic completion assurance |
+| **Model** | Normalized repository facts, components, evidence anchors, confidence, and completeness warnings; facts can be filtered without rendering the full bounded graph at once |
+| **Threats** | Threat-model summary, assets, boundaries, capabilities, objectives, assumptions, open questions, and expandable threat scenarios |
+| **Obligations** | Semantic coverage obligations, dispositions, evidence, discovery summary, reconciliation totals, and closure gaps or recovered candidates |
+| **Efficiency** | Per-phase elapsed time, source reads, facts, obligation progress, candidate outcomes, and disclosed caps |
+| **Candidates** | Original `ScanLead` rows with severity, confidence score, location, validation evidence, and handoff actions; exportable to Markdown |
+| **Activity** | Agent activity log and `TokenUsageBar` telemetry |
+
+The phase rail exposes all ten SAST phases from scope through report and scrolls horizontally when the window cannot fit them. Semantic views use completed report state when available and fall back to in-progress phase data while a scan is running. Older runs show an explicit unavailable state rather than fabricating semantic results.
 
 ---
 
 ## 14. Concurrency & State Management
 
-- **FastAPI async handlers** — all I/O is non-blocking via `asyncio`
+- **LLM requests** — each web/API run uses the DAST concurrent LLM request limit, while each SAST run uses the SAST limit. The limits are configured under DAST > Test Lead and SAST in Settings.
+- **Request handlers** - FastAPI runs synchronous handlers in its thread pool. Async handlers and background scans use `asyncio`, but SQLModel sessions are synchronous; some blocking work is moved to worker threads.
 - **Parallel crawl workers** — multiple Playwright browser instances share a `_CrawlShared` state object (asyncio locks around the URL frontier and seen-set)
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
 - **Specialist agents** — each specialist runs as its own `asyncio.Task`; tracked in `_specialist_tasks[run_id]` so it is cancelled when the parent scan is stopped. Extra handoffs wait in `_specialist_pending[run_id]` and start as slots open. The final specialist barrier waits for both active and queued work.
 - **Finding validation** — end-of-scan findings use one managed bounded batch; manual finding actions use tracked inline tasks capped by `AdversarialValidatorConfig.end_scan_max_concurrent`. Both appear as one run-level validation job and are stopped together.
-- **ALICE background tasks** — `alice_tasks.py` holds a module-level `_registry: dict[int, AliceTask]` (one entry per run). Each task runs `run_alice_turn_stream` as an `asyncio.create_task`, decoupled from the HTTP connection; all emitted events are buffered in `AliceTask.events` so clients can replay from any cursor on reconnect
+- **ALICE background tasks** - `alice_tasks.py` holds a module-level `_registry: dict[tuple[str, int], AliceTask]`, keyed by `(run_type, run_id)`, where `run_type` is `site` or `api`. Each task runs independently of the HTTP connection. Its bounded event buffer supports reconnect replay; older cursors receive a state snapshot.
 - **Scan checkpointing** — the LLM conversation history is serialised to the DB at regular intervals by `checkpoint.py`; `start_thinking_scan_resume` restores it on restart
 - **Bounded scan completion** — `scan_completion.py` tracks structural progress across agentic turns to enforce termination policy and prevent non-terminating tool loops
 - **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed. Alembic applies schema changes at startup. Databases created before Alembic receive a one-time compatibility upgrade; normal startups only reconcile interrupted jobs and temporary workspaces.
@@ -1278,7 +1559,7 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 
 **Files**: `src/aespa/services/alice.py`, `src/aespa/services/alice_tasks.py`, `src/aespa/api/alice.py`
 
-A.L.I.C.E. (AI LLM-Integrated Chat Engine) is an **interactive, user-directed pentesting agent** embedded in the run detail view. Unlike the autonomous dynamic scan, ALICE responds to natural-language instructions typed by the user and conducts targeted investigations in real time — probing specific endpoints, testing hypotheses, and writing confirmed findings directly to the scan report.
+ALICE: LLM-Integrated Chat Engine is an **interactive, user-directed pentesting agent** embedded in the run detail view. Unlike the autonomous dynamic scan, ALICE responds to natural-language instructions typed by the user and conducts targeted investigations in real time — probing specific endpoints, testing hypotheses, and writing confirmed findings directly to the scan report.
 
 ### Architecture overview
 
@@ -1297,7 +1578,7 @@ Browser subscribes to event stream
   ▼
 GET /api/test-runs/{id}/alice/stream?cursor=N
   └─ alice_tasks.stream_events(run_id, cursor)
-       ├─ Replay buffered events[cursor:]  ← catches up missed events (page refresh)
+       ├─ Replay retained events after the absolute cursor, or send a state snapshot
        └─ Live events from asyncio.Queue   ← pushed by _append() as they arrive
 ```
 
@@ -1312,7 +1593,9 @@ class AliceTask:
     tab_id: str           # which chat session tab started this turn
     think_msg_id: str     # client-assigned ID for the thinking bubble
     reply_msg_id: str     # client-assigned ID for the reply bubble
-    events: list[dict]    # all SSE events since task start (capped at BUFFER_LIMIT=2000)
+    run_type: str        # site or api; part of the registry key
+    events: list[dict]    # retained SSE events (capped at BUFFER_LIMIT=2000)
+    dropped: int         # events removed from the front; cursors remain absolute
     waiters: set[asyncio.Queue]  # one queue per connected SSE client
     asyncio_task: asyncio.Task
     done: bool
@@ -1329,7 +1612,7 @@ On `asyncio.CancelledError` (user hits Stop A.L.I.C.E.), a final `done` event is
 
 ### Reconnect and replay
 
-When a client reconnects (page refresh, SPA navigation back to the run), it calls `GET /alice/stream?cursor=0`. The server replays `task.events[0:]` as SSE lines immediately, then switches to live delivery. The client re-accumulates `accumulatedThought` and `accumulatedMessage` from these replayed events, so the chat UI rebuilds the correct state even if the page was refreshed mid-stream.
+When a client reconnects, it requests `/alice/stream` with an absolute event cursor. Starting from `cursor=0` rebuilds the current turn. The server replays retained events after that cursor, then switches to live delivery. If the cursor predates the retained buffer, the server sends a `state_snapshot` with the current thought and reply text before following new events. The client uses replayed events or the snapshot to restore the chat state.
 
 `GET /alice/status` is polled on page load. If `running: true`, the client automatically calls `aliceSessionConnect` to start receiving events.
 
@@ -1340,18 +1623,31 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 ```
 1. Load run/site config; verify scope of the user's instruction
 2. Emit [A.L.I.C.E. Initializing] + scope-check status chunks
-3. Convert chat history → Anthropic messages format
-4. Loop (max ALICE_MAX_STEPS = 300):
+3. Classify the turn as operational, finding management, or target testing
+4. Convert chat history → Anthropic messages format
+5. Loop (max ALICE_MAX_STEPS = 300):
      a. Emit [Step N] Calling LLM... thinking chunk
      b. Call LLM with tools (ALICE tool set — see below)
-     c. Stream thinking blocks → thinking_chunk SSE events
-     d. Stream text blocks → message_chunk SSE events
+     c. Forward native provider text deltas → message_chunk SSE events
+     d. Stream completed thinking blocks → thinking_chunk SSE events
         (prepend \n\n separator if prior message content exists)
      e. Execute tool calls → emit step status + tool result chunks
      f. If model calls done tool → break
      g. If 3 consecutive text-only turns → break (nudge model back to tools)
-5. Emit done SSE event with final accumulated thought + message
+6. Emit done SSE event with final accumulated thought + message
 ```
+
+Anthropic, OpenAI-compatible Chat Completions, OpenAI Responses, Google, and AWS
+Bedrock calls stream text while the provider is still generating. Other
+providers use the same path but return one completed text block. Tool arguments
+are collected before a tool is executed. If streamed text is followed by a tool
+call, ALICE emits a `message_retract` event and places that text in the activity trace. This keeps
+the final reply separate from commentary while still showing immediate output.
+
+When a reconnect cursor is older than the retained event buffer, the stream
+sends a `state_snapshot` containing the current thought and reply text. The UI
+uses this snapshot instead of rebuilding an incomplete message from the events
+that remain in memory.
 
 ### Tools available to ALICE
 
@@ -1362,8 +1658,10 @@ When a client reconnects (page refresh, SPA navigation back to the run), it call
 | `browser` | Drive a live Playwright browser. `page_id` and `replay=true` restore a saved crawler state and preserve page/session traffic provenance |
 | `context_tool` | Read-only access to crawl data, request history, traffic, coverage gaps, response comparisons, and bounded mutation suggestions |
 | `reauthenticate` | Re-run the configured web login flow, including supported TOTP or email-OTP steps, and refresh the primary session |
-| `skip_coverage` | In web Enforce mode, record a justified inapplicable or technically blocked coverage obligation |
+| `skip_coverage` | In web Full mode, record a justified inapplicable or technically blocked coverage obligation |
 | `write_finding` | Persist a confirmed vulnerability directly to `ScanFinding`; **skips `normalize_finding_titles`** to prevent false deduplication |
+| `update_finding` | Rewrite selected fields on one saved finding while preserving its reference and validation state |
+| `consolidate_findings` | Rewrite one retained finding and remove its duplicates in one transaction, moving coverage and scan provenance to the retained record |
 | `remove_finding` | Remove a finding from the active web or API run when it was written in error or is a confirmed duplicate |
 | `update_lead` | Record the outcome of investigating an imported SAST lead against the active run kind |
 | `forge_jwt` | Sign an HS256 JWT from a discovered secret; stores result in session vault |
@@ -1380,6 +1678,11 @@ analysis commands (`history_search`, `traffic_search`, `compare_responses`,
 `mutate_request`, and `extract_entities`). API traffic is filtered by
 `api_test_run_id`; it is never read through the web-only `TestRun` owner. API
 ALICE does not get `reauthenticate`, `skip_coverage`, or Specialist dispatch.
+
+Finding-management requests such as rewrite, merge, consolidate, update, or
+delete use a separate tool gate. These turns can read and change saved findings,
+but cannot contact the target or use credentials. Operational questions remain
+read-only.
 
 #### `write_finding` deduplication
 
@@ -1500,8 +1803,11 @@ The coverage matrix maps every `(ApiEndpoint, OWASP_category)` pair to an `ApiEn
 
 Cell statuses: `uncovered` → `in_progress` → `covered` (finding attached) / `skipped` (with reason).
 
-**Track mode** — the agentic loop steers itself; cells are updated as probes are made.  
-**Enforce mode** — after the main loop, `_enforce_coverage_loop` drives every still-uncovered cell to a terminal state. An LLM classifier decides per `(endpoint, category)` whether to probe or record a skip reason, up to a configurable budget.
+**Quick mode** (`track`) - the agentic loop steers itself; cells are updated as probes are made.
+
+**Standard mode** (`standard`) - completion requires the percentage configured in `ScannerPolicy.standard_coverage_percent`.
+
+**Full mode** (`enforce`) - after the main loop, `_enforce_coverage_loop` drives every still-uncovered cell to a terminal state. An LLM classifier decides per `(endpoint, category)` whether to probe or record a skip reason, up to a configurable budget.
 
 **SAST Validate mode** (`coverage_mode="sast_validate"`) does not seed, probe, or
 resolve the API coverage matrix. It validates only open imported SAST leads, using
@@ -1518,7 +1824,7 @@ _api_scan_task(api_run_id)
        1. Load ApiTestRun, LLM config, scanner policy, collection
        2. seed_sessions_from_credentials — load credentials that already contain usable
           session material, such as bearer tokens, API keys, cookies, and Basic auth
-       3. seed_coverage_matrix — create ApiEndpointTest cells for all (endpoint, category) pairs (Track/Enforce only)
+       3. seed_coverage_matrix - create ApiEndpointTest cells for all (endpoint, category) pairs (Quick/Standard/Full only)
        4. _build_api_crawl_context — build LLM opening context from collection metadata + explicitly imported SAST leads
        5. _do_agentic_thinking_loop (shared with web scanner)
             • get_api_test_lead_tools supplies only API-aware top-level tools; browser,
@@ -1561,15 +1867,38 @@ in API mode until the Specialist executor is fully API-aware. The API system pro
 OWASP API Top-10 category descriptions and both API inventory and shared context tool
 documentation.
 
+The lower-level API ALICE dispatcher also implements `run_status`, `report_finding`,
+`coverage_matrix`, and `set_coverage`. The current `_make_api_context_tool_fn()` wrapper
+does not route those four commands, although the prompt advertises them. Run status is
+still added to the initial ALICE message. This mismatch should be removed when the API
+ALICE wrapper is made fully API-aware.
+
 ---
 
 ## 17. SAST Scanner & Scan Leads
 
-**Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
+**Files**: `src/aespa/services/sast_scanner.py`, `src/aespa/services/sast_scanner_light.py`, `src/aespa/services/sast_scan_shared.py`, `src/aespa/services/source_tools.py`, `src/aespa/services/scan_leads.py`, `src/aespa/services/prompts/sast.py`, `src/aespa/api/sast_runs.py`, `src/aespa/api/test_runs.py` (web import)
 
-The SAST scanner is a standalone agentic static-analysis pass over an uploaded source archive that produces high-confidence vulnerability **leads**. It is created from the SAST screen with `POST /api/sast-runs` (multipart); `collection_id` is NULL and the archive is stored on the run (`source_archive_path` / `source_filename`). A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
+The SAST scanner is a standalone agentic static-analysis pass over an immutable source archive that produces high-confidence vulnerability **leads**. Uploads use `POST /api/sast-runs` (multipart). Extension source providers use `POST /api/sast-runs/from-source`; the run enters `preparing` while the provider resolves the source and AESPA creates the archive. In both cases `collection_id` is NULL and the final archive is stored on the run (`source_archive_path` / `source_filename`). Users choose `analysis_mode=light` for the original lower-cost workflow or `analysis_mode=deep` for the current semantic workflow. The mode is saved on the run and used for starts, resumes, and reruns. Existing runs are migrated as Light. New API callers that omit the field use Deep. A completed run's leads can then be explicitly copied into either a web or API test run. Source ZIPs uploaded to an API collection remain a separate API-inventory input and are not reused automatically by SAST.
 
 ### Architecture overview
+
+Light runs inventory the archive, build the original source work program, run discovery workers, independently validate candidates, and trace attack paths. Deep runs add the repository model, threat model, semantic coverage plan, reconciliation, and closure phases shown below.
+
+The shared source work program looks for route registrations and request inputs, then assigns a review to each route or likely handler file. Likely handlers are selected by common file names and directories when route syntax is unfamiliar. These inferred handlers still leave the run with partial coverage until a concrete entry point is found. Response serialization calls also receive a separate review so sensitive fields are not missed by a scan focused on database and authorization calls.
+
+Before matching sinks, `services/sast_codegraph.py` parses PHP, JavaScript, TypeScript/TSX, Python, Java, Go, C#, and Ruby with tree-sitter. Grammars ship as Python wheels, so parsing needs no network. The parser records each function and method, each call site, and function names passed as values, such as a route callback or a JSX `onClick={handler}`. Calls resolve by name within the same language family. The resolver prefers the caller's own class for `this`/`self`, the named class for static calls and `new`, then the same file, then the nearest directories, keeping at most three targets. There is no type information, so resolution is approximate.
+
+The code graph is used in two ways:
+
+- Call-shaped sinks (database query, command execution, file access, outbound request, code evaluation, logging) count in a parsed file only when the matching text is inside a real call on that line. Matches in comments or plain strings are dropped. Serialization and deserialization stay line-based because definitions such as `toPublic()` or Java's `readObject()` are review points too. Unparsed files, including HTML, keep line matching.
+- Reachability starts from every file's top level, every function holding a detected route or request input, and every function in a likely handler file. Each surface item records its enclosing function and one of `reachable` (with the shortest `reached_from` chain), `no_callers` (nothing calls it directly, so it may be called dynamically), or `not_reached`. Workers see these hints in `get_work_program`. They affect ordering only; every item still needs a disposition.
+
+Deep mode's repository model uses the same parser through `sast_parsers.TreeSitterAdapter`. It emits `route` facts for registration calls with a literal path (Express, Laravel, Slim, Go `HandleFunc`/gin/echo/chi, Rails `get`/`resources`, ASP.NET `MapGet`) and for declared routes (Spring mappings, ASP.NET attribute and conventional routes, Razor Page handlers, PHP `#[Route]`). Calls on HTTP client objects such as `this.http.get()` are not routes. It also emits `sensitive_operation` and `auth_boundary` facts for calls matching the work-program sink and control patterns, and `callable` facts for every function. Each fact carries its enclosing function and reachability. Facts are ordered routes, access checks, sensitive calls, dependencies, then callables, so the model's node cap drops plain functions first. Vendor, build, `bin/`, `obj/`, and `wwwroot/lib/` folders are skipped.
+
+.NET is handled like the other supported stacks. `component_facts._aspnet_route_facts` combines a controller's `[Route]` prefix with action `[HttpGet]`/`[Route]` templates, replaces `[controller]` and `[action]`, and falls back to `/{controller}/{action}` for public actions without attributes. Razor Pages routes come from the file path under `Pages/`, and Blazor routes from `@page`. `.cshtml`, `.razor`, and Web Forms files are source; `*.cshtml.cs` code-behind files, `Hubs/` folders, and files ending in `Hub` or `Endpoints` count as likely handlers. The manifest adapter reads NuGet `PackageReference`/`PackageVersion` items and `packages.config`.
+
+The graph is stored in `SastCodeSymbol` and `SastCodeCall`. Calls refer to symbols by `path::qualname@line` key rather than by row id, so the rows are exported and imported unchanged. The scope phase data and `work_program_summary` report files parsed per language, functions and their reachability, calls, resolved calls, sink reachability, and sink matches dropped because they were outside a call. The SAST Coverage tab shows these in a Code map panel.
 
 ```
 start_sast_scan(sast_run_id)
@@ -1581,23 +1910,33 @@ start_sast_scan(sast_run_id)
           a cross-process workspace lease while the directory is live. A
           startup sweep (`db._cleanup_orphaned_sast_extractions`) skips leased
           workspaces and reconciles only dirs leaked by a previous hard crash.
-       3. Build a deterministic source atlas: classify files, identify entry
-          points, inputs, controls, and sensitive sinks, then split them into
-          bounded partitions.
-       4. Run one injection, access-control, and logic worker per partition,
-          plus bounded sink-first workers. Every source and sink item requires
-          an explicit disposition. A worker cannot finish with open items.
-       5. Independent validation loop — a separate adversarial prompt/model role
+       3. Build a normalized repository graph using Python AST, tree-sitter
+          (PHP, JavaScript/TypeScript, Java, Go, C#, Ruby; regex ECMAScript
+          fallback), manifest, component-fact, and pattern adapters. An LLM
+          reconciliation pass is used only to resolve source-backed model gaps.
+       4. Run a dedicated threat-analysis pass. Persist actors, assets,
+          boundaries, scenarios, and semantic coverage obligations before any
+          vulnerability discovery worker receives them.
+       5. Run an isolated baseline worker, threat-directed workers,
+          deterministic source/dependency analyzers, and sink-first workers.
+          Every assigned source item and semantic obligation requires a disposition.
+       6. Reconcile candidates by root cause and trace before validation,
+          preserving multiple locations and splitting independently remediable causes.
+       7. Independent validation loop — a separate adversarial prompt/model role
           re-reads evidence, records controls/counterevidence/proof gaps, and
           returns confirmed/dismissed/inconclusive verdicts.
-       6. Attack-path loop — for confirmed candidates, record ordered external
+       8. Semantic closure loop — account for unresolved high-priority scenarios,
+          model warnings, and adjacent validator concerns. New closure candidates
+          return through reconciliation and independent validation.
+       9. Attack-path loop — for confirmed candidates, record ordered external
           reachability, impact, severity reasoning, and a dynamic-test objective.
-       7. Upsert every candidate by stable fingerprint; only independently
-          confirmed candidates above the confidence threshold are reportable.
-       8. Apply the completion gate. Failed workers, open work items, a missing
+      10. Apply scan-policy classification, severity, confidence, and phase-budget
+          controls; then upsert candidates by stable fingerprint.
+      11. Apply the completion gate. Failed workers, open work items, a missing
           entry-point or sink inventory, or a truncated atlas make coverage
           partial even when no candidates were found.
-       9. Persist the final report, work program, and exact evidence receipts;
+      12. Persist the graph, threat model, obligations, candidate relationships,
+          phase telemetry, report, and exact evidence receipts;
           cleanup the temporary directory.
 ```
 
@@ -1610,27 +1949,69 @@ start_sast_scan(sast_run_id)
 | `read_file` | Read a file by path; optional `start_line`/`end_line`; capped at 20,000 chars |
 | `grep` | Regex or literal search across files; capped at 200 results. The receipt records the search scope and returned matches. Files in the search scope do not count as directly opened. |
 | `get_work_program` | Return the current worker's assigned source or sink items |
+| `claim_traced_sink` | Move an inventoried helper sink to a route worker after it opens the route and exact sink line; the claimed sink still needs its own disposition |
 | `record_disposition` | Close one assigned item with a result, reason, trace, controls, and evidence |
+| `record_semantic_disposition` | Resolve one threat-scenario or repository-model security obligation |
+| `write_lead` | Record a source-backed discovery candidate with its confidence score and reasoning. Requires a source trace (file), a sink trace (file and line), a `fix_location` (`file:line`, checked against the archive), and a one-sentence `root_cause`. The reply lists other open leads that cite the same files |
+| `filter_lead` | Revise the confidence score of an existing candidate before independent validation |
+| `merge_lead` | Merge a pending lead into another pending lead when one code change closes both; the leads must cite a common file and the worker must give the reason |
+
+Threat-model workers replace the discovery tools with `record_model_fact`,
+`record_threat_scenario`, and `finalize_threat_model`. Candidate validators use
+`get_candidate`, `record_adjacent_concern`, and `validate_candidate`. Attack-path
+workers use `get_candidate` and `record_attack_path`. Every phase also receives its
+own `done` schema. See [Agent Tool Reference](agent-tool-reference.md) for the complete
+phase-by-phase list.
 
 The normalized work program is stored in `SastSourceFile`, `SastSurfaceItem`,
-`SastPartition`, `SastWorker`, `SastWorkItem`, and `SastEvidenceReceipt`. This
-state is authoritative for completion and resume. `coverage_json` remains as a
-file-level compatibility view, where `reviewed` now means the file was opened
-with `read_file`.
+`SastCodeSymbol`, `SastCodeCall`, `SastSurfaceEdge`, `SastPartition`, `SastWorker`, `SastWorkItem`,
+`SastThreatModel`, `SastThreatScenario`, `SastCoverageObligation`,
+`SastObligationLead`, `SastDiscoveryTelemetry`, and `SastEvidenceReceipt`.
+Checkpoint JSON remains the resume projection; relational rows are the auditable
+and portable representation. `coverage_json` is a file-level compatibility view,
+where `reviewed` means the file was opened with `read_file`.
 
 ### Lead lifecycle
 
 ```
-Discovery calls write_lead(...) and filter_lead(...)
+Discovery calls write_lead(...) with confidence, reasoning, traces, fix
+location, and root cause
   └─ Candidate remains a hypothesis regardless of discovery self-score
+  └─ Matching worker observations add evidence to the same lead
+  └─ The worker sees related open leads and may call merge_lead(...)
+Reconciliation groups remaining candidates before validation
+An optional bounded model pass checks uncertain source-related pairs and only
+merges them when it names one shared fix in the cited files
+A fix-grouping model pass then reviews leads that share any cited file and
+merges groups that one code change fixes. The named fix file and line must
+exist and be cited by every member.
 Independent validator calls validate_candidate(...)
-  ├─ confirmed + confidence ≥ 0.7 → reportable
+  ├─ confirmed → reportable (confidence is recorded but does not filter)
   ├─ dismissed → retained with counterevidence, not reportable
   └─ inconclusive → retained with explicit proof gaps, not reportable
+Confirmed leads receive a final duplicate check. Two leads whose validator fix
+locations name the same file and function (or lines within five of each other)
+merge even across categories when their root causes agree. A second
+fix-grouping model pass then reviews confirmed leads. Merged leads keep both
+validator notes.
 Attack-path analyst calls record_attack_path(...) for reportable candidates
   └─ Ordered nodes, impact, severity reasoning, and dynamic-test objective persisted
 Final sync upserts candidates by stable fingerprint, preventing rerun duplicates
 ```
+
+Candidate creation and discovery scoring are one database operation. Resumed
+checkpoints from older versions may contain unscored candidates; these are closed
+as inconclusive instead of being left pending. Validation cannot complete while
+any scored candidate still has a pending verdict. Reconciliation totals are
+calculated after candidates are split by root cause.
+New scans assign injection, access, and logic checks for each route partition to
+one worker. That worker also reviews a bounded number of sinks in its route
+files. While tracing a route, it can claim a helper sink after opening both
+the route file and the sink line. The claimed sink needs its own result. Sink
+workers start afterward for unclaimed sinks and any excess local sinks. Each
+security check still gets its own work item and disposition. Reconciliation
+records why each candidate was joined. Resumed scans keep their existing worker
+assignments.
 
 ### ScanLead entity (`services/scan_leads.py`)
 
@@ -1643,7 +2024,8 @@ Final sync upserts candidates by stable fingerprint, preventing rerun duplicates
 | `title` / `description` | Human-readable vulnerability description |
 | `category` | OWASP category slug (e.g. `"API1"` or `"A03"`) |
 | `severity` | `critical` · `high` · `medium` · `low` |
-| `confidence` | 0.0–1.0; only leads ≥ 0.7 (`CONFIDENCE_THRESHOLD`) are persisted |
+| `confidence` | 0.0–1.0; recorded for review, does not decide whether a lead is reportable |
+| `classification` / `discovery_strategy` | Exploitability class and baseline, threat, sink, deterministic, dependency, or closure provenance |
 | `location` | Source file path and line reference |
 | `evidence` | Code snippet or supporting text |
 | `fingerprint` | Stable category/title/location hash used to upsert reruns |
@@ -1663,9 +2045,9 @@ The dynamic loop investigates leads via the shared `update_lead` action, which s
 - **API scans** consume *explicitly imported copies*: the user picks a completed SAST run on the API run's **Scan Leads** tab and `copy_leads_to_run(sast_run_id, "api", run_id)` creates fresh rows owned only by that API run. API scan startup never creates a SAST run or imports collection leads automatically.
 - **Web scans** consume *copies*: the user picks a completed SAST run on the **SAST Leads** tab and `copy_leads_to_run(sast_run_id, "web", run_id)` duplicates its originals into new rows tagged `imported_into_*` (idempotent per source run; originals stay `open`). Because copies are independent, investigating them never mutates the source SAST run's leads, and deleting a SAST run leaves the copies intact (only `imported_into_run_id IS NULL` originals are cascade-deleted).
 
-Quick and SAST Validate scans receive a compact index of every open imported lead and use `lead_detail` to retrieve the complete evidence one lead at a time. Quick scans keep their normal coverage work, but cannot finish while an imported lead is still open. A resumed Quick scan receives a refreshed index so leads added or resolved after its checkpoint do not leave the conversation with stale work. Full scans retain the capped detailed lead block used by the general coverage workflow. The web and API Test Leads must verify every attack-path hop against live responses before calling `update_lead`. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
+Quick, Standard, and SAST Validate scans receive a compact index of every open imported lead and use `lead_detail` to retrieve the complete evidence one lead at a time. Quick and Standard scans keep their normal coverage work, but cannot finish while an imported lead is still open. A resumed scan receives a refreshed index so leads added or resolved after its checkpoint do not leave the conversation with stale work. Full scans retain the capped detailed lead block used by the general coverage workflow. The web and API Test Leads must verify every attack-path hop against live responses before calling `update_lead`. When a confirmed lead produces a finding, the adversarial web validator also receives the linked path as a disproof map; it remains a hypothesis and cannot establish a finding by itself.
 
-Leads are exportable to markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a hidden JSON block for future re-import. The SAST run view also supports a complete JSON run export and restore. That bundle includes the source ZIP, saved phase/coverage/report state, original leads, activity logs, and component facts.
+Leads are exportable to Markdown from the UI (originals on the SAST run view, copies on web and API run lead tabs); the export embeds a structured JSON block for re-import. The same import dialog accepts external SARIF 2.1.0 and structured Markdown reports through `POST /api/test-runs/{id}/import-report` and its API-run equivalent. Multipart requests default to read-only preview; `preview=false` reparses and saves open, unverified `ScanLead` rows owned by the selected dynamic run. External rows use `producer_run_type="external"`, with `producer_run_id` pointing to the destination run for ownership rather than a source SAST run. Scanner/report provenance lives in `source_trace_json` and `provenance_json`. No source SAST run, source archive, scan job, or confirmed finding is created. Fingerprints deduplicate external findings within the destination run kind and ID. See [external scanner lead imports](external-scanner-leads.md) for formats and limits. The SAST run view also supports a complete JSON run export and restore. That bundle includes the source ZIP, saved phase/coverage/report state, original leads, activity logs, and component facts.
 
 The SAST workspace reads `GET /api/sast-runs/{id}/analysis` for authoritative
 phase state and deterministic coverage receipts. `GET .../handoff-targets` lists
@@ -1677,19 +2059,101 @@ test unless that persisted copy succeeds.
 
 SAST scans use the same task-registry pattern as web and API scans. Stop cancels the run, while Pause waits for a safe agent-step boundary and keeps pending candidates intact. Discovery, each validator, and attack-path analysis save their LLM transcript and step count in `PhaseCheckpoint` rows after every completed tool exchange. Candidate state and file-review receipts are saved separately. Resume re-extracts the immutable source ZIP, restores those checkpoints, skips completed phases and validators, and continues the interrupted conversation without superseding existing leads.
 
+The SAST concurrent LLM request setting limits how many discovery and validation agent calls can wait on provider responses at once. Increasing it also increases the worker and validator pools, while the run-level LLM gate ensures other SAST phases share the same overall limit.
+
+Deep discovery budgets are configured on the SAST tab in Agent Settings. Fixed mode gives each baseline or threat worker the configured value. Adaptive mode starts from the configured minimum and adds capacity for assigned source items, security checks, and unique files, up to the configured allocation maximum. The selected budget and its inputs are stored on `SastWorker`. If a resumed worker already used its saved allocation, it receives another bounded allocation without resetting its checkpoint step count.
+
 Temporary provider connection failures are retried with bounded backoff. If the provider remains unavailable, the run is paused with reason `network` instead of failed. A process restart also changes an orphaned `scanning` run to a resumable `paused` run after removing its disposable extraction directory. Browser or SSE disconnection does not affect the server-side scan task.
 
 The cross-process workspace lease is checked before startup recovery changes a SAST run, so starting a second AESPA process does not mark a live scan as interrupted. A genuine interruption writes a `restart_recovery` entry to the phase log. Agent Activity persists queue, start, and terminal events for each discovery worker and candidate validator. Runs created before these events were added rebuild the available discovery-worker history from `SastWorker` rows and completed validator activity from phase checkpoints.
 
 ---
 
-## 18. Applications & Multi-Repository Campaigns
+### Benchmark Lab extension
 
-**Files**: `src/aespa/services/applications.py`, `src/aespa/services/campaigns.py`, `src/aespa/services/correlation.py`, `src/aespa/services/component_facts.py`, `src/aespa/services/component_mapper.py`, `src/aespa/services/source_tools.py`, `src/aespa/api/applications.py`
+Benchmark Lab is a bundled, disabled-by-default extension. It compares completed
+Site, API, and SAST scans with uploaded ground truth and never starts or changes a
+scan. A Site or API retains one active ground truth file for later scans. SAST
+comparisons use a new upload or a file saved for a Site or API. Each result saves
+copies of the ground truth and scan findings it compared, so later changes do
+not alter it. The result lists every expected finding as full, partial, or
+missing. The user can select the scan's Test Lead model or another saved model.
+The model must return one valid decision for every expected finding. If the model
+is unavailable or returns an incomplete answer, no result is saved. Users can
+review, correct, and delete saved results. New runs of the older SAST evaluation
+workflow also require a model; existing evaluations remain readable.
+The Site view has a Summary chart, an Analyses table, and a New comparison form.
+The chart plots scan cost against the number of full and partial findings, with
+filters for scan type and model. New results save the run's recorded cost. Older
+results use the current run cost when the run is still available. A SAST result
+using ground truth saved for one Site or API is linked to that target.
+Each result also saves the Test Lead model for a Site or API scan, and the SAST
+model for a SAST scan. If a Site or API scan imported SAST leads, the result
+lists the model for each source SAST run. Imported leads are matched by run type
+and ID so Site and API runs with the same numeric ID stay separate.
+Benchmark Lab model comparisons use the saved LLM proxy and CA bundle in a
+request-local scope, including older SAST assisted evaluations. Result publishing
+uses the same settings for its HTTPS upload.
 
-An **Application** groups named code components (repositories or micro-frontends), their fixed ZIP snapshots, and the live Sites/API Collections that make up the product. An **AssessmentCampaign** freezes those inputs, runs SAST for each component, connects the resulting leads to live targets, and asks a human to review inferred routes before testing starts.
+Ground truth and comparison results stay in the extension database. They are not
+included in scanner prompts, checkpoints, evidence receipts, SAST exports, or
+lead handoffs. The older SAST evaluation and repeated-run comparison routes
+remain available for saved work. Its routes are served below
+`/extension/aespa.benchmarking/`, and its datasets, results, evaluations,
+matches, and comparisons use an isolated extension SQLite database
+with `benchmarking_` table names. Enabling the extension exposes its navigation
+and routes. Disabling it removes both cleanly, closes its database engine, and retains
+the database file for a later re-enable without affecting ordinary SAST runs.
+On first enable after the rename, the extension copies data from the old
+`aespa.sast-benchmarking.db` file into `aespa.benchmarking.db` and keeps the old
+file. Its previous enabled setting is also used until the new extension setting
+is saved.
 
-Applications live-target children are deliberately different from normal scans: a Site is crawled to collect frontend evidence, then the child run validates only the imported SAST leads. It does not start the normal Quick/Full coverage scan. API children validate their imported leads directly. A child reports **incomplete** when any imported lead is still open; retry reuses the same child run, crawl, and lead rows and continues the remaining work.
+## 18. Extensions
+
+**Files**: `src/aespa/extensions/`, `extensions/`, `src/aespa/api/extensions.py`, `src/aespa/services/sast_sources.py`, `src/aespa/services/external_scans.py`
+
+AESPA loads trusted Python extensions at startup. Shipped extensions live in the repository's top-level `extensions/` directory and are included as runtime data in desktop builds. The extension manager checks both direct child folders and `<author>/<extension>` folders under that directory and the configured user extension directory for `extension.toml`. Each manifest declares its ID, version, AESPA extension API version, entrypoint, and capabilities. Load failures are kept as diagnostics and do not stop other extensions or the application. Enabled state is stored in the database. Disabling an extension unloads its capabilities without importing its code, and enabling it reloads the registry immediately.
+
+Extensions register capabilities through `ExtensionRegistry`. The `sast.source_provider` capability supplies settings, new-run fields, an availability check, and an asynchronous source materializer. The `web.active_scanner` capability selects web scan candidates and returns external findings. The `llm.catalog` capability supplies providers, models, and profiles from extension storage. The frontend reads extension descriptions from `/api/extensions` and source providers from `/api/extensions/source-providers`.
+
+With `api.routes` declared in its manifest, an extension can register one FastAPI router through `register_api_router`. Its routes are served below `/extension/<extension-id>/`; the core `/api` namespace is reserved for AESPA. Disabling the extension makes its routes return 404. Extensions do not register arbitrary frontend modules.
+
+An extension with a declared `data_namespace` can pass its own SQLAlchemy or SQLModel metadata to `registry.data_store(metadata)`. Its tables are created in a separate SQLite file and must use the declared table-name prefix. Disabling the extension closes that database's engine but retains the file. Extension code may read AESPA's main database, but must keep its own writes and schema changes in its isolated store. Changes to core scans, settings, secrets, and results go through AESPA-owned APIs or services. Calls through AESPA's LLM service may record normal usage in the main database.
+
+Extensions may declare `author` and `secrets_namespace` in their manifest. Secret settings use a password field on each extension's settings page, are stored separately from ordinary settings under `<author>.<secrets_namespace>`, and are never returned by the settings API. Runtime contexts expose a secret store bound to that full namespace. Extensions can also declare settings without registering a SAST source provider.
+
+`sast_sources.start_source_preparation()` owns the background lifecycle. It asks the provider for an archive, extracts it using the same SAST limits, creates a normalized archive, calculates its checksum, saves source provenance on `SastRun`, and optionally starts the ordinary scanner. Extension settings are stored separately by extension ID. Secret fields are stored under the namespace declared by the extension and are redacted from API responses.
+
+Passing `openapi=ExtensionOpenAPI(...)` to `register_api_router` publishes an OpenAPI 3.1 definition for the extension's routes, including optional `webhooks`. `ExtensionManager.openapi_for()` builds and caches it with the server set to `/extension/<id>`, `/api/extensions/<id>/openapi.json` serves it, and the extension list includes `openapi_url` so the settings page can show an API definition section.
+
+### Core run services for extensions
+
+**Files**: `src/aespa/extensions/core_access.py`, `src/aespa/services/web_runs_service.py`, `src/aespa/services/sast_runs_service.py`, `src/aespa/services/run_progress.py`, `src/aespa/services/run_results.py`, `src/aespa/services/run_lifecycle.py`
+
+Creating, starting, and stopping runs lives in `web_runs_service` and `sast_runs_service`. The `/api` routes and extensions both call them, so every request gets the same checks; the services raise `HTTPException` with the route's status codes. `registry.core` gives an extension `core.runs` (read progress, activity, findings, summaries, and SARIF), `core.sast` (requires the `core.sast_runs` capability), `core.web` (requires `core.web_runs`; also creates and updates Sites and credentials, returning them without secrets), and `core.on_run_change(listener)`. This is the sanctioned way for an extension to change core records.
+
+`run_progress.get_progress(run_id)` turns web and SAST run state into one shape: `state` (`queued`, `preparing`, `running`, `needs_action`, `paused`, `completed`, `failed`, `stopped`), `phase`, `percent` (completed page/OWASP cells for web, resolved work items for SAST), counts, `needs_action` for waiting guided or authenticator logins, `resumable` for saved work that can continue, and timestamps. Run IDs are unique across kinds, so the function finds the run kind itself. `events.emit` notifies `run_lifecycle` listeners for every non-traffic event, and SAST task completion notifies them directly. Notices only say that a run may have changed; listeners re-read progress. Listeners registered through `registry.core` are removed when the extension reloads or is disabled.
+
+### API extension
+
+**Files**: `extensions/builtin/api/`
+
+The bundled `aespa.api` extension (disabled by default) serves `/extension/aespa.api/v1/`. Bearer tokens are stored as SHA-256 hashes in the extension database with `sast`, `web`, and `sites` scopes; each scan row records its owning token, so tokens see only their scans. Token management routes under `/admin/` are hidden from the definition and accept only loopback, same-origin requests without proxy forwarding headers. Create requests accept `Idempotency-Key`; a key is reserved before work starts and stores the final response (including start failures, which report the created scan ID) for 24 hours. The web resume route uses the core web run service to choose a paused crawl or saved dynamic scan and applies the same checks as the management routes.
+
+A background thread compares each unfinished scan that has a callback URL with its last seen state, on run-change notices and every 15 seconds, and queues `scan.*` events in an outbox table. Deliveries are POSTed without following redirects, signed with `X-AESPA-Signature: t=<unix>,v1=<HMAC-SHA256 of "t." + body>`, and retried after 30 s, 2, 5, 15, and 30 minutes before being marked failed. The `send_callbacks` setting pauses the worker. `tests/fixtures/aespa_api_v1_openapi.json` is a saved copy of the v1 definition; a test fails on any change until the copy is updated with `AESPA_UPDATE_API_SNAPSHOT=1`. See `docs/api.md` for client usage.
+
+See `docs/extensions.md` for the extension API contract and bundled implementations.
+
+---
+
+## 19. Systems & Multi-Repository Campaigns
+
+**Files**: `src/aespa/services/systems.py`, `src/aespa/services/campaigns.py`, `src/aespa/services/correlation.py`, `src/aespa/services/component_facts.py`, `src/aespa/services/component_mapper.py`, `src/aespa/services/source_tools.py`, `src/aespa/api/systems.py`
+
+A **System** groups named code components (repositories or micro-frontends), their fixed ZIP snapshots, and the live Sites/API Collections that make up the product. An **AssessmentCampaign** freezes those inputs, runs SAST for each component, connects the resulting leads to live targets, and asks a human to review inferred routes before testing starts.
+
+Systems live-target children are deliberately different from normal scans: a Site is crawled to collect frontend evidence, then the child run validates only the imported SAST leads. It does not start a normal coverage scan. API children validate their imported leads directly. A child reports **incomplete** when any imported lead is still open; retry reuses the same child run, crawl, and lead rows and continues the remaining work.
 
 This layer never replaces the standalone SAST/web/API workflows described in sections 6, 7, and 17. It reuses their services, with the campaign child runs set to `coverage_mode="sast_validate"`.
 
@@ -1697,29 +2161,30 @@ This layer never replaces the standalone SAST/web/API workflows described in sec
 
 | Table | Purpose |
 |---|---|
-| `application` | A named product/system being assessed |
-| `application_component` | A named repository/micro-frontend belonging to an application (unique name per application) |
-| `component_snapshot` | One immutable uploaded ZIP version for a component (filename, stored path, size, SHA-256) — never edited in place |
-| `application_target` | An existing `Site` or `ApiCollection` attached to an application (reused, never copied) |
-| `application_target.component_id` | An optional explicit code-component owner for a live target; linked component SAST leads are auto-imported into that target's child run |
+| `system` | A named product/system being assessed |
+| `system_component` | A named repository/micro-frontend belonging to a system (unique name per system) |
+| `component_snapshot` | One immutable uploaded ZIP version for a component (filename, stored path, size, SHA-256), never edited in place |
+| `system_target` | An existing `Site` or `ApiCollection` attached to a system (reused, never copied) |
+| `system_target.component_id` | An optional explicit code-component owner for a live target; linked component SAST leads are auto-imported into that target's child run |
 | `component_target_hint` | An optional user-supplied code-to-target routing association that boosts inferred correlation confidence |
 | `assessment_campaign` | One coordinated test; its `id` comes from the same global `run_identity` namespace as web/API/SAST runs (`kind="campaign"`), so its events/logs never collide with a run id |
 | `campaign_source_member` | One frozen `(component, snapshot)` pair selected for a campaign, plus the `SastRun` id it spawned |
 | `campaign_target_member` | One frozen live target selected for a campaign, plus the child run id, validation summary, and a message explaining incomplete work |
+| `campaign_validation_case` | One approved mapping prepared for a specific child run, with its static path, live page/request binding, readiness blockers, and test outcome |
 | `component_fact` | A compact interface fact recorded by a SAST run (deterministic baseline or evidence-backed LLM mapping) |
 | `component_connection` | One directed, evidence-backed graph edge (`contains`, `triggers`, `dispatches`, `calls`, or `reaches`) within or across component snapshots |
 | `lead_target_mapping` | A proposed (then reviewed) routing of one `ScanLead` to one live target, including approved and final frontend attack-path versions |
 | `scan_lead_component_provenance` | Many-component provenance for a campaign-generated cross-repository `ScanLead` (which components contributed, and which role) |
 
-A ZIP snapshot or an application target cannot be deleted while a campaign still references it (the same "referenced" guard the rest of the app uses for uploaded documents). Deleting an application is blocked while it still owns any campaign; deleting a campaign cascades into every child run it created (`run_cleanup.cascade_delete_campaign`) using the same helpers sections 6/7/17 already rely on for cleanup — a campaign never leaves an orphaned child run or a duplicate finding behind.
+A ZIP snapshot or a system target cannot be deleted while a campaign still references it (the same "referenced" guard the rest of the app uses for uploaded documents). Deleting a system is blocked while it still owns any campaign; deleting a campaign cascades into every child run it created (`run_cleanup.cascade_delete_campaign`) using the same helpers sections 6/7/17 already rely on for cleanup. A campaign never leaves an orphaned child run or a duplicate finding behind.
 
 ### Component facts (`services/component_facts.py`)
 
-Alongside its usual leads, every SAST run also records a short, bounded deterministic baseline of facts about how the code talks to the outside world. After campaign SAST children complete, the correlation stage runs a separate **Component Mapper** LLM once per immutable component snapshot. The mapper is language/framework agnostic and uses only path-jailed, read-only source tools; it follows wrappers, configuration, prefixes, and interpolation that regex extraction cannot reliably compose:
+Alongside its usual leads, every SAST run also records a short, bounded deterministic baseline of facts about how the code talks to the outside world. JavaScript and TypeScript sources use a repository-level semantic pass that follows function calls and values through custom request wrappers. It resolves local ES module and CommonJS imports, async event callbacks, state-held route values, template paths, Axios client base URLs, native HTML forms, and server-template form actions such as Thymeleaf URLs. Java sources combine class-level and method-level Spring MVC mapping annotations into complete ingress routes. Small line-based patterns remain as a compatibility fallback. After campaign SAST children complete, the correlation stage runs a separate **Component Mapper** LLM once per immutable component snapshot. The mapper uses path-jailed, read-only source tools to add evidence that deterministic analysis could not resolve:
 
 - **routes** it serves (Flask/FastAPI/Django decorators, Express-style handlers) with method + path
-- **outbound HTTP calls** it makes (`requests`/`httpx`/`axios`/`fetch`) with method + host + path
-- **browser roots and actions** (`ui_route`, `ui_action`, and handler facts for React Router, Next.js Pages/App Router, clicks, and form submissions)
+- **outbound HTTP calls** it makes (`requests`/`httpx`/Axios/`fetch`/`XMLHttpRequest`/Angular `HttpClient`) with method + host + path
+- **browser roots and actions** (`ui_route`, `ui_action`, and handler facts for React Router, Next.js Pages/App Router, React, Vue, Angular, plain JavaScript events, and form submissions)
 - **auth/session boundaries** (`@login_required`, `Depends(get_current_user)`, `passport.authenticate`, …)
 - **credential flows** that prove one outbound call obtains a token or session
   and later outbound calls use it; route names alone are not accepted as proof
@@ -1730,17 +2195,17 @@ Each fact carries a `file:line` evidence pointer and a semantic fingerprint that
 
 ### Correlation (`services/correlation.py`)
 
-Once a campaign's SAST child runs finish, `correlate_campaign_with_llm(campaign_id)` builds the map. It maps components with bounded concurrency, runs deterministic matching first, then sends only unresolved calls and at most 20 candidate routes per call to a compact ambiguity matcher. The matcher may select only supplied fact IDs and proposals below confidence 0.70 are discarded. `correlate_campaign(campaign_id)` remains the synchronous deterministic helper for tests and legacy callers.
+Once a campaign's SAST child runs finish, `correlate_campaign_with_llm(campaign_id)` builds the map. It maps components with bounded concurrency, runs deterministic matching first, then sends only unresolved calls and at most 20 ranked candidate routes per call to a compact ambiguity matcher. The matcher may select only supplied fact IDs and proposals below confidence 0.70 are discarded. `correlate_campaign(campaign_id)` remains the synchronous deterministic helper for tests and legacy callers.
 
-1. **Directed component connections** — internal UI route/action/request and handler/request edges are built first, then an outbound-call fact in one component is matched against a route fact in another by HTTP method + normalized path (query strings stripped, `{param}`/`:param` placeholders collapsed). Validated SAST leads also receive immutable `lead_anchor` facts so a vulnerability in a helper/service file can join the graph without pretending the helper is itself a browser route.
-2. **Lead-target routing** — every reportable lead from a campaign source's SAST run is scored against every campaign target: a direct `component_target_hint` (+0.6), a host match against the target's base URL (+0.2), or an exact method/path match against the target's own parsed `ApiEndpoint` rows (+0.3). An optional `application_target.component_id` is an explicit ownership decision: that component's own SAST leads bypass review and are copied automatically into the target's child run. Only genuinely inferred or cross-component matches become review proposals; a lead with no evidence for any target gets none, rather than a fabricated low-confidence guess.
-3. **Frontend path leads** — bounded reverse traversal starts at each lead anchor and follows incoming edges toward every known browser root. Complete UI-rooted paths and incomplete frontend-call paths are ranked by completeness, weakest-edge confidence, proof gaps, hop count, and stable path key. Each retained path becomes a distinct campaign lead/fingerprint and mapping; Site targets receive these frontend leads instead of a duplicate backend-only proposal, while API targets retain backend-oriented routing.
+1. **Directed component connections** - internal UI route/action/request and handler/request edges are built first. All extracted browser requests are considered, rather than only the first group in a component. Browser requests are matched to server ingress routes in the same component, and proxy routes are linked to the server egress requests they own. A missing egress role can be inferred only when one ingress route explicitly owns the call. An outbound-call fact is then matched against a route fact in another component by HTTP method and normalized path. Query strings are stripped and parameter placeholders are normalized. Every internal edge requires a source relationship such as an event binding, function call, route match, or explicit handler ownership. Shared supporting context is not enough. Validated SAST leads also receive immutable `lead_anchor` facts so a vulnerability in a helper or service file can join the graph without pretending the helper is a browser route. For a multi-step lead, the first stated endpoint must reach the anchor; a later step cannot stand in for the missing input path.
+2. **Lead-target routing** - every reportable lead from a campaign source's SAST run is scored against every campaign target using component hints, host matches, and exact API endpoint matches. Component ownership can automatically approve an API target. A Site mapping is automatically approved only when it contains a complete schema version 3 frontend trace. A complete single-component path can map only to a Site owned by that component. Backend ownership without a frontend trace remains an unresolved review proposal and cannot become web validation work.
+3. **Frontend path leads** - bounded reverse traversal starts at each lead anchor and follows incoming edges toward a browser route or an evidence-backed UI action. Complete UI-rooted paths and incomplete frontend-call paths are ranked by completeness, weakest-edge confidence, proof gaps, hop count, and stable path key. Equivalent variants are combined and the version containing the proven handler is preferred. Each retained path becomes a distinct campaign lead and mapping. Site targets receive these frontend leads instead of a duplicate backend-only proposal, while API targets retain backend-oriented routing.
 
 Mapping/provider failures do not advance a campaign to `awaiting_review`: transient provider/protocol failures are persisted as `interrupted` with `interrupted_stage="correlating"` so the existing retry action resumes without rerunning completed SAST children, while missing snapshots and ownership invariants are terminal failures. Stop requests are honored between mapper operations and matcher batches. A campaign without any explicitly selected or active LLM profile retains the legacy deterministic baseline with a visible activity warning; configured mapper failures are never silently converted to an empty map.
 
 ### Review gate
 
-`services/campaigns.submit_review(campaign_id, decisions)` applies a list of `(mapping_id, approve)` decisions idempotently — resubmitting the same decision twice does not toggle counters or create duplicates — and records `review_submitted_at` on the campaign. Approving a mapping here does **not** copy anything yet: the live target's `TestRun`/`ApiTestRun` does not exist until the DAST stage starts. `continue_to_live_testing(campaign_id)` is explicitly gated on `status == "awaiting_review"` **and** `review_submitted_at` being set — this is the mechanism that keeps DAST from starting before a human has reviewed inferred lead routing. Once each target's child run exists, the DAST stage first copies reportable leads from the target's explicitly assigned `component_id` (if any), then `correlation.copy_approved_mappings_for_target` copies approved inferred/cross-component mappings into that exact run via the existing `scan_leads` copy helpers. A rejected mapping is never copied. Completed campaigns may review later crawl-discovered proposals; approval does not mutate the original scan, and the separate supplemental-validation action copies only the selected paths into the existing web run and starts a lead-only `sast_validate` pass.
+`services/campaigns.submit_review(campaign_id, decisions)` applies a list of `(mapping_id, approve)` decisions idempotently and records `review_submitted_at` on the campaign. Approval authorizes route resolution; it does not place a lead in a scan queue. `continue_to_live_testing(campaign_id)` requires `status == "awaiting_review"` and a submitted review. Once a target child exists, each approved mapping becomes a `CampaignValidationCase`. Site cases must match a schema version 3 browser request to that child's crawl page, action, traffic, and session evidence. API cases must match an in-scope parsed endpoint and its prerequisites. Only cases with `readiness_status="resolved"` are copied into the child run. Rejected, ambiguous, stale, wrong-target, and incomplete paths remain visible with blockers and are not tested. Supplemental validation uses the same resolution and compilation steps for the selected mappings.
 
 `GET .../mappings` gives the review screen everything it needs in one call — each `LeadTargetMappingOut` row carries the raw mapping fields plus linked lead context, trace status/confidence, origin vulnerability id, and contributing component ids/names. Path cards are grouped under their originating SAST vulnerability but approved independently. Reviewers may edit only frontend guidance fields; backend source/sink evidence is immutable and edited field names are retained as reviewer-supplied guidance. `approved_attack_path_json` is preserved byte-for-byte, while crawl resolution writes `final_attack_path_json` and a bounded `attack_path_changes_json` audit record. A matched path must use the same page for its route, action, and request. Interactive browser replays store an opaque interaction id on both the action link and the traffic rows, so a request from another page or action cannot be substituted.
 
@@ -1758,21 +2223,21 @@ draft ─start─▶ sast_running ─▶ correlating ─▶ awaiting_review
 ```
 
 - **`sast_running`** — `start_campaign` creates one `SastRun` per frozen `(component, snapshot)` pair inside one transaction (the "frozen child manifest"), then awaits them under a bounded `asyncio.Semaphore(max_parallel_sast)`. A single component's scan failing does not fail the campaign — it is recorded on that `CampaignSourceMember` and surfaced as a plain-language warning on the campaign (`warnings_json`), and the campaign still reaches review with the results it has. A member already `completed`/`failed` (from an earlier run or a retry) is never rerun.
-- **`correlating`** — runs `correlate_campaign` (synchronous, deterministic). Facts are looked up by each `CampaignSourceMember`'s own `sast_run_id` — never by `component_id` alone — so a component reused across two campaigns/snapshots never leaks the other campaign's facts into this one.
+- **`correlating`** - awaits `correlate_campaign_with_llm`, which runs component mapping, deterministic matching, and bounded LLM matching for unresolved calls. Campaigns without a selected or active LLM profile use the deterministic fallback described above. Facts are looked up by each `CampaignSourceMember`'s own `sast_run_id`, so reused components do not mix facts from different campaign snapshots.
 - **`awaiting_review`** — paused until the review gate is satisfied: `submit_review` rejects an unknown/foreign `mapping_id` outright (all-or-nothing per batch) and only accepts an empty decision list when the campaign genuinely has zero proposals; `review_submitted_at` is stamped only once every proposed mapping — across one or more submissions — has an approved/rejected decision.
-- **`dast_running`** — for each frozen target, a `TestRun`/`ApiTestRun` is created (once, rerun-safe) and driven the same way the standalone screens do. A successful web crawl resolves each approved frontend path against exact page/request artifacts before copying it to the web run. Crawl artifacts that reveal an additional page/action/request combination are stored as unapproved `proposed` mappings and are never injected into the active scan. If a campaign web crawl is partial or fails but has an approved path, the normal web scanner still starts with pre-crawl/partial evidence and a prominent warning; a crawl failure without an approved path retains the old skip behavior. Standalone web scans are unchanged. An API target copies its backend-oriented approved leads and calls `api_scanner.start_api_scan` directly. Every target runs concurrently. A target is only marked `completed` after reloading its `TestRun`/`ApiTestRun` and confirming a genuine success status (`"complete"`/`"completed"`) — the wait loop exiting only means the task is done, not that it succeeded. Later-approved crawl paths use `POST .../targets/{target_id}/supplemental-validate`; this reuses the existing web run, copies only those path leads, and runs `coverage_mode="sast_validate"` without recrawling or rerunning general coverage.
+- **`dast_running`** — for each frozen target, a `TestRun`/`ApiTestRun` is created once. A Site child crawls first, then resolves approved schema version 3 paths against its own page, action, and browser traffic rows. An API child resolves approved backend paths against its parsed endpoint rows. The scanner starts only when at least one resolved case has produced an open copied lead. Retryable missing evidence marks the target incomplete; terminal blockers are recorded without running a scanner. Crawl-discovered alternatives are saved as unapproved proposals for later review. Every target runs concurrently. A target is marked completed only after its runnable cases finish or every approved path has a terminal readiness result. A failed target makes a mixed campaign incomplete so another successful target cannot hide it. Later-approved paths use `POST .../targets/{target_id}/supplemental-validate`, reuse the existing web run, and pass through the same readiness gate before the lead-only scan starts.
 - **Independent child retry** — once the campaign orchestrator is idle, `POST .../sources/{member_id}/resume` and `POST .../targets/{member_id}/resume` retry only the selected failed/pending/skipped child. The existing child run is reused when available, completed siblings and the campaign stage are left untouched (except that a failed no-target campaign is promoted to `completed` when a target retry succeeds), and the retry is tracked separately so stopping or deleting a campaign cannot race an in-flight member retry. The same child run remains directly manageable from its ordinary SAST, web, or API screen; deleting a child detaches that member and allows the campaign resume action to create a replacement child from the frozen snapshot or target.
-- **Context matching retry** — the Connections tab exposes `Resume context matching` for failed/interrupted correlation and `Re-run context matching` for completed review/live stages. It reuses the collected SAST facts and immutable snapshots without rerunning child scans; downstream review/mapping data is preserved once the campaign has moved past correlation, and concurrent campaign actions are rejected.
+- **Context matching retry** - the Connections tab exposes `Resume context matching` for failed or interrupted correlation and `Re-run context matching` after matching has completed. A full rerun clears connections, campaign-generated leads, mappings, validation cases, and review decisions. It re-extracts deterministic facts from the immutable snapshots, keeps the original SAST findings, and performs matching as a fresh run. Reruns are rejected while a child web or API scan is active.
 - **Stop and resume** — `stop_campaign` saves the active campaign stage, marks a cooperative stop flag, then awaits each running child's own `stop_*_and_wait` barrier (`sast_scanner.stop_sast_scan_and_wait`, `crawler.stop_and_wait`, `scanner.stop_thinking_and_wait`, `api_scanner.stop_api_scan_and_wait`) before cancelling and awaiting the orchestrator task itself. Once every barrier has settled, `_normalize_running_members_after_stop` changes any member still marked `running` to `skipped`, so the UI never shows work that is no longer active. The campaign is then persisted as `stopped` and is safe to delete or resume. `resume_campaign` returns to the saved SAST, context-matching, or live-testing stage, reuses existing child runs and scan leads, skips completed members, and restores web scan checkpoints when available. Older stopped campaigns without a saved stage infer the safest continuation point from their existing child runs; cancelled source scans incorrectly left as failed by older versions are returned to pending and their stale warning is removed before resuming.
 - **Findings** stay owned by their child run exactly as before — `GET .../findings` reads across children rather than creating a second finding copy — and each row resolves its contributing component(s) the same way mappings do: through the finding's linked `ScanLead` (`ScanLead.linked_finding_id`), never guessed from target/host matching. A SAST-produced lead's component comes from `CampaignSourceMember`; a campaign-produced cross-repo lead's components come from `ScanLeadComponentProvenance` on the *original* lead — the finding's linked row is itself a copy imported into the dynamic run, so it is matched back to its original by fingerprint (the same identity `copy_lead_to_run` uses for its own idempotency). `component_name` stays a comma-joined string for backward compatibility; `component_ids`/`component_names` give the same information as lists.
 - **Activity** — `GET .../activity` replays the campaign's persisted `AgentLog`/`ScanLog` rows (filtered `run_kind == "campaign"` and this campaign's id) as one stable, chronological feed — the reload/replay counterpart to the live `GET .../events` SSE stream, which keeps working unchanged for real-time updates. `GET .../activity/stream` is a third option: a cursor-safe SSE stream that replays persisted history after a cursor and then keeps following new persisted rows, with **no fetch→subscribe gap window** — every message it emits, "replayed" or "new", comes from re-querying `AgentLog`/`ScanLog` on a ~1s poll (`_ACTIVITY_STREAM_POLL_SECONDS`), so there is no in-memory subscribe step that could start after a row has already committed. Each `CampaignActivityEntry` carries `event_id`, a composite `"<max AgentLog.id seen>.<max ScanLog.id seen>"` watermark (the two tables have independent id sequences, so a single counter cannot capture "everything seen so far" on its own). Pass it back as `Last-Event-ID` (checked first, browser `EventSource` reconnects do this automatically) or the `?cursor=` query param (checked second) to resume exactly after it; omit both to replay full history. Every SSE frame includes an `id: <event_id>` line for this purpose.
 
 ### Cleanup & restart recovery
 
-Deleting a campaign (`run_cleanup.cascade_delete_campaign`) removes rows in FK-safe order: every join/mapping row that references a `ScanLead`/`ComponentFact` (`ComponentConnection`, `LeadTargetMapping`, `ScanLeadComponentProvenance`) is deleted and flushed *before* the child-run cascades remove the facts/leads they point to — verified with SQLite foreign-key enforcement genuinely on in tests. It also never deletes a `ComponentSnapshot`'s ZIP file: `cascade_delete_sast_run` only removes a run's `source_archive_path` when that path is *not* a known snapshot's `stored_path` — a campaign-created `SastRun`'s archive is always a shared, immutable snapshot another campaign may still select, while a standalone SAST run's own upload is still removed as before.
+Deleting a campaign (`run_cleanup.cascade_delete_campaign`) removes validation cases before the mappings, target members, leads, facts, and child runs they reference. The remaining join rows are also deleted in foreign-key-safe order. It never deletes a `ComponentSnapshot` ZIP file: `cascade_delete_sast_run` removes a run's `source_archive_path` only when it is not a known snapshot path.
 
-Campaign child runs are intentionally not subject to a separate ownership lock. Their ordinary SAST, web, and API detail screens can start/stop, edit, validate, clear, and delete them directly, including when the run is listed inside a campaign. Starting a campaign SAST child from its normal SAST screen updates the campaign member too; when all source scans finish, the campaign resumes context matching automatically. Deleting a child clears its run id from the campaign member and returns that member to `pending`; a later campaign resume recreates the child from the frozen source snapshot or live target. Deleting the underlying `Site`/`ApiCollection` behind an application target is still blocked while any `ApplicationTarget` attaches it — detach it from every application first.
+Campaign child runs are intentionally not subject to a separate ownership lock. Their ordinary SAST, web, and API detail screens can start/stop, edit, validate, clear, and delete them directly, including when the run is listed inside a campaign. Starting a campaign SAST child from its normal SAST screen updates the campaign member too; when all source scans finish, the campaign resumes context matching automatically. Deleting a child clears its run id from the campaign member and returns that member to `pending`; a later campaign resume recreates the child from the frozen source snapshot or live target. Deleting the underlying `Site`/`ApiCollection` behind a system target is still blocked while any `SystemTarget` attaches it. Detach it from every system first.
 
 `db._stamp_legacy_db_if_needed` picks a legacy database's Alembic stamp from *actual table presence*, not a fixed assumption: a pre-Alembic database with `run_identity` but not yet `assessment_campaign` (a genuine legacy database predating this feature) is stamped at the revision immediately before it so those two migrations replay for real, instead of the previous behavior of stamping straight at the symbolic `"head"` — which was correct only until the next migration was added, after which it silently skipped every migration since for this exact database shape. A database that already has every current table (e.g. a dev/test database built via `metadata.create_all()`) is still recognized as already current and stamped at `head` directly, so replaying migrations never tries to re-create a table that already exists.
 
-`campaigns.reconcile_campaigns()` runs once at process startup (alongside `validator_svc.resume_interrupted_validations()`). Because every in-memory task registry starts empty after a restart, any campaign still marked as an active stage (`sast_running`/`correlating`/`dast_running`) could not have a live orchestrator — rather than a dead-end `failed` status, it is moved to `interrupted` with `interrupted_stage` recording exactly which stage was running, and any member left `running` is reset to `pending` (a member already `completed`/`failed` is left alone). `POST /api/applications/{id}/campaigns/{id}/resume` resumes a stopped or interrupted campaign from that exact stage. It never recreates a child `SastRun`/`TestRun`/`ApiTestRun` and never reruns an already-finished member, so resuming does not duplicate child runs or leads. The older `/retry` route remains as a compatible alias.
+`campaigns.reconcile_campaigns()` runs once at process startup (alongside `validator_svc.resume_interrupted_validations()`). Because every in-memory task registry starts empty after a restart, any campaign still marked as an active stage (`sast_running`/`correlating`/`dast_running`) could not have a live orchestrator. It is moved to `interrupted`, with `interrupted_stage` recording which stage was running, and any member left `running` is reset to `pending` (a member already `completed`/`failed` is left alone). `POST /api/systems/{id}/campaigns/{id}/resume` resumes a stopped or interrupted campaign from that stage. It never recreates a child `SastRun`/`TestRun`/`ApiTestRun` and never reruns an already-finished member, so resuming does not duplicate child runs or leads. The older `/retry` route remains as a compatible alias.

@@ -9,11 +9,11 @@ from sqlmodel import Session
 from aespa.models import (
     AdversarialValidatorConfig,
     BrowserDebugConfig,
-    BurpRestApiConfig,
     CloudflareAccessConfig,
     CodeExecutionConfig,
     ComponentMapperConfig,
     CrawlerConfig,
+    DeepScanConfig,
     GlobalHttpHeaderConfig,
     ReportingDebugConfig,
     ScannerPolicy,
@@ -24,8 +24,6 @@ from aespa.models import (
 from aespa.schemas import (
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
-    BurpRestApiConfigIn,
-    BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
     CodeExecutionConfigIn,
@@ -34,6 +32,8 @@ from aespa.schemas import (
     ComponentMapperConfigOut,
     CrawlerConfigIn,
     CrawlerConfigOut,
+    DeepScanConfigIn,
+    DeepScanConfigOut,
     GlobalHttpHeaderConfigIn,
     GlobalHttpHeaderConfigOut,
     ReportingDebugConfigIn,
@@ -59,6 +59,9 @@ from aespa.services.settings_values import (
 def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
     return ScannerPolicyOut(
         execution_monitor_enabled=cfg.execution_monitor_enabled,
+        openai_refusal_recovery_enabled=getattr(
+            cfg, "openai_refusal_recovery_enabled", False
+        ),
         disable_deterministic_checks=getattr(
             cfg, "disable_deterministic_checks", False
         ),
@@ -70,6 +73,9 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
         scan_mode=cfg.scan_mode,
         max_probes_per_page=cfg.max_probes_per_page,
         thinking_max_steps=cfg.thinking_max_steps,
+        dast_max_concurrent_llm_requests=getattr(
+            cfg, "dast_max_concurrent_llm_requests", 4
+        ),
         request_timeout_s=cfg.request_timeout_s,
         min_delay_s=cfg.min_delay_s,
         max_request_body_bytes=cfg.max_request_body_bytes,
@@ -81,6 +87,24 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
         allow_subdomains=cfg.allow_subdomains,
         require_approval_for_destructive=cfg.require_approval_for_destructive,
         strict_locator_enforcement=getattr(cfg, "strict_locator_enforcement", True),
+        sast_rate_limit_findings=getattr(cfg, "sast_rate_limit_findings", True),
+        sast_race_condition_findings=getattr(cfg, "sast_race_condition_findings", True),
+        sast_audit_logging_findings=getattr(cfg, "sast_audit_logging_findings", True),
+        sast_defense_in_depth_findings=getattr(
+            cfg, "sast_defense_in_depth_findings", False
+        ),
+        sast_dependency_findings=getattr(cfg, "sast_dependency_findings", True),
+        retire_auto_update=getattr(cfg, "retire_auto_update", True),
+        sast_min_severity=getattr(cfg, "sast_min_severity", "low"),
+        sast_budget_mode=getattr(cfg, "sast_budget_mode", "adaptive"),
+        sast_baseline_budget=getattr(cfg, "sast_baseline_budget", 80),
+        sast_threat_budget=getattr(cfg, "sast_threat_budget", 60),
+        sast_worker_budget_max=getattr(cfg, "sast_worker_budget_max", 250),
+        sast_closure_budget=getattr(cfg, "sast_closure_budget", 40),
+        sast_validator_budget=getattr(cfg, "sast_validator_budget", 50),
+        sast_max_concurrent_llm_requests=getattr(
+            cfg, "sast_max_concurrent_llm_requests", 4
+        ),
         updated_at=cfg.updated_at,
     )
 
@@ -88,7 +112,21 @@ def _policy_from_model(cfg: ScannerPolicy) -> ScannerPolicyOut:
 def get_scanner_policy(session: Session) -> ScannerPolicyOut:
     cfg = session.get(ScannerPolicy, _SINGLETON_ID)
     if cfg is None:
-        return ScannerPolicyOut(**ScannerPolicyIn().model_dump(), updated_at=_utcnow())
+        return ScannerPolicyOut(
+            **ScannerPolicyIn().model_dump(exclude_none=True), updated_at=_utcnow()
+        )
+    return _policy_from_model(cfg)
+
+
+def set_openai_refusal_recovery(session: Session, enabled: bool) -> ScannerPolicyOut:
+    cfg = session.get(ScannerPolicy, _SINGLETON_ID)
+    if cfg is None:
+        cfg = ScannerPolicy(id=_SINGLETON_ID)
+    cfg.openai_refusal_recovery_enabled = enabled
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
     return _policy_from_model(cfg)
 
 
@@ -144,6 +182,8 @@ def upsert_scanner_policy(
         cfg = ScannerPolicy(id=_SINGLETON_ID)
 
     cfg.execution_monitor_enabled = payload.execution_monitor_enabled
+    if payload.openai_refusal_recovery_enabled is not None:
+        cfg.openai_refusal_recovery_enabled = payload.openai_refusal_recovery_enabled
     cfg.disable_deterministic_checks = payload.disable_deterministic_checks
     cfg.max_consecutive_text_turns = payload.max_consecutive_text_turns
     cfg.enforce_full_coverage_obligations = payload.enforce_full_coverage_obligations
@@ -151,6 +191,7 @@ def upsert_scanner_policy(
     cfg.scan_mode = payload.scan_mode
     cfg.max_probes_per_page = payload.max_probes_per_page
     cfg.thinking_max_steps = payload.thinking_max_steps
+    cfg.dast_max_concurrent_llm_requests = payload.dast_max_concurrent_llm_requests
     cfg.request_timeout_s = payload.request_timeout_s
     cfg.min_delay_s = payload.min_delay_s
     cfg.max_request_body_bytes = payload.max_request_body_bytes
@@ -162,6 +203,20 @@ def upsert_scanner_policy(
     cfg.allow_subdomains = payload.allow_subdomains
     cfg.require_approval_for_destructive = payload.require_approval_for_destructive
     cfg.strict_locator_enforcement = payload.strict_locator_enforcement
+    cfg.sast_rate_limit_findings = payload.sast_rate_limit_findings
+    cfg.sast_race_condition_findings = payload.sast_race_condition_findings
+    cfg.sast_audit_logging_findings = payload.sast_audit_logging_findings
+    cfg.sast_defense_in_depth_findings = payload.sast_defense_in_depth_findings
+    cfg.sast_dependency_findings = payload.sast_dependency_findings
+    cfg.retire_auto_update = payload.retire_auto_update
+    cfg.sast_min_severity = payload.sast_min_severity
+    cfg.sast_budget_mode = payload.sast_budget_mode
+    cfg.sast_baseline_budget = payload.sast_baseline_budget
+    cfg.sast_threat_budget = payload.sast_threat_budget
+    cfg.sast_worker_budget_max = payload.sast_worker_budget_max
+    cfg.sast_closure_budget = payload.sast_closure_budget
+    cfg.sast_validator_budget = payload.sast_validator_budget
+    cfg.sast_max_concurrent_llm_requests = payload.sast_max_concurrent_llm_requests
     cfg.updated_at = _utcnow()
 
     session.add(cfg)
@@ -268,7 +323,10 @@ def get_upstream_proxy_config(session: Session) -> UpstreamProxyConfigOut:
             **UpstreamProxyConfigIn().model_dump(), updated_at=_utcnow()
         )
     return UpstreamProxyConfigOut(
-        proxy_url=cfg.proxy_url,
+        scanner_proxy_url=cfg.scanner_proxy_url,
+        llm_proxy_url=cfg.llm_proxy_url,
+        scanner_ca_bundle_path=cfg.scanner_ca_bundle_path,
+        llm_ca_bundle_path=cfg.llm_ca_bundle_path,
         proxy_scanner=cfg.proxy_scanner,
         proxy_llm=cfg.proxy_llm,
         updated_at=cfg.updated_at,
@@ -281,7 +339,10 @@ def upsert_upstream_proxy_config(
     cfg = session.get(UpstreamProxyConfig, _SINGLETON_ID)
     if cfg is None:
         cfg = UpstreamProxyConfig(id=_SINGLETON_ID)
-    cfg.proxy_url = payload.proxy_url
+    cfg.scanner_proxy_url = payload.scanner_proxy_url
+    cfg.llm_proxy_url = payload.llm_proxy_url
+    cfg.scanner_ca_bundle_path = payload.scanner_ca_bundle_path
+    cfg.llm_ca_bundle_path = payload.llm_ca_bundle_path
     cfg.proxy_scanner = payload.proxy_scanner
     cfg.proxy_llm = payload.proxy_llm
     cfg.updated_at = _utcnow()
@@ -289,40 +350,6 @@ def upsert_upstream_proxy_config(
     session.commit()
     session.refresh(cfg)
     return get_upstream_proxy_config(session)
-
-
-def _burp_rest_api_config_from_model(cfg: BurpRestApiConfig) -> BurpRestApiConfigOut:
-    return BurpRestApiConfigOut(
-        enabled=cfg.enabled,
-        api_url=cfg.api_url,
-        has_api_key=bool(cfg.api_key and cfg.api_key.strip()),
-        api_key=None,
-        scan_configuration_name=cfg.scan_configuration_name,
-        scan_sqli=cfg.scan_sqli,
-        scan_xss=cfg.scan_xss,
-        scan_command_injection=cfg.scan_command_injection,
-        scan_path_traversal=cfg.scan_path_traversal,
-        scan_ssrf=cfg.scan_ssrf,
-        scan_xxe=cfg.scan_xxe,
-        scan_ssti=cfg.scan_ssti,
-        updated_at=cfg.updated_at,
-    )
-
-
-def get_burp_rest_api_config_model(session: Session) -> BurpRestApiConfig:
-    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
-    if cfg is None:
-        return BurpRestApiConfig(id=_SINGLETON_ID)
-    return cfg
-
-
-def get_burp_rest_api_config(session: Session) -> BurpRestApiConfigOut:
-    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
-    if cfg is None:
-        return BurpRestApiConfigOut(
-            **BurpRestApiConfigIn().model_dump(), updated_at=_utcnow()
-        )
-    return _burp_rest_api_config_from_model(cfg)
 
 
 def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
@@ -349,9 +376,45 @@ def get_specialist_agent_config(session: Session) -> SpecialistAgentConfigOut:
         dispatch_crypto=cfg.dispatch_crypto,
         dispatch_config=cfg.dispatch_config,
         dispatch_file_upload=cfg.dispatch_file_upload,
-        trigger_specialist_on_burp=cfg.trigger_specialist_on_burp,
         updated_at=cfg.updated_at,
     )
+
+
+def get_deep_scan_config(session: Session) -> DeepScanConfigOut:
+    cfg = session.get(DeepScanConfig, _SINGLETON_ID)
+    if cfg is None:
+        return DeepScanConfigOut(
+            **DeepScanConfigIn().model_dump(), updated_at=_utcnow()
+        )
+    return DeepScanConfigOut(
+        max_concurrent_workers=cfg.max_concurrent_workers,
+        max_concurrent_planners=cfg.max_concurrent_planners,
+        max_tasks=cfg.max_tasks,
+        max_steps_per_task=cfg.max_steps_per_task,
+        initial_variants_per_campaign=cfg.initial_variants_per_campaign,
+        max_variants_per_campaign=cfg.max_variants_per_campaign,
+        max_total_variants=cfg.max_total_variants,
+        adaptive_follow_up=cfg.adaptive_follow_up,
+        minimum_signal_strength=cfg.minimum_signal_strength,
+        reuse_captured_baselines=cfg.reuse_captured_baselines,
+        include_sast_leads=cfg.include_sast_leads,
+        include_recon_checks=cfg.include_recon_checks,
+        updated_at=cfg.updated_at,
+    )
+
+
+def upsert_deep_scan_config(
+    session: Session, payload: DeepScanConfigIn
+) -> DeepScanConfigOut:
+    cfg = session.get(DeepScanConfig, _SINGLETON_ID)
+    if cfg is None:
+        cfg = DeepScanConfig(id=_SINGLETON_ID)
+    for field, value in payload.model_dump().items():
+        setattr(cfg, field, value)
+    cfg.updated_at = _utcnow()
+    session.add(cfg)
+    session.commit()
+    return get_deep_scan_config(session)
 
 
 def upsert_specialist_agent_config(
@@ -377,40 +440,11 @@ def upsert_specialist_agent_config(
     cfg.dispatch_crypto = payload.dispatch_crypto
     cfg.dispatch_config = payload.dispatch_config
     cfg.dispatch_file_upload = payload.dispatch_file_upload
-    cfg.trigger_specialist_on_burp = payload.trigger_specialist_on_burp
     cfg.updated_at = _utcnow()
     session.add(cfg)
     session.commit()
     session.refresh(cfg)
     return get_specialist_agent_config(session)
-
-
-def upsert_burp_rest_api_config(
-    session: Session, payload: BurpRestApiConfigIn
-) -> BurpRestApiConfigOut:
-    cfg = session.get(BurpRestApiConfig, _SINGLETON_ID)
-    if cfg is None:
-        cfg = BurpRestApiConfig(id=_SINGLETON_ID)
-
-    cfg.enabled = payload.enabled
-    cfg.api_url = payload.api_url
-    if payload.api_key is not None:
-        key_str = payload.api_key.strip()
-        cfg.api_key = key_str if key_str else None
-    cfg.scan_configuration_name = payload.scan_configuration_name
-    cfg.scan_sqli = payload.scan_sqli
-    cfg.scan_xss = payload.scan_xss
-    cfg.scan_command_injection = payload.scan_command_injection
-    cfg.scan_path_traversal = payload.scan_path_traversal
-    cfg.scan_ssrf = payload.scan_ssrf
-    cfg.scan_xxe = payload.scan_xxe
-    cfg.scan_ssti = payload.scan_ssti
-    cfg.updated_at = _utcnow()
-
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return _burp_rest_api_config_from_model(cfg)
 
 
 def get_adversarial_validator_config(session: Session) -> ValidatorConfigOut:
@@ -523,26 +557,40 @@ def upsert_reporting_debug_config(
 
 
 def get_browser_debug_config(session: Session) -> BrowserDebugConfigOut:
+    from aespa.browser import chromium_install_state, playwright_chromium_available
     from aespa.runtime_capabilities import (
         NO_GRAPHICAL_DISPLAY_MESSAGE,
         graphical_display_available,
     )
 
     display_available = graphical_display_available()
+    chromium_available = playwright_chromium_available()
+    chromium_installing = chromium_install_state() == "installing"
     cfg = session.get(BrowserDebugConfig, _SINGLETON_ID)
     if cfg is None:
+        defaults = BrowserDebugConfigIn().model_dump()
+        if not chromium_available:
+            defaults["browser_engine"] = "system_chrome"
         return BrowserDebugConfigOut(
-            **BrowserDebugConfigIn().model_dump(),
+            **defaults,
             updated_at=_utcnow(),
+            playwright_chromium_available=chromium_available,
+            playwright_chromium_installing=chromium_installing,
             graphical_display_available=display_available,
             graphical_display_message=(
                 None if display_available else NO_GRAPHICAL_DISPLAY_MESSAGE
             ),
         )
     return BrowserDebugConfigOut(
-        browser_engine=cfg.browser_engine,
+        browser_engine=(
+            "system_chrome"
+            if cfg.browser_engine == "playwright_chromium" and not chromium_available
+            else cfg.browser_engine
+        ),
         browser_visible=cfg.browser_visible and display_available,
         updated_at=cfg.updated_at,
+        playwright_chromium_available=chromium_available,
+        playwright_chromium_installing=chromium_installing,
         graphical_display_available=display_available,
         graphical_display_message=(
             None if display_available else NO_GRAPHICAL_DISPLAY_MESSAGE
@@ -553,12 +601,18 @@ def get_browser_debug_config(session: Session) -> BrowserDebugConfigOut:
 def upsert_browser_debug_config(
     session: Session, payload: BrowserDebugConfigIn
 ) -> BrowserDebugConfigOut:
+    from aespa.browser import playwright_chromium_available
     from aespa.runtime_capabilities import graphical_display_available
 
     cfg = session.get(BrowserDebugConfig, _SINGLETON_ID)
     if cfg is None:
         cfg = BrowserDebugConfig(id=_SINGLETON_ID)
-    cfg.browser_engine = payload.browser_engine
+    cfg.browser_engine = (
+        "system_chrome"
+        if payload.browser_engine == "playwright_chromium"
+        and not playwright_chromium_available()
+        else payload.browser_engine
+    )
     cfg.browser_visible = payload.browser_visible and graphical_display_available()
     cfg.updated_at = _utcnow()
     session.add(cfg)

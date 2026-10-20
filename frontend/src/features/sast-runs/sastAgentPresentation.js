@@ -1,0 +1,243 @@
+import { fmtTime } from "../../shared/lib/dates.js";
+import { normaliseAgentStatus } from "../../shared/runs/AgentStatusRows.jsx";
+
+const FIXED_AGENTS = [
+  {
+    id: "sast-repository-modeller",
+    name: "Repository Modeller",
+    task: "Waiting to model the repository",
+    deepOnly: true,
+  },
+  {
+    id: "sast-threat-modeller",
+    name: "Threat Modeller",
+    task: "Waiting to model threats",
+    deepOnly: true,
+  },
+  { id: "sast-scanner", name: "SAST Analyst", task: "Waiting to analyse source" },
+];
+
+const GROUPS = [
+  {
+    id: "sast-review-workers",
+    name: "Review Workers",
+    classGroup: "review",
+    task: "No route review queued",
+  },
+  // Older runs used one worker per vulnerability class; they are shown only
+  // when a run actually has workers of that kind.
+  {
+    id: "sast-injection-workers",
+    name: "Injection Workers",
+    classGroup: "injection",
+    legacy: true,
+    task: "No injection analysis queued",
+  },
+  {
+    id: "sast-access-workers",
+    name: "Access Control Workers",
+    classGroup: "access",
+    legacy: true,
+    task: "No access-control analysis queued",
+  },
+  {
+    id: "sast-logic-workers",
+    name: "Logic Workers",
+    classGroup: "logic",
+    legacy: true,
+    task: "No business-logic analysis queued",
+  },
+  {
+    id: "sast-sink-workers",
+    name: "Sink Workers",
+    classGroup: "sink",
+    task: "No sink analysis queued",
+  },
+  {
+    id: "sast-validators",
+    name: "Finding Validators",
+    classGroup: "validator",
+    task: "No finding validation queued",
+  },
+];
+
+const FINAL_AGENTS = [
+  {
+    id: "sast-closure-analyst",
+    name: "Gap Reviewer",
+    task: "Waiting to review coverage gaps",
+    deepOnly: true,
+  },
+  {
+    id: "sast-attack-path",
+    name: "Attack Path Analyst",
+    task: "Waiting for confirmed findings",
+  },
+];
+
+function eventTime(value) {
+  return fmtTime(value, "--:--:--");
+}
+
+function inferClassGroup(row) {
+  if (row.parent_id === "sast-validators" || /^sast-validator-\d+$/.test(row.agent_id || "")) {
+    return "validator";
+  }
+  if (row.class_group) return row.class_group;
+  const role = String(row.role || "").toLowerCase();
+  return ["review", "injection", "access", "logic", "sink"].find((group) =>
+    role.includes(`${group} worker`),
+  );
+}
+
+export function sastGroupHasAgents(rows, classGroup) {
+  return (rows || []).some((row) => inferClassGroup(row) === classGroup);
+}
+
+export function sastGroupHasActiveAgent(rows, classGroup) {
+  return (rows || []).some(
+    (row) => inferClassGroup(row) === classGroup && normaliseAgentStatus(row.status) === "active",
+  );
+}
+
+function inferredWorkerName(row) {
+  if (row.display_name) return row.display_name;
+  if (row.worker_key) return row.worker_key;
+  const task = String(row.current_task || "");
+  const workerMatch = task.match(
+    /^(?:Queued analysis worker|Started analysis worker|Analysis (?:finished|failed|paused|stopped) for) (.+)$/,
+  );
+  if (workerMatch) return workerMatch[1];
+  const candidate = String(row.agent_id || "").match(/^sast-validator-(\d+)$/)?.[1];
+  return candidate ? `Finding ${candidate}` : row.role || row.agent_id || "Worker";
+}
+
+function buildAgents(rows, scanRunning) {
+  const agents = new Map();
+  for (const row of rows || []) {
+    if (!row.agent_id) continue;
+    const existing = agents.get(row.agent_id) || {
+      id: row.agent_id,
+      name: row.display_name || row.role || row.agent_id,
+      role: row.role || "Agent",
+      status: "idle",
+      task: "",
+      outcome: "",
+      taskHistory: [],
+      classGroup: inferClassGroup(row),
+    };
+    existing.name = inferClassGroup(row) ? inferredWorkerName(row) : row.role || existing.name;
+    existing.role = row.role || existing.role;
+    const status = row.status || existing.status;
+    const unfinished = ["active", "running", "spawned", "queued", "pausing"].includes(status);
+    existing.status = !scanRunning && unfinished ? "paused" : status;
+    existing.task =
+      !scanRunning && unfinished
+        ? "Scan stopped before this task finished"
+        : row.current_task || existing.task;
+    existing.outcome = row.outcome || "";
+    existing.classGroup = inferClassGroup(row) || existing.classGroup;
+    const historyEntry = {
+      id: row.id,
+      ts: eventTime(row.created_at),
+      task: row.current_task || "",
+      outcome: row.outcome || "",
+      status: row.status || "idle",
+    };
+    const previous = existing.taskHistory[existing.taskHistory.length - 1];
+    if (
+      !previous ||
+      previous.status !== historyEntry.status ||
+      previous.task !== historyEntry.task ||
+      previous.outcome !== historyEntry.outcome
+    ) {
+      existing.taskHistory.push(historyEntry);
+    }
+    agents.set(row.agent_id, existing);
+  }
+  return agents;
+}
+
+function aggregateStatus(children, parent) {
+  const statuses = children.map((child) => normaliseAgentStatus(child.status));
+  const parentStatus = normaliseAgentStatus(parent?.status);
+  if (statuses.includes("active") || parentStatus === "active") return "active";
+  if (statuses.includes("paused") || parentStatus === "paused") return "paused";
+  if (statuses.includes("queued") || parentStatus === "queued") return "queued";
+  if (statuses.includes("failed") || parentStatus === "failed") return "failed";
+  if (children.length || parentStatus === "complete") return "complete";
+  return "idle";
+}
+
+// Group lists scroll after a few rows, so unfinished workers are listed first
+// to keep them visible; creation order is kept within each status.
+const CHILD_STATUS_ORDER = ["active", "paused", "queued", "failed", "idle", "complete"];
+
+function orderChildren(children) {
+  const rank = (child) => {
+    const index = CHILD_STATUS_ORDER.indexOf(normaliseAgentStatus(child.status));
+    return index === -1 ? CHILD_STATUS_ORDER.length : index;
+  };
+  return children
+    .map((child, index) => ({ child, index }))
+    .sort((a, b) => rank(a.child) - rank(b.child) || a.index - b.index)
+    .map(({ child }) => child);
+}
+
+function groupTask(children, emptyTask) {
+  if (!children.length) return emptyTask;
+  const counts = new Map();
+  for (const child of children) {
+    const status = normaliseAgentStatus(child.status);
+    counts.set(status, (counts.get(status) || 0) + 1);
+  }
+  return ["active", "queued", "paused", "complete", "failed"]
+    .filter((status) => counts.has(status))
+    .map((status) => `${counts.get(status)} ${status}`)
+    .join(", ");
+}
+
+export function buildSastAgentRoster(rows, analysisMode = "deep", scanRunning = false) {
+  const agents = buildAgents(rows, scanRunning);
+  const fixed = FIXED_AGENTS.filter((agent) => analysisMode === "deep" || !agent.deepOnly).map(
+    (placeholder) => {
+      const agent = agents.get(placeholder.id);
+      if (agent) return { ...agent, name: placeholder.name };
+      return {
+        ...placeholder,
+        status: placeholder.id === "sast-scanner" && scanRunning ? "active" : "idle",
+        task:
+          placeholder.id === "sast-scanner" && scanRunning
+            ? "Preparing static analysis"
+            : placeholder.task,
+        taskHistory: [],
+      };
+    },
+  );
+  const groups = GROUPS.flatMap((group) => {
+    const children = orderChildren(
+      [...agents.values()].filter(
+        (agent) => agent.id !== "sast-validator" && agent.classGroup === group.classGroup,
+      ),
+    );
+    if (group.legacy && !children.length) return [];
+    const parent = group.classGroup === "validator" ? agents.get("sast-validator") : null;
+    return [
+      {
+        ...group,
+        status: aggregateStatus(children, parent),
+        task: groupTask(children, parent?.task || group.task),
+        children,
+      },
+    ];
+  });
+  const final = FINAL_AGENTS.filter((agent) => analysisMode === "deep" || !agent.deepOnly).map(
+    (placeholder) => {
+      const agent = agents.get(placeholder.id);
+      return agent
+        ? { ...agent, name: placeholder.name }
+        : { ...placeholder, status: "idle", taskHistory: [] };
+    },
+  );
+  return [...fixed, ...groups, ...final];
+}

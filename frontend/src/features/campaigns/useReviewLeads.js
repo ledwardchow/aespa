@@ -1,5 +1,6 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useEffect, useCallback } from "react";
+import { validationCasesFromResponse } from "./ValidationCases.jsx";
 
 // Loads campaign mappings (now server-enriched with lead_title/description/
 // severity/location/producer_run_type/producer_run_id and component_ids/
@@ -7,27 +8,34 @@ import { useState, useEffect, useCallback } from "react";
 // for display. No more per-SAST-run lead fan-out: the mapping row itself is
 // the authoritative source for every lead, including campaign-owned
 // cross-repository leads.
-export function useReviewLeads(applicationId, campaignId) {
+export function useReviewLeads(systemId, campaignId) {
   const [mappings, setMappings] = useState(null);
   const [targets, setTargets] = useState({});
+  const [validationCases, setValidationCases] = useState([]);
   const [error, setError] = useState(null);
 
   const load = useCallback(async () => {
     try {
-      const [maps, tgts] = await Promise.all([
-        applicationsApi.getCampaignMappings(applicationId, campaignId),
-        applicationsApi.listAppTargets(applicationId),
+      const [mapsResult, tgtsResult, casesResult] = await Promise.allSettled([
+        systemsApi.getCampaignMappings(systemId, campaignId),
+        systemsApi.listSystemTargets(systemId),
+        systemsApi.getCampaignValidationCases(systemId, campaignId),
       ]);
-      setMappings(maps);
+      if (mapsResult.status === "rejected") throw mapsResult.reason;
+      if (tgtsResult.status === "rejected") throw tgtsResult.reason;
+      setMappings(mapsResult.value);
       const targetMap = {};
-      tgts.forEach((t) => {
+      tgtsResult.value.forEach((t) => {
         targetMap[t.id] = t.name || `#${t.target_id}`;
       });
       setTargets(targetMap);
+      setValidationCases(
+        casesResult.status === "fulfilled" ? validationCasesFromResponse(casesResult.value) : [],
+      );
     } catch (e) {
       setError(e.message);
     }
-  }, [applicationId, campaignId]);
+  }, [systemId, campaignId]);
 
   useEffect(() => {
     load();
@@ -35,14 +43,21 @@ export function useReviewLeads(applicationId, campaignId) {
 
   const submitReview = useCallback(
     async (decisions) => {
-      const result = await applicationsApi.reviewCampaignMappings(applicationId, campaignId, {
+      const result = await systemsApi.reviewCampaignMappings(systemId, campaignId, {
         decisions,
       });
       await load();
       return result;
     },
-    [applicationId, campaignId, load],
+    [systemId, campaignId, load],
   );
 
-  return { mappings, targets, error, setError, submitReview };
+  // Keep a saved edit's new updated_at so the next edit is not rejected as stale.
+  const updateMapping = useCallback((saved) => {
+    setMappings((previous) =>
+      previous ? previous.map((m) => (m.id === saved.id ? { ...m, ...saved } : m)) : previous,
+    );
+  }, []);
+
+  return { mappings, targets, validationCases, error, setError, submitReview, updateMapping };
 }

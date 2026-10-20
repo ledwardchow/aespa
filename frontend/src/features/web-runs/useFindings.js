@@ -3,7 +3,6 @@ import { useFindingsData } from "./FindingsData.jsx";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useState, useEffect } from "react";
 
-import { useColResize } from "../../shared/hooks/useColResize.js";
 import { ALICE_DEDUP_DIRECTIVE } from "../../shared/findings/reviewDirective.js";
 import {
   findingsToMarkdown,
@@ -12,40 +11,11 @@ import {
 } from "../../shared/findings/files.js";
 import { downloadTextFile } from "../../shared/lib/download.js";
 
-function cleanReference(value) {
-  const reference = value?.trim();
-  return reference ? reference.replace(/[.,;:!?]+$/, "") : "";
-}
-
-function findingGroupKey(finding) {
-  if (
-    finding.finding_source === "deterministic_probe" &&
-    finding.title !== "TLS/SSL configuration weaknesses"
-  )
-    return "__deterministic__";
-  if (
-    finding.validation_status === "false_positive" ||
-    finding.validation_status === "low_confidence"
-  )
-    return "__low_confidence__";
-  if (finding.validation_status === "unconfirmed") return "__unconfirmed__";
-  return finding.title;
-}
-
 // Panel interactions and refreshes share server data with the route event subscription.
 export function useFindings(
   runId,
   activeTab,
-  {
-    run,
-    siteName,
-    submitAliceDirective,
-    aliceIsThinking,
-    setRun,
-    setGraph,
-    setError,
-    initialFindingRef,
-  },
+  { run, siteName, submitAliceDirective, aliceIsThinking, setRun, setGraph, setError },
 ) {
   const {
     findings,
@@ -56,34 +26,15 @@ export function useFindings(
     setValidateBusy,
   } = useFindingsData();
   const [dedupeBusy, setDedupeBusy] = useState(false);
-  const [expandedFinding, setExpandedFinding] = useState(null);
-  const [expandedGroups, setExpandedGroups] = useState(new Set(["__unconfirmed__"]));
-  const toggleGroup = (title) =>
-    setExpandedGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(title)) next.delete(title);
-      else next.add(title);
-      return next;
-    });
-  const [findColW, startFindResize] = useColResize("colw:findings:v2", [120, 52, null, 28, 60]);
+  const [importMessage, setImportMessage] = useState(null);
+  const [collapseToken, setCollapseToken] = useState(0);
 
   // Poll findings when on findings tab.
   useEffect(() => {
     if (activeTab !== "findings") return;
     webRunsApi
       .getFindings(runId)
-      .then((data) => {
-        setFindings(data);
-        if (initialFindingRef) {
-          const match = data.find(
-            (f) => cleanReference(f.reference) === cleanReference(initialFindingRef),
-          );
-          if (match) {
-            setExpandedFinding(match.id);
-            setExpandedGroups((previous) => new Set(previous).add(findingGroupKey(match)));
-          }
-        }
-      })
+      .then(setFindings)
       .catch(() => {});
     const iv = setInterval(() => {
       webRunsApi
@@ -92,7 +43,7 @@ export function useFindings(
         .catch(() => {});
     }, 4000);
     return () => clearInterval(iv);
-  }, [runId, activeTab, initialFindingRef, setFindings]);
+  }, [runId, activeTab, setFindings]);
 
   // Poll validation status while validating is running. Keep polling while the
   // local busy flag is true too, because the final SSE event can race with the
@@ -137,29 +88,23 @@ export function useFindings(
       .catch(() => {});
   }, [activeTab, runId, setFindings, setValidateStatus]);
 
-  const onDeleteFinding = async (e, findingId) => {
-    e.stopPropagation();
+  const onDeleteFinding = async (findingId) => {
     try {
       await webRunsApi.deleteFinding(runId, findingId);
       setFindings((prev) => prev.filter((f) => f.id !== findingId));
-      if (expandedFinding === findingId) setExpandedFinding(null);
     } catch (err) {
       setError(err.message);
     }
   };
-  const onDeleteFindingGroup = async (e, title) => {
-    e.stopPropagation();
-    if (!confirm(`Delete all instances of "${title}"?`)) return;
+  const onDeleteFindingGroup = async (title) => {
+    if (!confirm(`Delete all instances of "${title}"?`)) return false;
     try {
       await webRunsApi.deleteFindingGroup(runId, title);
       setFindings((prev) => prev.filter((f) => f.title !== title));
-      setExpandedGroups((prev) => {
-        const next = new Set(prev);
-        next.delete(title);
-        return next;
-      });
+      return true;
     } catch (err) {
       setError(err.message);
+      return false;
     }
   };
   const onValidateAll = async () => {
@@ -186,8 +131,7 @@ export function useFindings(
           .getValidateStatus(runId)
           .then(setValidateStatus)
           .catch(() => {});
-        setExpandedFinding(null);
-        setExpandedGroups(new Set());
+        setCollapseToken((token) => token + 1);
         setDedupeBusy(false);
       },
     });
@@ -220,7 +164,7 @@ export function useFindings(
       const [r, g] = await Promise.all([webRunsApi.getRun(runId), webRunsApi.getGraph(runId)]);
       setRun(r);
       setGraph(g);
-      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+      setImportMessage(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
     } catch (err) {
       setError(err.message);
     }
@@ -261,12 +205,6 @@ export function useFindings(
         previous.map((finding) => (finding.id === id ? { ...finding, ...updated } : finding)),
       ),
   });
-  const editingFinding = editor.editingId;
-  const onEditFinding = (event, finding) => {
-    event.stopPropagation();
-    setExpandedFinding(finding.id);
-    editor.edit(finding);
-  };
   const onStopValidation = async () => {
     try {
       const vs = await webRunsApi.stopValidation(runId);
@@ -286,22 +224,17 @@ export function useFindings(
     validateBusy,
     setValidateBusy,
     dedupeBusy,
-    expandedFinding,
-    setExpandedFinding,
+    collapseToken,
     editor,
-    editingFinding,
-    expandedGroups,
-    toggleGroup,
-    findColW,
-    startFindResize,
     onDeleteFinding,
     onDeleteFindingGroup,
     onValidateAll,
     onDeduplicateFindings,
     onExportFindingsMarkdown,
     onImportFindingsFile,
+    importMessage,
+    clearImportMessage: () => setImportMessage(null),
     onValidateFinding,
-    onEditFinding,
     onStopValidation,
   };
 }

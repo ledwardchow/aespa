@@ -1,4 +1,4 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useMemo } from "react";
 import { useReviewLeads } from "./useReviewLeads.js";
 
@@ -10,6 +10,7 @@ import {
   confidencePct,
   safeParseJson,
 } from "../../shared/runs/campaignPresentation.js";
+import { ValidationCaseList, ValidationCaseSummary } from "./ValidationCases.jsx";
 
 const HIGH_CONFIDENCE = 0.8;
 
@@ -90,7 +91,7 @@ function endpointInstancesFor(mappings) {
 // fan-out, and no "detail unavailable" fallback, since the mapping endpoint
 // itself now resolves cross-repository leads too.
 export function CampaignReviewTab({
-  applicationId,
+  systemId,
   campaignId,
   campaign,
   canContinue,
@@ -98,10 +99,8 @@ export function CampaignReviewTab({
   continueBusy,
   onSubmitted,
 }) {
-  const { mappings, targets, error, setError, submitReview } = useReviewLeads(
-    applicationId,
-    campaignId,
-  );
+  const { mappings, targets, validationCases, error, setError, submitReview, updateMapping } =
+    useReviewLeads(systemId, campaignId);
   const [decisions, setDecisions] = useState({}); // mapping_id -> "approve" | "reject"
   const [selected, setSelected] = useState(new Set());
   const [severityFilter, setSeverityFilter] = useState("");
@@ -186,16 +185,30 @@ export function CampaignReviewTab({
   };
 
   const pendingDecisionCount = Object.keys(decisions).length;
+  const casesByMapping = useMemo(() => {
+    const byMapping = new Map();
+    for (const validationCase of validationCases || []) {
+      const key = String(validationCase.mapping_id);
+      if (key == null) continue;
+      if (!byMapping.has(key)) byMapping.set(key, []);
+      byMapping.get(key).push(validationCase);
+    }
+    return byMapping;
+  }, [validationCases]);
   const supplementalTargets = useMemo(() => {
     const byTarget = new Map();
     for (const mapping of mappings || []) {
       if (mapping.status !== "approved" || mapping.copied_lead_id) continue;
-      if (!["live_resolved", "crawl_partial"].includes(mapping.path_status)) continue;
+      const mappingCases = casesByMapping.get(String(mapping.id));
+      if (mappingCases?.length > 0) {
+        if (!mappingCases.some((validationCase) => validationCase.readiness_status === "resolved"))
+          continue;
+      } else if (!["live_resolved", "crawl_partial"].includes(mapping.path_status)) continue;
       if (!byTarget.has(mapping.target_id)) byTarget.set(mapping.target_id, []);
       byTarget.get(mapping.target_id).push(mapping.id);
     }
     return byTarget;
-  }, [mappings]);
+  }, [mappings, casesByMapping]);
 
   const onSubmit = async () => {
     setSubmitting(true);
@@ -234,12 +247,9 @@ export function CampaignReviewTab({
     setSupplementalBusy(targetId);
     setError(null);
     try {
-      await applicationsApi.supplementalValidateCampaignTarget(
-        applicationId,
-        campaignId,
-        targetId,
-        { mapping_ids: mappingIds },
-      );
+      await systemsApi.supplementalValidateCampaignTarget(systemId, campaignId, targetId, {
+        mapping_ids: mappingIds,
+      });
       await onSubmitted?.();
     } catch (e) {
       setError(e.message);
@@ -351,6 +361,21 @@ export function CampaignReviewTab({
         </label>
       </div>
 
+      {validationCases.length > 0 && (
+        <div className="alert info app-review-readiness" style={{ marginBottom: 14 }}>
+          <div className="row spread" style={{ gap: 10, flexWrap: "wrap" }}>
+            <div>
+              <strong>Validation readiness</strong>
+              <div className="subtle" style={{ marginTop: 4 }}>
+                Approval allows AESPA to resolve and validate a route. It does not prove that the
+                browser can reach it.
+              </div>
+            </div>
+            <ValidationCaseSummary cases={validationCases} />
+          </div>
+        </div>
+      )}
+
       <div className="row spread" style={{ marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
         <div className="row" style={{ gap: 8 }}>
           <button
@@ -424,8 +449,10 @@ export function CampaignReviewTab({
           selected={selected}
           onSetDecision={setDecision}
           onToggleSelected={toggleSelected}
-          applicationId={applicationId}
+          onMappingSaved={updateMapping}
+          systemId={systemId}
           campaignId={campaignId}
+          casesByMapping={casesByMapping}
         />
       ))}
     </div>
@@ -439,8 +466,10 @@ function LeadGroup({
   selected,
   onSetDecision,
   onToggleSelected,
-  applicationId,
+  onMappingSaved,
+  systemId,
   campaignId,
+  casesByMapping,
 }) {
   const [expanded, setExpanded] = useState(false);
   const first = mappings[0];
@@ -573,8 +602,10 @@ function LeadGroup({
               selected={selected}
               onSetDecision={onSetDecision}
               onToggleSelected={onToggleSelected}
-              applicationId={applicationId}
+              onMappingSaved={onMappingSaved}
+              systemId={systemId}
               campaignId={campaignId}
+              validationCases={casesByMapping.get(String(mapping.id)) || []}
             />
           ))}
         </tbody>
@@ -590,11 +621,15 @@ function MappingRow({
   selected,
   onSetDecision,
   onToggleSelected,
-  applicationId,
+  onMappingSaved,
+  systemId,
   campaignId,
+  validationCases,
 }) {
   const [pathEditorOpen, setPathEditorOpen] = useState(false);
-  const decision = decisions[mapping.id] || (mapping.status !== "proposed" ? mapping.status : null);
+  // Local choices use "approve"/"reject"; saved mappings use "approved"/"rejected".
+  const decision =
+    decisions[mapping.id] || { approved: "approve", rejected: "reject" }[mapping.status] || null;
   const evidence = safeParseJson(mapping.evidence_json, {});
   const why = mapping.rationale || Object.keys(evidence).join(", ") || "—";
   const editorId = `mapping-path-editor-${mapping.id}`;
@@ -618,12 +653,14 @@ function MappingRow({
           <div className="row" style={{ gap: 4 }}>
             <button
               className={"btn sm" + (decision === "approve" ? "" : " ghost")}
+              aria-pressed={decision === "approve"}
               onClick={() => onSetDecision(mapping.id, "approve")}
             >
-              Approve
+              Approve for validation
             </button>
             <button
-              className={"btn danger-outline sm" + (decision === "reject" ? "" : "")}
+              className={"btn sm " + (decision === "reject" ? "danger" : "danger-outline")}
+              aria-pressed={decision === "reject"}
               onClick={() => onSetDecision(mapping.id, "reject")}
             >
               Reject
@@ -644,11 +681,22 @@ function MappingRow({
         <tr className="app-review-path-editor-row">
           <td colSpan={5}>
             <MappingPathEditor
-              applicationId={applicationId}
+              systemId={systemId}
               campaignId={campaignId}
               mapping={mapping}
               editorId={editorId}
+              onSaved={onMappingSaved}
             />
+          </td>
+        </tr>
+      )}
+      {validationCases.length > 0 && (
+        <tr className="app-review-validation-row">
+          <td colSpan={5}>
+            <div className="validation-case-inline">
+              <div className="validation-detail-label">Validation case</div>
+              <ValidationCaseList cases={validationCases} />
+            </div>
           </td>
         </tr>
       )}
@@ -656,7 +704,7 @@ function MappingRow({
   );
 }
 
-function MappingPathEditor({ applicationId, campaignId, mapping, editorId }) {
+function MappingPathEditor({ systemId, campaignId, mapping, editorId, onSaved }) {
   const initial = safeParseJson(mapping.path_json, {});
   const [entry, setEntry] = useState(initial.entry || "");
   const [dynamicTest, setDynamicTest] = useState(initial.dynamic_test || "");
@@ -676,10 +724,11 @@ function MappingPathEditor({ applicationId, campaignId, mapping, editorId }) {
           .map((value) => value.trim())
           .filter(Boolean),
       };
-      await applicationsApi.editCampaignMapping(applicationId, campaignId, mapping.id, {
+      const saved = await systemsApi.editCampaignMapping(systemId, campaignId, mapping.id, {
         expected_updated_at: mapping.updated_at,
         path,
       });
+      if (saved) onSaved?.(saved);
       setMessage("Saved reviewer guidance.");
     } catch (error) {
       setMessage(error.message);

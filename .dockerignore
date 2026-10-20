@@ -8,3 +8,5 @@ __pycache__
 .env
 tests
 docs
+frontend/node_modules
+src/aespa/web

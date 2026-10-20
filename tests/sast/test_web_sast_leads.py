@@ -15,16 +15,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
-from aespa import db as db_mod
-from aespa.db import get_session, set_engine
-from aespa.main import create_app
 from aespa.models import (
     AgentLog,
+    ApiTestRun,
     ComponentFact,
+    SastCodeCall,
+    SastCodeSymbol,
     SastRun,
     SastSourceFile,
     SastWorkItem,
@@ -38,31 +36,9 @@ _UTC = timezone.utc
 
 
 @pytest.fixture(name="env")
-def env_fixture():
-    """Engine wired into both the get_session dependency and get_engine()."""
-    prev_engine = db_mod._engine
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-    set_engine(engine)  # service layer uses get_engine() directly
-
-    def _override_session():
-        with Session(engine) as session:
-            yield session
-
-    app = create_app()
-    app.dependency_overrides[get_session] = _override_session
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c, engine
-
-    set_engine(prev_engine)
-    SQLModel.metadata.drop_all(engine)
-    engine.dispose()
+def env_fixture(client, engine):
+    """Test client plus the engine its requests and get_engine() share."""
+    return client, engine
 
 
 def _zip_bytes() -> bytes:
@@ -133,6 +109,39 @@ def test_standalone_sast_upload_creates_collectionless_run(env, tmp_path, monkey
     assert run.collection_id is None
     assert run.source_archive_path  # archive was stored
     assert run.status == "pending"
+    assert run.analysis_mode == "deep"
+
+
+def test_standalone_sast_upload_saves_light_analysis_mode(env, tmp_path, monkeypatch):
+    client, engine = env
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+
+    response = client.post(
+        "/api/sast-runs",
+        files={"file": ("mysrc.zip", _zip_bytes(), "application/zip")},
+        data={"analysis_mode": "light"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["analysis_mode"] == "light"
+    with Session(engine) as session:
+        run = session.get(SastRun, response.json()["id"])
+        assert run.analysis_mode == "light"
+
+
+def test_standalone_sast_upload_rejects_unknown_analysis_mode(
+    env, tmp_path, monkeypatch
+):
+    client, _ = env
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+
+    response = client.post(
+        "/api/sast-runs",
+        files={"file": ("mysrc.zip", _zip_bytes(), "application/zip")},
+        data={"analysis_mode": "medium"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_standalone_sast_upload_rejects_non_zip(env, tmp_path, monkeypatch):
@@ -161,6 +170,7 @@ def test_sast_run_export_import_round_trip_preserves_run_state_and_archive(
             source_archive_path=str(archive_path),
             status="completed",
             leads_count=1,
+            analysis_mode="light",
             phase_state_json=json.dumps(
                 {"scope": {"status": "complete", "message": "1 file reviewed"}}
             ),
@@ -263,12 +273,14 @@ def test_sast_run_export_import_round_trip_preserves_run_state_and_archive(
     assert imported_id != original_id
     assert imported.json()["name"] == "Complete source review"
     assert imported.json()["status"] == "completed"
+    assert imported.json()["analysis_mode"] == "light"
 
     with Session(engine) as session:
         restored = session.get(SastRun, imported_id)
         assert restored is not None
         assert restored.collection_id is None
         assert restored.document_id is None
+        assert restored.analysis_mode == "light"
         assert restored.phase_state_json == bundle["sast_run"]["phase_state_json"]
         assert restored.coverage_json == bundle["sast_run"]["coverage_json"]
         assert restored.report_json == bundle["sast_run"]["report_json"]
@@ -294,6 +306,17 @@ def test_sast_run_export_import_round_trip_preserves_run_state_and_archive(
         ).all()
         assert len(restored_files) == original_work_program["files"]["total"]
         assert len(restored_work_items) == original_work_program["work_items"]["total"]
+        restored_symbols = session.exec(
+            select(SastCodeSymbol).where(SastCodeSymbol.sast_run_id == imported_id)
+        ).all()
+        restored_calls = session.exec(
+            select(SastCodeCall).where(SastCodeCall.sast_run_id == imported_id)
+        ).all()
+        assert sorted(symbol.name for symbol in restored_symbols) == [
+            "<module>",
+            "handler",
+        ]
+        assert {call.callee_name for call in restored_calls} == {"query"}
         assert (
             len(
                 session.exec(
@@ -420,7 +443,7 @@ def test_api_style_sast_run_still_constructs(env):
 def test_jail_rejects_sibling_dir_with_shared_prefix(tmp_path):
     """The path jail must not treat a sibling whose name shares a prefix (…/5x)
     as living inside the run root (…/5) — a string-prefix check would."""
-    from aespa.services.sast_scanner import _jail
+    from aespa.services.source_tools import jail
 
     root = tmp_path / "5"
     root.mkdir()
@@ -428,17 +451,17 @@ def test_jail_rejects_sibling_dir_with_shared_prefix(tmp_path):
     (tmp_path / "5x" / "secret.txt").write_text("nope")
 
     # Inside the jail is fine.
-    assert _jail(root, "ok.txt") == (root / "ok.txt")
+    assert jail(root, "ok.txt") == (root / "ok.txt")
     # Escaping into the prefixed sibling is rejected.
     with pytest.raises(ValueError):
-        _jail(root, "../5x/secret.txt")
+        jail(root, "../5x/secret.txt")
     with pytest.raises(ValueError):
-        _jail(root, "../../etc/passwd")
+        jail(root, "../../etc/passwd")
 
 
 def test_safe_unzip_skips_prefixed_sibling_escape(tmp_path):
     """A crafted entry resolving to a prefixed sibling must not be extracted."""
-    from aespa.services.sast_scanner import _safe_unzip
+    from aespa.services.source_tools import safe_unzip
 
     target = tmp_path / "5"
     target.mkdir()
@@ -449,14 +472,14 @@ def test_safe_unzip_skips_prefixed_sibling_escape(tmp_path):
         zf.writestr("good.py", "print(1)")
         zf.writestr("../5x/evil.py", "pwned")
 
-    _safe_unzip(str(archive), str(target))
+    safe_unzip(str(archive), str(target))
 
     assert (target / "good.py").exists()
     assert not (tmp_path / "5x" / "evil.py").exists()  # escape blocked
 
 
 def test_safe_unzip_rejects_oversized_entry(tmp_path, monkeypatch):
-    from aespa.services import sast_scanner
+    from aespa.services import source_tools
 
     target = tmp_path / "extract"
     target.mkdir()
@@ -464,21 +487,87 @@ def test_safe_unzip_rejects_oversized_entry(tmp_path, monkeypatch):
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("large.py", "123456")
 
-    monkeypatch.setattr(sast_scanner, "_MAX_ARCHIVE_ENTRY_BYTES", 5)
+    monkeypatch.setattr(source_tools, "_MAX_ARCHIVE_ENTRY_BYTES", 5)
     with pytest.raises(ValueError, match="exceeds"):
-        sast_scanner._safe_unzip(str(archive), str(target))
+        source_tools.safe_unzip(str(archive), str(target))
 
 
 def test_standalone_sast_upload_streams_and_enforces_limit(env, tmp_path, monkeypatch):
     client, _ = env
     monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
-    from aespa.api import sast_runs as sast_api
+    from aespa.services import sast_runs_service
 
-    assert sast_api._MAX_UPLOAD_BYTES == 250 * 1024 * 1024
-    monkeypatch.setattr(sast_api, "_MAX_UPLOAD_BYTES", 4)
+    assert sast_runs_service.MAX_UPLOAD_BYTES == 250 * 1024 * 1024
+    monkeypatch.setattr(sast_runs_service, "MAX_UPLOAD_BYTES", 4)
     resp = client.post(
         "/api/sast-runs",
         files={"file": ("src.zip", b"12345", "application/zip")},
     )
     assert resp.status_code == 400
     assert "upload limit" in resp.text
+
+
+def test_import_source_search_paging_and_counts_are_run_kind_scoped(env):
+    client, engine = env
+    source_id = _make_completed_sast_run_with_leads(engine, n=2)
+    web_id = _make_web_run(engine)
+    collection = client.post(
+        "/api/api-collections",
+        json={"name": "Search test", "base_url": "http://target.test"},
+    ).json()
+    with Session(engine) as session:
+        api_run = ApiTestRun(collection_id=collection["id"], name="API scan")
+        session.add(api_run)
+        source = session.get(SastRun, source_id)
+        source.name = "Portal release"
+        source.source_filename = "portal-source.zip"
+        session.add(source)
+        session.add(SastRun(name="Other", status="completed", leads_count=1))
+        session.add(SastRun(name="Portal running", status="scanning", leads_count=2))
+        session.add(SastRun(name="Portal empty", status="completed", leads_count=0))
+        session.add(
+            ScanLead(producer_run_id=source_id, title="Hidden", reportable=False)
+        )
+        session.add(ScanLead(producer_run_id=source_id, title="Lead 0", category="A03"))
+        session.commit()
+        session.refresh(api_run)
+        api_id = api_run.id
+    url = f"/api/test-runs/{web_id}/sast-runs/available"
+    result = client.get(url, params={"page": 1, "page_size": 1}).json()
+    assert result["total"] == 2
+    assert len(result["items"]) == 1
+    second = client.get(url, params={"page": 2, "page_size": 1}).json()
+    assert result["items"][0]["id"] != second["items"][0]["id"]
+    for term in ("PORTAL", "source.zip", str(source_id)):
+        result = client.get(url, params={"page": 1, "q": term}).json()
+        assert result["total"] == 1
+        assert result["items"][0]["new_count"] == 2
+        assert result["items"][0]["imported_count"] == 0
+    client.post(
+        f"/api/test-runs/{web_id}/import-leads", json={"sast_run_id": source_id}
+    )
+    source = client.get(url, params={"page": 1, "q": "portal"}).json()["items"][0]
+    assert source["new_count"] == 0
+    assert source["imported_count"] == 2
+    from aespa.services.sast_imports import search_import_sources
+
+    with Session(engine) as session:
+        overlapping = search_import_sources(
+            session, run_kind="api", run_id=web_id, query="portal", page=1, page_size=10
+        )["items"][0]
+        assert overlapping["new_count"] == 2
+        assert overlapping["imported_count"] == 0
+    api_source = client.get(
+        f"/api/api-test-runs/{api_id}/sast-runs/available",
+        params={"page": 1, "q": "portal"},
+    ).json()["items"][0]
+    assert api_source["new_count"] == 2
+    assert api_source["imported_count"] == 0
+    assert client.get(url, params={"page": 1, "q": "%"}).json()["total"] == 0
+    assert client.get(url, params={"page": 1, "q": "missing"}).json()["items"] == []
+    assert client.get(url, params={"page": 1, "q": "9" * 200}).json()["total"] == 0
+    assert client.get(url, params={"page": 0}).status_code == 422
+    assert client.get(url, params={"page_size": 100}).status_code == 422
+    assert (
+        client.get("/api/test-runs/999/sast-runs/available?page=1").status_code == 404
+    )

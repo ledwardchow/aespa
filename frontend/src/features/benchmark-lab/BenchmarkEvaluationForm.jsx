@@ -1,0 +1,291 @@
+import { fmtDate } from "../../shared/lib/dates.js";
+import { useEffect, useMemo, useState } from "react";
+import * as benchmarkApi from "../../shared/api/benchmarkLab.js";
+import * as sastApi from "../../shared/api/sastRuns.js";
+import * as settingsApi from "../../shared/api/settings.js";
+import { nav } from "../../shared/navigation/router.js";
+import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { parseGroundTruthText } from "./groundTruthImport.js";
+
+const TERMINAL = new Set(["completed"]);
+const asArray = (value, key) =>
+  Array.isArray(value) ? value : value?.[key] || value?.items || value?.data || [];
+
+export function BenchmarkEvaluationForm() {
+  const [runs, setRuns] = useState([]);
+  const [datasets, setDatasets] = useState([]);
+  const [profiles, setProfiles] = useState([]);
+  const [llmProfileId, setLlmProfileId] = useState("");
+  const [runId, setRunId] = useState("");
+  const [datasetId, setDatasetId] = useState("");
+  const [runDetails, setRunDetails] = useState(null);
+  const [datasetFile, setDatasetFile] = useState(null);
+  const [datasetName, setDatasetName] = useState("");
+  const [parsedDataset, setParsedDataset] = useState(null);
+  const [form, setForm] = useState({
+    name: "",
+    notes: "",
+    match_mode: "assisted",
+    include_conditional: true,
+    include_hardening: false,
+  });
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    Promise.all([
+      sastApi.listAllSastRuns(),
+      benchmarkApi.listBenchmarkDatasets(),
+      settingsApi.listLLMProfiles(),
+    ])
+      .then(([runResult, datasetResult, profileResult]) => {
+        setRuns(asArray(runResult, "runs").filter((run) => TERMINAL.has(run.status)));
+        setDatasets(asArray(datasetResult, "datasets"));
+        setProfiles(asArray(profileResult, "profiles"));
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
+  const selectedRun = useMemo(
+    () => runDetails || runs.find((run) => String(run.id) === String(runId)),
+    [runDetails, runs, runId],
+  );
+  const chooseRun = async (value) => {
+    setRunId(value);
+    setRunDetails(null);
+    if (!value) return;
+    try {
+      setRunDetails(await sastApi.getSastRun(value));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+  const readDataset = async (file) => {
+    setDatasetFile(file);
+    setParsedDataset(null);
+    setError(null);
+    if (!file) return;
+    try {
+      const parsed = parseGroundTruthText(await file.text(), file.name);
+      setParsedDataset(parsed);
+      setDatasetName(parsed.name || file.name.replace(/\.(?:json|md|markdown)$/i, ""));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+  const submit = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      let selectedDatasetId = datasetId;
+      if (datasetFile) {
+        if (!parsedDataset) throw new Error("The uploaded ground truth could not be parsed.");
+        const parsed = parsedDataset;
+        const created = await benchmarkApi.createBenchmarkDataset({
+          name: datasetName || parsed.name || datasetFile.name,
+          schema_version: parsed.schema_version || 1,
+          source_digest: parsed.source_digest || null,
+          ground_truth: parsed,
+        });
+        selectedDatasetId = created.id;
+      }
+      if (!runId || !selectedDatasetId)
+        throw new Error("Choose a completed SAST run and a ground-truth dataset.");
+      const { include_conditional, include_hardening, ...evaluationForm } = form;
+      const created = await benchmarkApi.createBenchmarkEvaluation({
+        ...evaluationForm,
+        sast_run_id: Number(runId),
+        dataset_id: Number(selectedDatasetId),
+        llm_profile_id: llmProfileId ? Number(llmProfileId) : null,
+        policy: { include_conditional, include_hardening },
+      });
+      nav(`#/benchmark-lab/evaluations/${created.id}`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <PageHeader
+        title={
+          <>
+            <Crumb href="#/benchmark-lab">Benchmark Lab</Crumb>
+            <Sep />
+            New Evaluation
+          </>
+        }
+      />
+      <div className="content scroll-content benchmark-page">
+        <form className="benchmark-form" onSubmit={submit}>
+          <section className="card">
+            <h2>Evaluation setup</h2>
+            <p className="field-hint">
+              Only terminal ordinary SAST runs can be evaluated. Ground truth is stored separately
+              from source snapshots and scanner artifacts.
+            </p>
+            {loading ? (
+              <div className="subtle">Loading runs and datasets…</div>
+            ) : (
+              <>
+                <label className="form-label">
+                  Completed SAST run
+                  <select
+                    className="form-input"
+                    value={runId}
+                    onChange={(event) => chooseRun(event.target.value)}
+                  >
+                    <option value="">Select a run…</option>
+                    {runs.map((run) => (
+                      <option value={run.id} key={run.id}>
+                        {run.name || `Run #${run.id}`} — {run.status}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {selectedRun && (
+                  <div className="benchmark-provenance-card">
+                    <strong>Run provenance</strong>
+                    <span>
+                      {selectedRun.source_archive_digest ||
+                        selectedRun.source_digest ||
+                        "Source digest unavailable"}
+                    </span>
+                    <span>
+                      {selectedRun.started_at
+                        ? fmtDate(selectedRun.started_at)
+                        : "Start time unavailable"}{" "}
+                      →{" "}
+                      {selectedRun.completed_at
+                        ? fmtDate(selectedRun.completed_at)
+                        : "Completion time unavailable"}
+                    </span>
+                  </div>
+                )}
+                <label className="form-label">
+                  Saved ground-truth dataset
+                  <select
+                    className="form-input"
+                    value={datasetId}
+                    onChange={(event) => {
+                      setDatasetId(event.target.value);
+                      setDatasetFile(null);
+                      setParsedDataset(null);
+                    }}
+                  >
+                    <option value="">Select a dataset…</option>
+                    {datasets.map((dataset) => (
+                      <option value={dataset.id} key={dataset.id}>
+                        {dataset.name || `Dataset #${dataset.id}`} ({dataset.schema_version || 1})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="benchmark-upload">
+                  <span className="field-hint">
+                    Upload canonical JSON or numbered vulnerability Markdown.
+                  </span>
+                  <input
+                    type="file"
+                    accept=".json,.md,.markdown,application/json,text/markdown,text/plain"
+                    onChange={(event) => readDataset(event.target.files?.[0])}
+                  />
+                  {datasetFile && (
+                    <>
+                      {parsedDataset && (
+                        <div className="field-hint">
+                          Parsed {parsedDataset.items.length}{" "}
+                          {parsedDataset.items.length === 1 ? "vulnerability" : "vulnerabilities"}.
+                        </div>
+                      )}
+                      <label className="form-label">
+                        Dataset name
+                        <input
+                          className="form-input"
+                          value={datasetName}
+                          onChange={(event) => setDatasetName(event.target.value)}
+                        />
+                      </label>
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+          <section className="card">
+            <h2>Evaluation</h2>
+            <div className="form-grid two">
+              <label className="form-label">
+                Evaluation name
+                <input
+                  className="form-input"
+                  value={form.name}
+                  required
+                  onChange={(event) => setForm({ ...form, name: event.target.value })}
+                />
+              </label>
+              <label className="form-label">
+                Evaluation LLM profile
+                <select
+                  className="form-input"
+                  value={llmProfileId}
+                  onChange={(event) => setLlmProfileId(event.target.value)}
+                >
+                  <option value="">Use the SAST run's profile (or active profile)</option>
+                  {profiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name}
+                    </option>
+                  ))}
+                </select>
+                <span className="field-hint">Matching uses the profile's Test Lead model.</span>
+              </label>
+            </div>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={form.include_conditional}
+                onChange={(event) =>
+                  setForm({ ...form, include_conditional: event.target.checked })
+                }
+              />{" "}
+              Include conditional items
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={form.include_hardening}
+                onChange={(event) => setForm({ ...form, include_hardening: event.target.checked })}
+              />{" "}
+              Include hardening items
+            </label>
+            <label className="form-label" style={{ marginTop: 12 }}>
+              Notes
+              <textarea
+                className="form-input"
+                rows={3}
+                value={form.notes}
+                onChange={(event) => setForm({ ...form, notes: event.target.value })}
+              />
+            </label>
+            {error && (
+              <div className="alert error form-error" role="alert">
+                {error}
+              </div>
+            )}
+            <div className="form-actions">
+              <button type="button" className="btn ghost" onClick={() => nav("#/benchmark-lab")}>
+                Cancel
+              </button>
+              <button className="btn primary" disabled={busy || loading}>
+                {busy ? "Creating…" : "Create evaluation"}
+              </button>
+            </div>
+          </section>
+        </form>
+      </div>
+    </>
+  );
+}

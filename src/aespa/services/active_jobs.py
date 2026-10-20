@@ -9,7 +9,7 @@ from aespa.schemas import ActiveJobSummary
 
 
 def list_active_jobs(session: Session) -> list[ActiveJobSummary]:
-    from aespa.models import Application, AssessmentCampaign, Site
+    from aespa.models import AssessmentCampaign, Site, System
     from aespa.services import crawler as crawler_svc
     from aespa.services import scanner as scanner_svc
     from aespa.services import validator as validator_svc
@@ -114,7 +114,7 @@ def list_active_jobs(session: Session) -> list[ActiveJobSummary]:
         .order_by(AssessmentCampaign.created_at.desc())
     ).all()
     for campaign in campaigns:
-        application = session.get(Application, campaign.application_id)
+        system = session.get(System, campaign.system_id)
         jobs.append(
             ActiveJobSummary(
                 run_id=campaign.id,
@@ -124,11 +124,9 @@ def list_active_jobs(session: Session) -> list[ActiveJobSummary]:
                 started_at=campaign.started_at,
                 created_at=campaign.created_at,
                 run_type="campaign",
-                application_id=campaign.application_id,
-                application_name=(
-                    application.name
-                    if application
-                    else f"Application #{campaign.application_id}"
+                system_id=campaign.system_id,
+                system_name=(
+                    system.name if system else f"System #{campaign.system_id}"
                 ),
             )
         )
@@ -191,18 +189,21 @@ def list_active_jobs(session: Session) -> list[ActiveJobSummary]:
     # ── SAST run jobs ─────────────────────────────────────────────────────────
     from aespa.models import SastRun
     from aespa.services import sast_scanner as sast_scanner_svc
+    from aespa.services import sast_sources as sast_sources_svc
 
     sast_runs = session.exec(select(SastRun).order_by(SastRun.created_at.desc())).all()
     for sast_run in sast_runs:
-        if sast_scanner_svc.is_sast_scan_running(sast_run.id):
+        preparing = sast_sources_svc.is_source_preparation_running(sast_run.id)
+        scanning = sast_scanner_svc.is_sast_scan_running(sast_run.id)
+        if preparing or scanning:
             coll = session.get(ApiCollection, sast_run.collection_id)
             coll_name = coll.name if coll else f"Collection #{sast_run.collection_id}"
             jobs.append(
                 ActiveJobSummary(
                     run_id=sast_run.id,
                     run_name=sast_run.name,
-                    job_type="SAST Scan",
-                    status="scanning",
+                    job_type="Source Preparation" if preparing else "SAST Scan",
+                    status="preparing" if preparing else "scanning",
                     started_at=sast_run.started_at,
                     created_at=sast_run.created_at,
                     run_type="sast",

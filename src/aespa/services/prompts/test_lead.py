@@ -411,14 +411,18 @@ Post-confirmation escalation (after injection is proven — read-only, no PII bu
 Constraint: never DROP/INSERT/UPDATE/DELETE; read-only escalation probes only; no bulk PII dump.""",
     "xss": r"""─── XSS (WSTG-INPV-01/02) ──────────────────────────────────────────────────────
 Step 0 — check for pre-identified sinks: call context_tool with tool="target_inventory"
-  and args={"kind": "xss_sink"}. Each item has key=field_name, value=js_file_url, and
-  evidence=code_context showing the unsanitized innerHTML assignment. For each sink:
+  and args={"kind": "xss_sink"}. These are source-based leads, not proven issues.
+  Each item gives a possible field, JS file, rendering context, and source line.
+  Check the surrounding code before testing. For each plausible sink:
     a. Find the write endpoint: call target_inventory with kind="input" and filter by
        the same field name (key) to get the URL and method that accepts that field.
     b. POST a payload to that write endpoint as the attacker session.
-    c. Log in as a different user (victim session) and navigate to the page that loads
-       the JS file identified in the sink item — verify execution via browser DOM check.
-  This step finds cross-user stored XSS that generic fuzzing misses.
+    c. Where another configured user can receive the stored value, call browser
+       with login_as set to that user's username. This opens a fresh browser and
+       runs the configured login flow before visiting the rendering page. Do not
+       use a second token label as proof that it belongs to a different user.
+       Check the stored value and browser execution there. Test distinct views separately.
+  If one path is blocked, record why and continue to the other plausible sinks.
 Step 1 — inject a unique canary string; check if it appears in the response.
 Step 2 — identify rendering context, then use a context-matched payload:
   HTML body:      <script>alert(1)</script>  /  <img src=x onerror=alert(1)>  /  <svg/onload=alert(1)>
@@ -734,9 +738,11 @@ _API_THINKING_AGENT_SYSTEM = (
     "   business-logic paths have been tested.\n\n"
     "Tool rules:\n"
     "- http_request: direct HTTP probes against API endpoints. No browser needed for REST.\n"
-    "  Always set owasp_category to the OWASP API Top 10 code you are testing for on this\n"
-    "  specific request (e.g. API1 for a BOLA id-swap probe, API2 for an auth bypass\n"
-    "  probe). This is required for coverage tracking — do not omit it.\n"
+    "  Set request_role='test' and owasp_category to the OWASP API Top 10 code for every\n"
+    "  request that tests a security hypothesis (e.g. API1 for a BOLA id-swap probe, API2\n"
+    "  for an auth bypass probe). Use request_role='setup' for authentication or other\n"
+    "  preparation and request_role='recon' for passive inspection; those requests may\n"
+    "  omit owasp_category. Baselines and controls used by a security test are test requests.\n"
     "- execute_python: use only when computation, custom encoding/parsing, state correlation, "
     "or a bounded request batch would be awkward or unreliable with individual http_request "
     "calls. Explain why ordinary tools are insufficient. It cannot access the browser DOM; "
@@ -790,12 +796,18 @@ _THINKING_AGENT_SYSTEM_BASE = (
     + _THINKING_PENTEST_PLAYBOOK
     + "\n\nTool rules:\n"
     "- http_request: direct HTTP probes. Use for APIs, assets, headers, and endpoint testing.\n"
-    "  ALWAYS set owasp_category to the OWASP Top 10 2025 code you are testing for (A01–A10).\n"
+    "  Set request_role='test' and owasp_category to the OWASP Top 10 2025 code "
+    "for every request that tests a security hypothesis (A01–A10). Use request_role='setup' "
+    "for authentication or other preparation and request_role='recon' for passive endpoint "
+    "or asset inspection; those requests may omit owasp_category. Baselines and control "
+    "requests used to evaluate a security hypothesis are test requests, not recon.\n"
     "  For A03 also set test_class (for example sqli, reflected_xss, or stored_xss); "
     "one injection class never proves coverage of another.\n"
     "- browser: real browser. Use only when JavaScript execution, hash routing, or DOM "
     "interaction is genuinely required. For XSS, use dom_check with a unique canary "
-    "attribute or exact text to prove the payload affected the rendered DOM. When a click "
+    "attribute or exact text to check the rendered DOM. For cross-user stored XSS, "
+    "set login_as to a different configured username so the browser logs in afresh. "
+    "A DOM match alone does not prove JavaScript execution. When a click "
     "fails or is intercepted, use inspect_element to collect obstruction evidence before "
     "recover_click; recover_click never forces a click.\n"
     "- execute_python: use only when computation, custom encoding/parsing, state correlation, "
@@ -804,9 +816,10 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "all target requests must use aespa_runtime and remain scope-checked and traffic-logged.\n"
     "- context_tool: look up crawl data, history, findings, leads, or traffic without hitting "
     "the target. Available sub-commands: site_map, page_detail, history_search, "
-    "finding_list, lead_list, lead_detail, target_inventory, traffic_search, extract_entities, specialist_status, "
-    "coverage_gaps. coverage_gaps returns a compact live list of uncovered "
-    "route/category cells; use it when choosing the next distinct surface or before done. "
+    "finding_list, lead_list, lead_detail, target_inventory, discovered_targets, traffic_search, extract_entities, specialist_status, "
+    "coverage_gaps, workflow_list, workflow_detail. coverage_gaps returns a compact live list of uncovered "
+    "page/category cells and named workflow checks; use it when choosing the next test or before done. "
+    "discovered_targets pages through exact URLs, including links skipped by grouped crawling. "
     "After 3 consecutive calls, either execute a probe/write a finding or "
     "include context_budget_reason with a concrete summary and why one more targeted "
     "scan round will change the next action.\n"
@@ -859,6 +872,25 @@ _THINKING_AGENT_SYSTEM_BASE = (
     "  that exact state. It tries a URL directly first for URL-addressable pages and\n"
     "  only uses the saved recipe when the functional state does not load. Never use\n"
     "  replay to execute a mutating crawler recipe.\n"
+    "- Named workflows have separate security checks. Prioritize them in Standard mode. "
+    "Call workflow_list and workflow_detail "
+    "to see their goals and reached states. Before testing a named workflow, "
+    "call prepare_workflow_test with its item_id. You may pass target_url for "
+    "an exact item shown in discovered_targets when you have evidence that the "
+    "account can access it. Use the returned exact target "
+    "for that workflow and verify that the required action is available to the "
+    "chosen account. Keep the same item for the whole test, including comparisons "
+    "between accounts. Another workflow may use a different item in the same "
+    "group. Replay steps describe the example item; check controls again when "
+    "the reserved item differs. If no item is available, report that check as blocked. "
+    "Each check has a test type: sequence "
+    "(skip or reorder steps), access (another account or signed out), replay (resubmit "
+    "or send copies at once), tampering (change amounts, prices, IDs, or hidden values), "
+    "csrf (state change without a valid token or from another origin), or reauth "
+    "(sensitive change without a fresh sign-in). Run the test its test_guidance describes, then "
+    "call record_workflow_test with the expected and observed behavior and scan traffic IDs. "
+    "The crawler reaching the workflow and a generic page probe do not cover it. "
+    "If a sequence cannot be tested safely, record blocked with the concrete reason.\n"
     "\n"
     "Coverage tracking: each http_request is attributed to the owasp_category you provide,\n"
     "so the Work Program matrix fills accurately. Probe each applicable page × category pair\n"
@@ -883,9 +915,24 @@ THINKING_AGENT_TOOLS: list[dict] = [
             "properties": {
                 "method": {"type": "string"},
                 "url": {"type": "string"},
+                "request_role": {
+                    "type": "string",
+                    "enum": ["setup", "recon", "test"],
+                    "description": (
+                        "Purpose of this request. Use 'test' for every request that "
+                        "exercises or measures a security hypothesis, including its "
+                        "baseline and control requests. Use 'setup' only for preparation "
+                        "such as authentication, and 'recon' only for passive endpoint or "
+                        "asset inspection. 'test' requires owasp_category."
+                    ),
+                },
                 "page_id": {
                     "type": "integer",
                     "description": "Optional crawled page ID. Keeps this request attributed to the exact URL/SPA state.",
+                },
+                "object_check_id": {
+                    "type": "integer",
+                    "description": "Selected exact-object check ID when sending its comparison request.",
                 },
                 "headers": {"type": "object"},
                 "body": {},
@@ -910,8 +957,8 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "description": (
                         "The OWASP category this probe is testing for "
                         "(A01–A10 for web, API1–API10 for API). "
-                        "Required for both surfaces — drives the Work Program "
-                        "matrix; do not omit."
+                        "Required when request_role is 'test' because it drives the Work "
+                        "Program matrix. Setup and recon requests may omit it."
                     ),
                 },
                 "test_class": {
@@ -952,7 +999,7 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "payload_purpose": {"type": "string"},
                 "note": {"type": "string"},
             },
-            "required": ["method", "url"],
+            "required": ["method", "url", "request_role"],
         },
     },
     {
@@ -1007,6 +1054,14 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "description": "Replay the saved deterministic page recipe before executing these steps (recommended for interactive states).",
                 },
                 "use_session": {"type": "string"},
+                "login_as": {
+                    "type": "string",
+                    "description": (
+                        "Configured username to log in as in a fresh browser context. "
+                        "Use for a stored XSS viewing page when another configured "
+                        "account can receive the payload. Cannot be combined with use_session."
+                    ),
+                },
                 "headers": {
                     "type": "object",
                     "description": (
@@ -1021,9 +1076,15 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Ordered ops: {op: goto|fill|type|click|check|uncheck|select_option|press|wait|snapshot|inspect_element|recover_click|dom_check, ...}. "
+                        "Ordered ops: {op: goto|fill|type|click|check|uncheck|select_option|press|set_field|wait|snapshot|inspect_element|recover_click|dom_check, ...}. "
                         "Controls accept selector, testid, or role+name locators. "
                         "fill: locator+value. select_option: locator+value. press: selector+key. "
+                        "set_field: name (plus optional form CSS) or selector, and value; "
+                        "sets a form control's value directly, including hidden, disabled, or "
+                        "not-rendered fields, then dispatches input/change. Add create=true to "
+                        "append a missing field to the form. Use it to tamper server-side-trusted "
+                        "values (total, price, object/owner id) and then click the real submit so "
+                        "the framework builds a valid request from the form. "
                         "inspect_element: read-only visibility, enabled-state, bounds, style, and click-obstruction diagnostics. "
                         "recover_click: scroll a supported locator into view, optionally press Escape with press_escape=true, then perform a normal non-forced click. "
                         "wait: state or ms. dom_check: selector plus optional attribute "
@@ -1070,6 +1131,50 @@ THINKING_AGENT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "prepare_workflow_test",
+        "description": (
+            "Reserve an exact item for a named web workflow check. Call before "
+            "testing the workflow. Repeated calls for the same workflow return "
+            "its existing item. Verify access and the action on the live site."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "integer"},
+                "target_url": {
+                    "type": "string",
+                    "description": "Optional exact discovered item URL to reserve for this workflow.",
+                },
+            },
+            "required": ["item_id"],
+        },
+    },
+    {
+        "name": "record_workflow_test",
+        "description": (
+            "Record the outcome of a named workflow security check after testing it. "
+            "A covered result needs a targeted sequence, expected and observed behavior, "
+            "and traffic IDs from this scan. Crawl traffic does not count."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "integer"},
+                "status": {
+                    "type": "string",
+                    "enum": ["passed", "finding", "inconclusive", "blocked"],
+                },
+                "attempted_sequence": {"type": "array", "items": {"type": "string"}},
+                "expected_behavior": {"type": "string"},
+                "observed_behavior": {"type": "string"},
+                "evidence_traffic_ids": {"type": "array", "items": {"type": "integer"}},
+                "finding_id": {"type": "integer"},
+                "blocked_reason": {"type": "string"},
+            },
+            "required": ["item_id", "status"],
+        },
+    },
+    {
         "name": "skip_coverage",
         "description": (
             "Resolve one web Work Program obligation without testing it. Use only "
@@ -1101,6 +1206,30 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "note": {"type": "string"},
             },
             "required": ["url", "owasp_category", "disposition", "reason"],
+        },
+    },
+    {
+        "name": "select_object_check",
+        "description": (
+            "Select one exact discovered object for an A01 account comparison after a direct "
+            "successful baseline request. This does not send a request. Use the target and "
+            "observation IDs returned by discovered_targets and http_request."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "integer"},
+                "baseline_observation_id": {"type": "integer"},
+                "comparison_actor_key": {"type": "string"},
+                "method": {"type": "string"},
+                "technique": {"type": "string"},
+                "parameter": {"type": "string"},
+            },
+            "required": [
+                "target_id",
+                "baseline_observation_id",
+                "comparison_actor_key",
+            ],
         },
     },
     {
@@ -1151,6 +1280,26 @@ THINKING_AGENT_TOOLS: list[dict] = [
                         "dismissed: tested and not exploitable; "
                         "inconclusive: tested but could not determine exploitability."
                     ),
+                },
+                "outcome_reason": {
+                    "type": "string",
+                    "enum": [
+                        "confirmed",
+                        "secure_behavior_observed",
+                        "stale_path",
+                        "missing_runtime_prerequisite",
+                        "insufficient_consequence_evidence",
+                        "execution_failed",
+                    ],
+                    "description": "The precise result of this validation case.",
+                },
+                "baseline_evidence": {
+                    "type": "string",
+                    "description": "The request and response observed before applying the test mutation.",
+                },
+                "mutated_evidence": {
+                    "type": "string",
+                    "description": "The changed input or state and the resulting response or consequence.",
                 },
                 "note": {
                     "type": "string",
@@ -1204,6 +1353,13 @@ THINKING_AGENT_TOOLS: list[dict] = [
                 "evidence": {"type": "string"},
                 "request_evidence": {"type": "string"},
                 "response_evidence": {"type": "string"},
+                "object_check_id": {
+                    "type": "integer",
+                    "description": (
+                        "Optional selected A01 object check ID backed by the same exact "
+                        "comparison. Omit this field when no check was selected. Do not use 0."
+                    ),
+                },
                 "note": {"type": "string"},
             },
             "required": ["title", "severity", "affected_url", "evidence"],
@@ -1383,6 +1539,15 @@ THINKING_AGENT_TOOLS: list[dict] = [
                     "type": "string",
                     "description": "The specific URL the specialist should focus on.",
                 },
+                "method": {"type": "string"},
+                "body": {},
+                "state_key": {"type": "string"},
+                "comparison_actor_key": {"type": "string"},
+                "evidence_observation_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Direct access observation IDs that support this handoff.",
+                },
                 "page_id": {
                     "type": "integer",
                     "description": "Optional crawled page/state ID. Preserves the exact SPA state and originating session.",
@@ -1478,8 +1643,13 @@ or test hypotheses that are not part of a listed lead.
 The lead index is compact and incomplete. Before investigating each lead, call
 context_tool with tool=lead_detail and args={"lead_reference": "ABCD-001"}. Read the complete static
 evidence, source/control/sink traces, counterevidence, proof gaps, validation reasoning,
-and ordered attack path. Treat every path hop as an unproven hypothesis and verify it
-with focused live evidence, following the attack path's dynamic-test objective.
+and ordered attack path. For a compiled version 3 validation case, start from its
+resolved page, action, browser request, session, and replay evidence. Reproduce the
+baseline request before changing it. Mutate only the listed input or state relevant to
+the validation assertion, and compare the result with its stated secure and vulnerable
+outcomes. If the stored binding is stale, record that outcome instead of searching
+unrelated routes. Legacy attack paths remain hypotheses whose hops require focused live
+verification.
 
 Use the configured credentials and authenticated sessions supplied in the user message
 to reach protected functionality. Use existing session labels, HTTP use_session,
@@ -1488,7 +1658,8 @@ perform credential attacks, spraying, account registration, or JWT forging.
 
 Work through leads one at a time. A confirmed lead requires concrete live evidence and
 write_finding, followed immediately by update_lead with finding_reference. Dismiss or mark
-inconclusive when the live evidence does not prove exploitability. Resolve every
+inconclusive when the live evidence does not prove exploitability. Include the precise
+outcome reason and both baseline and mutated evidence in update_lead. Resolve every
 imported lead before calling done.
 
 An unrelated issue may be recorded only when it is directly visible in a response or
@@ -1508,8 +1679,12 @@ coverage gaps, or test hypotheses that are not part of a listed lead.
 The lead index is compact and incomplete. Before investigating each lead, call
 context_tool with tool=lead_detail and args={"lead_reference": "ABCD-001"}. Read the complete static
 evidence, source/control/sink traces, counterevidence, proof gaps, validation reasoning,
-and ordered attack path. Treat every path hop as an unproven hypothesis and verify it
-with focused live evidence, following the attack path's dynamic-test objective.
+and ordered attack path. For a compiled version 3 validation case, start from its exact
+resolved endpoint and replay evidence. Reproduce the baseline request before changing
+it. Mutate only the listed input or state relevant to the validation assertion, and
+compare the result with its stated secure and vulnerable outcomes. If the stored
+binding is stale, record that outcome instead of searching unrelated routes. Legacy
+attack paths remain hypotheses whose hops require focused live verification.
 
 Use the configured API credentials and seeded HTTP session labels to authenticate and
 reach protected functionality described by the attack path. Login credentials are not
@@ -1519,7 +1694,8 @@ spraying, account registration, or JWT forging.
 
 Work through leads one at a time. A confirmed lead requires concrete live evidence and
 write_finding, followed immediately by update_lead with finding_reference. Dismiss or mark
-inconclusive when the live evidence does not prove exploitability. Resolve every
+inconclusive when the live evidence does not prove exploitability. Include the precise
+outcome reason and both baseline and mutated evidence in update_lead. Resolve every
 imported lead before calling done.
 
 An unrelated issue may be recorded only when it is directly visible in a response
@@ -1687,6 +1863,8 @@ Context tools:
   `owasp_category` filters by exact OWASP code (e.g. A03); `search` is free-text substring.
 - target_inventory: args may include page_id, kind, source, search/filter, and limit; returns normalized
   endpoints, forms, inputs, scripts, storage keys, IDs, and response fields from crawl intelligence.
+- discovered_targets: args may include route_pattern, search, cursor, and limit; returns exact URLs,
+  who saw each link, direct access observations, and selected checks. A link alone is not access proof.
 - search_assets: alias of target_inventory, useful with source/kind/search for JS/public asset leads.
 - traffic_search: args may include page_id, session_label, method, status, search/filter, and limit; returns captured HTTP
   request/response excerpts from crawl and scans.
@@ -1762,6 +1940,7 @@ To use the browser:
   "steps": [
     {{"op": "goto", "url": "https://..."}},
     {{"op": "fill", "selector": "input[name='q']", "value": "test"}},
+    {{"op": "set_field", "name": "expectedTotal", "form": "form", "value": "1"}},
     {{"op": "click", "selector": "button[type='submit']"}},
     {{"op": "wait", "state": "networkidle"}},
     {{"op": "dom_check", "selector": "#transactions", "attribute": "data-aespa-xss", "equals": "canary-123"}},
@@ -1774,10 +1953,22 @@ To use the browser:
 }}
 
 Browser step rules:
-- Supported ops: goto, fill, type, click, check, uncheck, select_option, press, wait, snapshot, dom_check.
+- Supported ops: goto, fill, type, click, check, uncheck, select_option, press, set_field, wait, snapshot, dom_check.
 - Controls accept a CSS selector, testid, or role plus exact accessible name.
 - For select_option, include the option value.
 - For press, include selector and key (for example "Enter").
+- For set_field, include value plus either name (optionally scoped with a form CSS
+  selector) or selector. Unlike fill, it sets hidden, disabled, and not-rendered
+  fields, and with create=true appends a field the page never shows. The server
+  receives the value you set, so this is the way to test server-trusted form
+  values (order total or price, a promo or coupon, an owner or object id, a role
+  or status) and business-logic bugs behind a POST. Drive the real rendered form:
+  goto the page, set_field the value(s) you want to tamper, then click the real
+  submit control, so the framework builds a valid request (do not hand-build or
+  replay a captured server-action/multipart body — those go stale and abort).
+  Confirm the exploit by its effect, not the submit response: re-fetch the created
+  record or affected page (for example the new order) and check the tampered value
+  took, since the action response alone does not prove it.
 - For wait, include state ("domcontentloaded", "load", or "networkidle") or ms.
 - For dom_check, include a CSS selector and equals. Optionally include attribute;
   without attribute, the element text is compared. The result explicitly reports PASS/FAIL.

@@ -7,8 +7,9 @@ import {
 
 export function sourceLabel(source) {
   const labels = {
-    alice: "A.L.I.C.E",
-    dynamic_scan: "Dynamic",
+    alice: "A.L.I.C.E.",
+    dynamic_scan: "Test Lead",
+    specialist_agent: "Specialist",
     burp_active_scan: "Burp",
     burp_mcp: "Burp MCP",
     deterministic_probe: "Deterministic",
@@ -16,10 +17,12 @@ export function sourceLabel(source) {
     debug_reporter: "Debug Reporter",
     sast: "SAST",
     sast_lead: "SAST",
-    alice_api: "A.L.I.C.E",
+    alice_api: "A.L.I.C.E.",
     unknown: "Unknown",
   };
-  return labels[source] || String(source || "Unknown").replace(/_/g, " ");
+  if (labels[source]) return labels[source];
+  const text = String(source || "Unknown").replace(/_/g, " ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 export function markdownExportFilename(run, siteName) {

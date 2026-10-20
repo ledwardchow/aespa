@@ -1,6 +1,9 @@
-import { FindingDetails } from "../../shared/findings/FindingDetails.tsx";
-import { FindingEditor } from "../../shared/findings/FindingEditor.tsx";
-import { FindingFileControls } from "../../shared/findings/FindingFileControls.tsx";
+import { FindingsMoreMenu } from "../../shared/findings/FindingsMoreMenu.tsx";
+import { FindingsList } from "../../shared/findings/FindingsList.tsx";
+import {
+  CoverageFindingsFilter,
+  filterCoverageFindings,
+} from "../../shared/findings/CoverageFindingsFilter.jsx";
 import { useFindingEditor } from "../../shared/findings/useFindingEditor.ts";
 import * as apiRunsApi from "../../shared/api/apiRuns.js";
 import { ALICE_DEDUP_DIRECTIVE } from "../../shared/findings/reviewDirective.js";
@@ -13,38 +16,36 @@ import {
 } from "../../shared/findings/files.js";
 import { downloadTextFile } from "../../shared/lib/download.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
-import { FindingReferenceLink } from "../../shared/ui/FindingReferenceLink.jsx";
+import { Notice, PageError } from "../../shared/ui/Notice.jsx";
+import { runHref } from "../../shared/navigation/links.ts";
 
-export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }) {
+export function ApiRunFindingsTab({
+  runId,
+  scanRunning,
+  run,
+  initialFindingRef,
+  findingIds,
+  coverageReturn,
+}) {
   const [findings, setFindings] = useState([]);
+  const visibleFindings = filterCoverageFindings(findings, findingIds);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [expanded, setExpanded] = useState(new Set());
+  const [message, setMessage] = useState(null);
+  const [collapseToken, setCollapseToken] = useState(0);
   const [clearBusy, setClearBusy] = useState(false);
   const [dedupeBusy, setDedupeBusy] = useState(false);
   const load = useCallback(async () => {
     try {
       const data = await apiRunsApi.getApiFindings(runId);
       setFindings(data);
-      if (initialFindingRef) {
-        const match = data.find((f) => f.reference === initialFindingRef);
-        if (match) setExpanded((previous) => new Set(previous).add(match.id));
-      }
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
-  }, [runId, initialFindingRef]);
+  }, [runId]);
   usePolling(load, { enabled: scanRunning, intervalMs: 8000 });
-  const toggle = (id) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
   const onExportFindingsMarkdown = () => {
     try {
       const md = findingsToMarkdown(findings, {
@@ -65,7 +66,7 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
       if (!imported.length) throw new Error("No issues found in the selected file.");
       const result = await apiRunsApi.importApiFindings(runId, imported);
       setFindings(await apiRunsApi.getApiFindings(runId));
-      alert(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
+      setMessage(`Imported ${result.imported} issue${result.imported === 1 ? "" : "s"}.`);
     } catch (e) {
       setError(e.message);
     }
@@ -161,7 +162,7 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
         }, 3000);
       });
       await load();
-      setExpanded(new Set());
+      setCollapseToken((token) => token + 1);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -181,18 +182,23 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
       setClearBusy(false);
     }
   };
-  const onDeleteApiFinding = async (e, findingId) => {
-    e.stopPropagation();
+  const onDeleteApiFinding = async (findingId) => {
     try {
       await apiRunsApi.deleteApiFinding(runId, findingId);
       setFindings((prev) => prev.filter((f) => f.id !== findingId));
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        next.delete(findingId);
-        return next;
-      });
     } catch (err) {
       setError(err.message);
+    }
+  };
+  const onDeleteApiFindingGroup = async (title) => {
+    if (!confirm(`Delete all instances of "${title}"?`)) return false;
+    try {
+      await apiRunsApi.deleteApiFindingGroup(runId, title);
+      setFindings((prev) => prev.filter((f) => f.title !== title));
+      return true;
+    } catch (err) {
+      setError(err.message);
+      return false;
     }
   };
   const editor = useFindingEditor({
@@ -204,20 +210,6 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
         previous.map((finding) => (finding.id === id ? { ...finding, ...updated } : finding)),
       ),
   });
-  const editingFinding = editor.editingId;
-  const onEditApiFinding = (event, finding) => {
-    event.stopPropagation();
-    setExpanded((previous) => new Set(previous).add(finding.id));
-    editor.edit(finding);
-  };
-  const sevCls = (s) =>
-    ({
-      critical: "sev-critical",
-      high: "sev-high",
-      medium: "sev-medium",
-      low: "sev-low",
-      info: "sev-info",
-    })[s] || "sev-info";
   if (loading)
     return (
       <div
@@ -230,223 +222,84 @@ export function ApiRunFindingsTab({ runId, scanRunning, run, initialFindingRef }
       </div>
     );
   return (
-    <div
-      style={{
-        padding: "16px 24px",
-      }}
-    >
-      {error && (
-        <div
-          className="alert error"
-          style={{
-            marginBottom: 12,
-          }}
-        >
-          {error}
-        </div>
+    <>
+      <PageError error={error} onDismiss={() => setError(null)} />
+      {message && (
+        <Notice variant="success" onDismiss={() => setMessage(null)}>
+          {message}
+        </Notice>
       )}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          marginBottom: 16,
-          flexWrap: "wrap",
-        }}
-      >
-        <h3
-          style={{
-            margin: 0,
-            marginRight: 4,
-          }}
-        >
-          Security Findings
-        </h3>
-        {scanRunning && (
-          <span
-            className="badge warning"
-            style={{
-              fontSize: 12,
-            }}
-          >
-            Scan running…
-          </span>
-        )}
-        <span
-          className="badge neutral"
-          style={{
-            fontSize: 12,
-          }}
-        >
-          {findings.length} finding{findings.length !== 1 ? "s" : ""}
-        </span>
-        <div
-          style={{
-            flex: 1,
-          }}
-        ></div>
-        <button className="btn sm" onClick={load}>
-          Refresh
-        </button>
-        <FindingFileControls
-          hasFindings={findings.length > 0}
-          onExport={onExportFindingsMarkdown}
-          onImport={onImportFindingsFile}
-        />
-        {findings.length > 0 && (
-          <button
-            className="btn sm"
-            disabled={dedupeBusy || scanRunning}
-            onClick={onDeduplicateFindings}
-          >
-            {dedupeBusy && <span className="inline-spinner"></span>}
-            {dedupeBusy ? "Reviewing…" : "AI Review Issues"}
-          </button>
-        )}
-        {findings.length > 0 && (
-          <button className="btn danger-outline sm" disabled={clearBusy} onClick={onClearFindings}>
-            {clearBusy ? "Clearing…" : "Clear all"}
-          </button>
-        )}
-      </div>
-      {findings.length === 0 ? (
-        <div
-          className="subtle"
-          style={{
-            padding: 24,
-            textAlign: "center",
-          }}
-        >
-          {scanRunning
-            ? "Scan in progress — findings will appear here as they are discovered."
-            : "No findings yet. Start a scan to test this API collection."}
-        </div>
-      ) : (
-        findings.map((f) => (
-          <div
-            key={f.id}
-            className="finding-card"
-            style={{
-              marginBottom: 8,
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "10px 14px",
-                cursor: "pointer",
-                background: "var(--surface)",
-              }}
-              onClick={() => {
-                if (editingFinding === f.id) return;
-                toggle(f.id);
-              }}
-            >
-              <FindingReferenceLink
-                reference={f.reference}
-                title={f.title}
-                description={f.description}
-                severity={f.severity}
-                cvss_score={f.cvss_score}
-                validation_status={f.validation_status}
-                validation_note={f.validation_note}
-                origin={f.origin}
-                validated_by={f.validated_by}
-                href={`#/api-runs/${runId}/findings?finding=${encodeURIComponent(f.reference || "")}`}
-              />
-              <span className={"sev-badge " + sevCls(f.severity)}>{f.severity}</span>
-              <span
-                style={{
-                  fontWeight: 600,
-                  flex: 1,
-                }}
-              >
-                {f.title}
+      <div className="findings-panel flush">
+        <div className="findings-status-bar">
+          <div className="findings-status-summary">
+            {scanRunning && <span className="badge warning">Scan running…</span>}
+            <span className="badge neutral">
+              {visibleFindings.length} finding{visibleFindings.length !== 1 ? "s" : ""}
+            </span>
+            {dedupeBusy && (
+              <span className="val-status-badge val-running dedupe-status">
+                <span className="inline-spinner"></span>
+                A.L.I.C.E. is reviewing findings…
               </span>
-              {f.validation_status === "confirmed" && (
-                <span className="val-badge val-confirmed">confirmed</span>
-              )}
-              {f.validation_status === "unconfirmed" && (
-                <span className="val-badge val-unconfirmed">unconfirmed</span>
-              )}
-              {(f.validation_status === "false_positive" ||
-                f.validation_status === "low_confidence") && (
-                <span className="val-badge val-fp">low conf</span>
-              )}
-              {f.owasp_api_category && (
-                <span
-                  className="badge neutral"
-                  style={{
-                    fontSize: 11,
-                  }}
-                >
-                  {f.owasp_api_category}
-                </span>
-              )}
-              {!f.owasp_api_category && f.owasp_category && (
-                <span
-                  className="badge neutral"
-                  style={{
-                    fontSize: 11,
-                  }}
-                >
-                  {f.owasp_category}
-                </span>
-              )}
-              <span
-                style={{
-                  color: "var(--muted)",
-                  fontSize: 12,
-                }}
-              >
-                {expanded.has(f.id) ? "▲" : "▼"}
-              </span>
-              <button
-                className="btn ghost sm finding-del-btn"
-                title="Edit finding"
-                onClick={(e) => onEditApiFinding(e, f)}
-              >
-                ✎
-              </button>
-              <button
-                className="btn ghost sm finding-del-btn"
-                title="Delete finding"
-                onClick={(e) => onDeleteApiFinding(e, f.id)}
-              >
-                🗑
-              </button>
-            </div>
-            {expanded.has(f.id) && editingFinding === f.id && editor.draft && (
-              <FindingEditor editor={editor} runKind="api" />
-            )}
-            {expanded.has(f.id) && editingFinding !== f.id && (
-              <div
-                style={{
-                  padding: "12px 14px",
-                  borderTop: "1px solid var(--border)",
-                  background: "var(--bg)",
-                }}
-              >
-                <FindingDetails finding={f} runKind="api" />
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: "var(--muted)",
-                  }}
-                >
-                  {f.validation_status} · {f.origin?.label || f.finding_source}
-                </div>
-              </div>
             )}
           </div>
-        ))
-      )}
-    </div>
+          {!findingIds?.length && (
+            <div className="findings-actions">
+              <button className="btn secondary sm" onClick={load}>
+                Refresh
+              </button>
+              {findings.length > 0 && (
+                <button
+                  className="btn secondary sm"
+                  disabled={dedupeBusy || scanRunning}
+                  onClick={onDeduplicateFindings}
+                >
+                  {dedupeBusy && <span className="inline-spinner"></span>}
+                  {dedupeBusy ? "Reviewing…" : "Review with AI"}
+                </button>
+              )}
+              <FindingsMoreMenu
+                hasFindings={findings.length > 0}
+                onExport={onExportFindingsMarkdown}
+                onImport={onImportFindingsFile}
+                clearBusy={clearBusy}
+                onClear={onClearFindings}
+              />
+            </div>
+          )}
+        </div>
+        <CoverageFindingsFilter
+          runKind="api"
+          runId={runId}
+          findingIds={findingIds}
+          coverageReturn={coverageReturn}
+          visibleCount={visibleFindings.length}
+        />
+        <FindingsList
+          findings={visibleFindings}
+          runKind="api"
+          findingHref={(reference) =>
+            runHref({ runKind: "api", runId }, "findings", {
+              finding: reference,
+              finding_ids: findingIds?.join(","),
+              from: findingIds?.length ? "coverage" : undefined,
+            })
+          }
+          editor={editor}
+          emptyMessage={
+            findingIds?.length
+              ? "No matching findings remain for this coverage cell."
+              : scanRunning
+                ? "Scan running… findings will appear here."
+                : "No findings yet. Start a scan to begin."
+          }
+          initialFindingRef={initialFindingRef}
+          collapseToken={collapseToken}
+          onDeleteFinding={onDeleteApiFinding}
+          onDeleteGroup={findingIds?.length ? undefined : onDeleteApiFindingGroup}
+        />
+      </div>
+    </>
   );
 }
 

@@ -1,9 +1,14 @@
 import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect, useCallback } from "react";
-import { PROVIDER_MODEL_PLACEHOLDERS, PROVIDER_BASE_URL_PLACEHOLDERS } from "./providerMetadata.js";
+import {
+  API_FORMAT_LABELS,
+  PROVIDER_MODEL_PLACEHOLDERS,
+  PROVIDER_BASE_URL_PLACEHOLDERS,
+} from "./providerMetadata.js";
 import { providerPayload, providerToForm } from "./providerForm.js";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
+import { sortModelNames } from "../../shared/lib/modelSorting.js";
 import {
   BEDROCK_DEFAULT_REGIONS,
   BEDROCK_REGIONS,
@@ -181,11 +186,201 @@ function CodexConnectionCard() {
             : " Not signed in."}
         </div>
       )}
+      {state?.account && state.daybreak && (
+        <div className="field-hint" style={{ marginTop: 8 }}>
+          Daybreak Blue: {state.daybreak.blue ? "Available" : "Not available"}. Daybreak Red:{" "}
+          {state.daybreak.red ? "Available" : "Not available"}.
+        </div>
+      )}
+      {state?.account && state.daybreak === null && (
+        <div className="field-hint" style={{ marginTop: 8 }}>
+          Could not check Daybreak access with this Codex version.
+        </div>
+      )}
       {error && (
         <div className="alert error" style={{ marginTop: 8 }}>
           {error}
         </div>
       )}
+    </div>
+  );
+}
+
+function ChatGPTPlanConnectionCard({ value, onSelect, reloadKey }) {
+  const [state, setState] = useState(null);
+  const [daybreak, setDaybreak] = useState(null);
+  const [pending, setPending] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const refresh = useCallback(async () => {
+    const next = await settingsApi.getChatGPTPlanStatus();
+    setState(next);
+    return next;
+  }, []);
+
+  useEffect(() => {
+    refresh().catch((e) => setError(e.message));
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!value && state?.active) onSelect(state.active);
+  }, [value, state?.active, onSelect]);
+
+  useEffect(() => {
+    const account = state?.accounts?.find((item) => item.client_id === value);
+    if (!account?.signed_in) {
+      setDaybreak(null);
+      return undefined;
+    }
+    let stopped = false;
+    setDaybreak({ status: "loading" });
+    settingsApi
+      .checkChatGPTPlanAccess(value)
+      .then((result) => {
+        if (stopped) return;
+        setDaybreak({
+          status: "ready",
+          blue: Boolean(result.daybreak?.blue),
+          red: Boolean(result.daybreak?.red),
+        });
+      })
+      .catch(() => {
+        if (!stopped) setDaybreak({ status: "error" });
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [value, state, reloadKey]);
+
+  useEffect(() => {
+    if (!pending) return undefined;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const result = await settingsApi.getChatGPTPlanLogin(pending);
+        if (stopped || ["pending", "processing"].includes(result.status)) return;
+        setPending(null);
+        setBusy(false);
+        if (result.status === "complete") {
+          const next = await refresh();
+          if (next.active) onSelect(next.active, true);
+        } else {
+          setError(result.error || "ChatGPT sign-in failed");
+        }
+      } catch (e) {
+        if (!stopped) setError(e.message);
+      }
+    };
+    const timer = window.setInterval(poll, 1500);
+    poll();
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [pending, refresh, onSelect]);
+
+  const signIn = async (clientId = null) => {
+    const popup = window.open("", "_blank");
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await settingsApi.startChatGPTPlanLogin(clientId);
+      if (popup) {
+        popup.opener = null;
+        popup.location.href = result.url;
+      } else {
+        window.location.href = result.url;
+      }
+      setPending(result.login_id);
+    } catch (e) {
+      popup?.close();
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+
+  const signOut = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await settingsApi.logoutChatGPTPlan(value);
+      onSelect("");
+      await refresh();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const accounts = state?.accounts || [];
+  const selected = accounts.find((account) => account.client_id === value);
+  return (
+    <div className="form-section" style={{ marginTop: 12 }}>
+      <div className="form-section-title">ChatGPT connection</div>
+      <div className="field-hint">Sign in to use your ChatGPT account for this provider.</div>
+      {accounts.length > 0 && (
+        <div className="field">
+          <label>ChatGPT account</label>
+          <select className="select" value={value} onChange={(e) => onSelect(e.target.value)}>
+            <option value="">Select an account</option>
+            {accounts.map((account) => (
+              <option key={account.client_id} value={account.client_id}>
+                {account.email || account.client_id} {account.signed_in ? "" : "(signed out)"}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {selected?.signed_in && (
+        <div className="form-section" style={{ marginTop: 12 }}>
+          <div className="form-section-title">Daybreak Access</div>
+          {daybreak?.status === "loading" && <div className="field-hint">Checking access…</div>}
+          {daybreak?.status === "error" && (
+            <div className="field-hint">Could not check Daybreak access. Try again.</div>
+          )}
+          {daybreak?.status === "ready" && (
+            <>
+              <div className="field-hint">
+                Daybreak Blue: {daybreak.blue ? "Available" : "Not available"}
+              </div>
+              <div className="field-hint">
+                Daybreak Red: {daybreak.red ? "Available" : "Not available"}
+              </div>
+              {!daybreak.blue && !daybreak.red && (
+                <div className="alert warning" role="alert" style={{ marginTop: 8 }}>
+                  This ChatGPT account does not have Daybreak Blue or Red access.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <button type="button" className="btn secondary sm" disabled={busy} onClick={() => signIn()}>
+          Continue with ChatGPT
+        </button>
+        {selected && (
+          <>
+            <button
+              type="button"
+              className="btn secondary sm"
+              disabled={busy}
+              onClick={() => signIn(value)}
+            >
+              Sign in again
+            </button>
+            {selected.signed_in && (
+              <button type="button" className="btn ghost sm" disabled={busy} onClick={signOut}>
+                Sign out
+              </button>
+            )}
+          </>
+        )}
+      </div>
+      {pending && <div className="field-hint">Finish signing in in your browser.</div>}
+      {error && <div className="alert error">{error}</div>}
     </div>
   );
 }
@@ -383,10 +578,30 @@ function CopilotConnectionCard({ value, onSelect }) {
   );
 }
 
-export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
+const createdProviderMessages = new Map();
+const CREATED_MESSAGE_TTL_MS = 10000;
+
+export function LLMProviderForm({
+  mode,
+  provider,
+  models,
+  profiles,
+  onConfigureModel,
+  onProviderUpdated,
+  onProviderCreated,
+  providerNames = [],
+  onSaved,
+  onCancel,
+}) {
   const [form, setForm] = useState(() => providerToForm(provider));
+  const [newModelName, setNewModelName] = useState("");
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [addingModel, setAddingModel] = useState(false);
+  const [createdMessage] = useState(() => {
+    const created = createdProviderMessages.get(provider?.id);
+    return created && Date.now() - created.at < CREATED_MESSAGE_TTL_MS ? created.message : null;
+  });
+  const [saved, setSaved] = useState(createdMessage !== null);
   const [error, setError] = useState(null);
   const upd = useCallback((p) => {
     setSaved(false);
@@ -402,28 +617,183 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
     [upd],
   );
   const [loadingModels, setLoadingModels] = useState(false);
-  const [loadMessage, setLoadMessage] = useState(null);
+  const [daybreakReloadKey, setDaybreakReloadKey] = useState(0);
+  const [loadMessage, setLoadMessage] = useState(createdMessage);
   const [loadFailed, setLoadFailed] = useState(false);
+  const configuredModelsByName = new Map(
+    (models || [])
+      .filter((modelConfig) => modelConfig.provider_id === provider?.id)
+      .map((modelConfig) => [modelConfig.model, modelConfig]),
+  );
+  const profileNamesByModelId = new Map();
+  for (const scanProfile of profiles || []) {
+    const referencedModelIds = new Set([
+      scanProfile.default_model_id,
+      ...Object.values(scanProfile.role_models || {}),
+    ]);
+    for (const modelId of referencedModelIds) {
+      if (modelId == null) continue;
+      const key = String(modelId);
+      const names = profileNamesByModelId.get(key) || new Set();
+      names.add(scanProfile.name);
+      profileNamesByModelId.set(key, names);
+    }
+  }
+  const providerModelNames = sortModelNames(
+    form.models
+      .split(/\r?\n|,/)
+      .map((modelName) => modelName.trim())
+      .filter(Boolean),
+  ).sort(
+    (left, right) =>
+      Number(configuredModelsByName.has(right)) - Number(configuredModelsByName.has(left)),
+  );
 
-  const onLoadModels = async () => {
+  const addModel = async () => {
+    const modelName = newModelName.trim();
+    if (!modelName || providerModelNames.includes(modelName)) return;
+    const nextForm = {
+      ...form,
+      models: [...providerModelNames, modelName].join("\n"),
+    };
+    if (mode !== "edit" || !provider?.id) {
+      upd(nextForm);
+      setNewModelName("");
+      return;
+    }
+
+    setError(null);
+    setAddingModel(true);
+    setSaved(false);
+    try {
+      const savedProvider = await settingsApi.updateLLMProvider(
+        provider.id,
+        providerPayload(nextForm),
+      );
+      setForm(providerToForm(savedProvider));
+      setNewModelName("");
+      setSaved(true);
+      onProviderUpdated?.(savedProvider);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setAddingModel(false);
+    }
+  };
+
+  const removeModel = (modelName) => {
+    const modelCapabilities = { ...form.model_capabilities };
+    delete modelCapabilities[modelName];
+    upd({
+      models: providerModelNames.filter((name) => name !== modelName).join("\n"),
+      model_capabilities: modelCapabilities,
+    });
+  };
+
+  const loadModels = async (accountId = form.username, forceAccess = true) => {
     setLoadingModels(true);
     setLoadMessage(null);
     setLoadFailed(false);
     try {
-      const fetched = await settingsApi.discoverModelOptions({
+      const discovery = settingsApi.discoverModelOptions({
         provider_id: provider?.id || null,
         api_format: form.api_format,
         api_key: form.api_key,
         base_url: isBedrockProvider(form.api_format)
           ? bedrockBaseUrl(form.api_format, form.region)
           : form.base_url,
-        username: form.username,
+        username: accountId,
+        project_id: form.project_id,
+        aws_profile: form.aws_profile,
+        location: form.location,
       });
-      if (fetched?.models?.length > 0) {
-        upd({ models: fetched.models.join("\n"), model_capabilities: fetched.capabilities || {} });
-        setLoadMessage(
-          `Loaded ${fetched.models.length} model(s) and capability metadata from API.`,
+      const isChatGPTPlan = form.api_format === "openai_chatgpt_plan";
+      const accessCheck = isChatGPTPlan
+        ? settingsApi.checkChatGPTPlanAccess(accountId, forceAccess)
+        : Promise.resolve(null);
+      let catalogFailed = false;
+      const [fetched, access] = await Promise.all([
+        isChatGPTPlan
+          ? discovery.catch(() => {
+              catalogFailed = true;
+              return { models: [], capabilities: {} };
+            })
+          : discovery,
+        accessCheck,
+      ]);
+      catalogFailed = catalogFailed || fetched.catalog_complete === false;
+      if (fetched?.models?.length > 0 || access?.models?.length > 0) {
+        const discoveredModelNames = [...new Set(fetched.models || [])];
+        const extraModelNames = (access?.models || []).filter(
+          (name) => !discoveredModelNames.includes(name),
         );
+        const retainedModelNames = [...configuredModelsByName.entries()]
+          .filter(([, modelConfig]) => profileNamesByModelId.has(String(modelConfig.id)))
+          .map(([modelName]) => modelName)
+          .filter(
+            (modelName) =>
+              !discoveredModelNames.includes(modelName) && !extraModelNames.includes(modelName),
+          );
+        const nextModelNames = [...discoveredModelNames, ...extraModelNames, ...retainedModelNames];
+        const nextCapabilities = Object.fromEntries(
+          nextModelNames.flatMap((modelName) => {
+            const capability =
+              fetched.capabilities?.[modelName] || form.model_capabilities?.[modelName];
+            return capability ? [[modelName, capability]] : [];
+          }),
+        );
+        const nextForm = {
+          ...form,
+          username: isChatGPTPlan ? accountId : form.username,
+          models: nextModelNames.join("\n"),
+          model_capabilities: nextCapabilities,
+        };
+        const message = `${catalogFailed ? "Could not load the full model list." : `Loaded ${discoveredModelNames.length} model(s) ${isChatGPTPlan ? "for this account" : "from the API"}.`}${
+          extraModelNames.length > 0
+            ? ` Verified ${extraModelNames.join(" and ")} for this account.`
+            : ""
+        }${
+          retainedModelNames.length > 0
+            ? ` Kept ${retainedModelNames.length} model(s) used by scan profiles.`
+            : ""
+        }`;
+        if (mode === "edit" && provider?.id) {
+          setSaved(false);
+          const savedProvider = await settingsApi.updateLLMProvider(
+            provider.id,
+            providerPayload(nextForm),
+          );
+          setForm(providerToForm(savedProvider));
+          setSaved(true);
+          onProviderUpdated?.(savedProvider);
+        } else {
+          if (!nextForm.name.trim()) {
+            const taken = new Set(providerNames.map((name) => name.trim().toLowerCase()));
+            const label = API_FORMAT_LABELS[nextForm.api_format] || nextForm.api_format;
+            let name = label;
+            for (let count = 2; taken.has(name.toLowerCase()); count += 1) {
+              name = `${label} ${count}`;
+            }
+            nextForm.name = name;
+          }
+          upd(nextForm);
+          try {
+            const savedProvider = await settingsApi.createLLMProvider(providerPayload(nextForm));
+            setForm(providerToForm(savedProvider));
+            setSaved(true);
+            if (onProviderCreated) {
+              createdProviderMessages.clear();
+              createdProviderMessages.set(savedProvider.id, { message, at: Date.now() });
+              onProviderCreated(savedProvider);
+            }
+          } catch (e) {
+            setError(`Loaded models, but could not save the provider: ${e.message}`);
+          }
+        }
+        if (isChatGPTPlan) {
+          setDaybreakReloadKey((count) => count + 1);
+        }
+        setLoadMessage(message);
       } else {
         setLoadFailed(true);
         setLoadMessage("The API returned no models. Enter the model names manually.");
@@ -435,15 +805,20 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
       setLoadingModels(false);
     }
   };
+  const onLoadModels = () => loadModels();
 
   const onFormatChange = async (api_format) => {
     const region = isBedrockProvider(api_format) ? BEDROCK_DEFAULT_REGIONS[api_format] : "";
     upd({
       api_format,
+      username: api_format === "openai_chatgpt_plan" ? "" : form.username,
+      models: api_format === "openai_chatgpt_plan" ? "" : form.models,
       region,
       base_url: isBedrockProvider(api_format) ? bedrockBaseUrl(api_format, region) : form.base_url,
+      location: api_format === "google_vertex" ? "global" : "",
       model_capabilities: {},
     });
+    if (api_format === "openai_chatgpt_plan") return;
     if (form.models.trim()) return;
     try {
       const defaults = await settingsApi.getDefaultModels();
@@ -476,7 +851,6 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
   };
   return (
     <>
-      {error && <div className="alert error">{error}</div>}
       <form className="card" onSubmit={onSubmit}>
         <div className="form-section-title">Provider</div>
         <div className="field">
@@ -501,14 +875,17 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
             onChange={(e) => onFormatChange(e.target.value)}
           >
             <option value="anthropic">Anthropic API</option>
+            <option value="claude_cli">Claude CLI subscription</option>
             <option value="factory_droid">Factory Droid subscription</option>
             <option value="github_copilot">GitHub Copilot subscription</option>
             <option value="openai_codex">OpenAI Codex subscription</option>
+            <option value="openai_chatgpt_plan">ChatGPT plan</option>
             <option value="google_antigravity">Google Antigravity subscription</option>
             <option value="openai">OpenAI API</option>
             <option value="openai_compatible">OpenAI-compatible API</option>
             <option value="openrouter">OpenRouter</option>
             <option value="google">Google Gemini API</option>
+            <option value="google_vertex">Google Vertex AI (ADC)</option>
             <option value="bedrock">Amazon Bedrock Runtime</option>
             <option value="bedrock_mantle">Amazon Bedrock Mantle</option>
             <option value="azure_openai">Azure OpenAI</option>
@@ -546,7 +923,14 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
             </div>
           </div>
         )}
-        {!["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format) &&
+        {![
+          "claude_cli",
+          "factory_droid",
+          "openai_codex",
+          "openai_chatgpt_plan",
+          "google_antigravity",
+          "google_vertex",
+        ].includes(form.api_format) &&
           !isBedrockProvider(form.api_format) && (
             <div className="field">
               <label>
@@ -575,11 +959,57 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
             credentials.
           </div>
         )}
+        {form.api_format === "claude_cli" && (
+          <div className="field-hint">
+            Uses the account signed in through Claude CLI. Install Claude Code and run claude auth
+            login first. AESPA does not store Claude credentials. Claude's own tools are disabled
+            for scans.
+          </div>
+        )}
         {form.api_format === "google_antigravity" && (
           <div className="field-hint">
             Uses the active Antigravity CLI / Google account login. No API key or base URL is
             required.
           </div>
+        )}
+        {form.api_format === "google_vertex" && (
+          <>
+            <div className="field-hint">
+              Uses Google Cloud Application Default Credentials from the AESPA process. AESPA saves
+              the project and location, but does not copy or store Google credentials.
+            </div>
+            <div className="two-col">
+              <div className="field">
+                <label htmlFor="provider-google-project">Google Cloud project ID</label>
+                <input
+                  id="provider-google-project"
+                  type="text"
+                  required
+                  value={form.project_id}
+                  placeholder="my-gcp-project"
+                  onChange={(e) => upd({ project_id: e.target.value })}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="provider-google-location">Vertex AI location</label>
+                <input
+                  id="provider-google-location"
+                  type="text"
+                  required
+                  value={form.location || "global"}
+                  placeholder="global"
+                  onChange={(e) => upd({ location: e.target.value })}
+                />
+                <div className="field-hint">
+                  Use global unless the selected model requires a region.
+                </div>
+              </div>
+            </div>
+            <div className="field-hint">
+              Only serverless publisher models are supported. Deployed endpoint and tuned-model
+              resource names are rejected.
+            </div>
+          </>
         )}
         {form.api_format === "openai_codex" && (
           <>
@@ -590,12 +1020,27 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
             <CodexConnectionCard />
           </>
         )}
+        {form.api_format === "openai_chatgpt_plan" && (
+          <ChatGPTPlanConnectionCard
+            value={form.username}
+            onSelect={(username, signedInNow = false) => {
+              if (username !== form.username) {
+                upd({ username, models: "", model_capabilities: {} });
+              }
+              if (username && (signedInNow || username !== form.username || !form.models.trim())) {
+                void loadModels(username, signedInNow);
+              }
+            }}
+            reloadKey={daybreakReloadKey}
+          />
+        )}
         {form.api_format === "bedrock_mantle" && (
           <div className="field">
-            <label>
+            <label htmlFor="provider-project-id">
               Project ID <span className="field-optional">(optional)</span>
             </label>
             <input
+              id="provider-project-id"
               type="text"
               value={form.project_id}
               placeholder="proj_5d5ykleja6cwpirysbb7"
@@ -612,62 +1057,43 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
             </div>
           </div>
         )}
+        {isBedrockProvider(form.api_format) && (
+          <div className="field">
+            <label htmlFor="provider-aws-profile">
+              AWS profile <span className="field-optional">(optional)</span>
+            </label>
+            <input
+              id="provider-aws-profile"
+              type="text"
+              value={form.aws_profile}
+              placeholder="default"
+              onChange={(e) => upd({ aws_profile: e.target.value })}
+            />
+            <div className="field-hint">
+              Name of a profile in your AWS credentials or config file. Used when the API key is
+              blank. Leave blank to use AWS_PROFILE or the default AWS credentials.
+            </div>
+          </div>
+        )}
         {form.api_format === "github_copilot" && (
           <CopilotConnectionCard value={form.username} onSelect={selectCopilotUsername} />
         )}
-        <div className="field">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: "6px",
-            }}
-          >
-            <label style={{ margin: 0 }}>Model names</label>
-            <button
-              type="button"
-              className="btn secondary sm"
-              disabled={loadingModels}
-              onClick={onLoadModels}
-              title="Fetch available model names from API and overwrite current list"
-            >
-              {loadingModels ? "Loading models…" : "Load models from API"}
-            </button>
-          </div>
-          <textarea
-            rows="5"
-            value={form.models}
-            placeholder={PROVIDER_MODEL_PLACEHOLDERS[form.api_format] || ""}
-            onChange={(e) =>
-              upd({
-                models: e.target.value,
-              })
-            }
-          ></textarea>
-          {loadMessage && (
-            <div
-              className="field-hint"
-              style={{ color: loadFailed ? "var(--danger)" : "var(--accent)", marginBottom: "4px" }}
-            >
-              {loadMessage}
-            </div>
-          )}
-          <div className="field-hint">
-            Enter one model per line, or separate models with commas.{" "}
-            {form.api_format === "openai_compatible"
-              ? "The examples in the placeholder are not saved automatically."
-              : "Leave blank to use the models shown in the placeholder."}
-          </div>
-        </div>
-        {!["factory_droid", "openai_codex", "google_antigravity"].includes(form.api_format) && (
+        {![
+          "claude_cli",
+          "factory_droid",
+          "openai_codex",
+          "openai_chatgpt_plan",
+          "google_antigravity",
+          "google_vertex",
+        ].includes(form.api_format) && (
           <div className="field">
-            <label>
+            <label htmlFor="provider-api-key">
               {form.api_format === "github_copilot" ? "GitHub token" : "API Key"}{" "}
               <span className="field-optional">(optional)</span>
             </label>
             <div className="row" style={{ gap: "8px" }}>
               <input
+                id="provider-api-key"
                 type="password"
                 value={form.api_key}
                 placeholder={
@@ -716,9 +1142,11 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
             )}
             {form.api_format === "bedrock_mantle" && (
               <div className="field-hint">
-                With a key, Mantle authenticates via Bearer token. Leave blank to sign requests with
-                AWS credentials (SigV4) from AWS_PROFILE, environment variables, SSO, or an IAM role
-                — the same fallback as the Bedrock Runtime provider.
+                Mantle uses each model&apos;s supported API: Anthropic Messages for Claude,
+                Responses for OpenAI models, and Chat Completions for other supported text models.
+                With a key, Mantle authenticates via the API&apos;s key header. Leave blank to sign
+                requests with AWS credentials (SigV4) from AWS_PROFILE, environment variables, SSO,
+                or an IAM role.
               </div>
             )}
             {form.api_format === "github_copilot" && (
@@ -731,53 +1159,165 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
             )}
           </div>
         )}
-        <div className="divider" />
-        <div className="form-section-title">
-          Rate Limits <span className="field-optional">(optional)</span>
-        </div>
-        <div
-          className="field-hint"
-          style={{
-            marginBottom: "8px",
-          }}
-        >
-          Set token and request limits to automatically pace requests and prevent API rate-limiting
-          errors (429).
-        </div>
-        <div
-          className="two-col"
-          style={{
-            gap: "16px",
-            marginBottom: "8px",
-          }}
-        >
-          <div className="field">
-            <label>Max Tokens Per Minute (TPM)</label>
-            <input
-              type="number"
-              min="1"
-              placeholder="Unlimited"
-              value={form.max_tpm}
-              onChange={(e) =>
-                upd({
-                  max_tpm: e.target.value,
-                })
-              }
-            />
+        {provider?.id && configuredModelsByName.size === 0 && (
+          <div className="provider-model-prompt" role="status">
+            <div>
+              <strong>No model configured</strong>
+              <span>Configure a model before using this provider in a scan profile.</span>
+            </div>
+            {providerModelNames.length > 0 ? (
+              <button
+                type="button"
+                className="btn sm"
+                onClick={() => onConfigureModel?.(providerModelNames[0], null)}
+              >
+                Configure model
+              </button>
+            ) : (
+              <span className="field-hint">Add a model name or load models from the API.</span>
+            )}
           </div>
-          <div className="field">
-            <label>Max Requests Per Minute (RPM)</label>
+        )}
+        <div className="field">
+          <div className="provider-models-heading">
+            <label>Model names</label>
+            <button
+              type="button"
+              className="btn secondary sm"
+              disabled={loadingModels || saving || addingModel}
+              onClick={onLoadModels}
+              title="Fetch available model names from API and keep models used by scan profiles"
+            >
+              {loadingModels ? "Loading models…" : "Load models from API"}
+            </button>
+          </div>
+          <div className="provider-models-table-wrap">
+            <table className="provider-models-table">
+              <thead>
+                <tr>
+                  <th>Model name</th>
+                  <th>Configuration</th>
+                  <th aria-label="Actions"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {providerModelNames.map((modelName) => {
+                  const configuredModel = configuredModelsByName.get(modelName);
+                  const usingProfiles = configuredModel
+                    ? [...(profileNamesByModelId.get(String(configuredModel.id)) || [])].sort(
+                        (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }),
+                      )
+                    : [];
+                  const removeBlocked = usingProfiles.length > 0;
+                  const mantleApi =
+                    form.api_format === "bedrock_mantle"
+                      ? form.model_capabilities?.[modelName]?.inference_api
+                      : null;
+                  return (
+                    <tr key={modelName}>
+                      <td className="mono">
+                        {provider?.id && onConfigureModel ? (
+                          <button
+                            type="button"
+                            className="provider-model-link"
+                            onClick={() => onConfigureModel(modelName, configuredModel)}
+                          >
+                            {modelName}
+                          </button>
+                        ) : (
+                          modelName
+                        )}
+                      </td>
+                      <td>
+                        <div>{configuredModel ? configuredModel.name : "Not configured"}</div>
+                        {mantleApi && (
+                          <div className="provider-model-usage">
+                            {mantleApi === "messages"
+                              ? "Anthropic Messages API"
+                              : mantleApi === "responses"
+                                ? "OpenAI Responses API"
+                                : mantleApi === "chat_completions"
+                                  ? "Chat Completions API"
+                                  : "API support unknown"}
+                          </div>
+                        )}
+                        {removeBlocked && (
+                          <div className="provider-model-usage">
+                            Used by: {usingProfiles.join(", ")}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn ghost sm"
+                          onClick={() => removeModel(modelName)}
+                          disabled={removeBlocked}
+                          title={
+                            removeBlocked
+                              ? `Used by scan profile${usingProfiles.length === 1 ? "" : "s"}: ${usingProfiles.join(", ")}`
+                              : undefined
+                          }
+                          aria-label={`Remove ${modelName}`}
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {providerModelNames.length === 0 && (
+                  <tr>
+                    <td colSpan="3" className="provider-models-empty">
+                      No model names added.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="provider-model-add-row">
             <input
-              type="number"
-              min="1"
-              placeholder="Unlimited"
-              value={form.max_rpm}
-              onChange={(e) =>
-                upd({
-                  max_rpm: e.target.value,
-                })
+              type="text"
+              value={newModelName}
+              placeholder={
+                PROVIDER_MODEL_PLACEHOLDERS[form.api_format]?.split(/\r?\n|,/)[0] || "Model name"
               }
+              aria-label="New model name"
+              onChange={(e) => setNewModelName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void addModel();
+                }
+              }}
             />
+            <button
+              type="button"
+              className="btn secondary sm"
+              disabled={
+                addingModel ||
+                saving ||
+                loadingModels ||
+                !newModelName.trim() ||
+                providerModelNames.includes(newModelName.trim())
+              }
+              onClick={() => void addModel()}
+            >
+              {addingModel ? "Saving…" : "Add model"}
+            </button>
+          </div>
+          {loadMessage && (
+            <div
+              className="field-hint"
+              style={{ color: loadFailed ? "var(--danger)" : "var(--accent)", marginBottom: "4px" }}
+            >
+              {loadMessage}
+            </div>
+          )}
+          <div className="field-hint">
+            Select a model name to open its configuration. Models without a configuration open a
+            prefilled new model form.
           </div>
         </div>
         <div className="divider" />
@@ -789,13 +1329,18 @@ export function LLMProviderForm({ mode, provider, onSaved, onCancel }) {
               </span>
             )}
           </div>
+          {error && (
+            <div className="alert error form-error" role="alert">
+              {error}
+            </div>
+          )}
           <div className="row">
             {onCancel && (
               <button type="button" className="btn ghost" onClick={onCancel}>
                 Cancel
               </button>
             )}
-            <button type="submit" className="btn" disabled={saving}>
+            <button type="submit" className="btn" disabled={saving || addingModel}>
               {saving ? "Saving…" : mode === "edit" ? "Save provider" : "Create provider"}
             </button>
           </div>

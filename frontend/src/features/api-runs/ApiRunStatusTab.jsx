@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useHashTab } from "../../shared/navigation/useHashTab.js";
 import { ApiRunLogTab } from "./ApiRunLogTab.jsx";
 import { ApiRunAgentsTab } from "./ApiRunAgentsTab.jsx";
 
 export function ApiRunStatusTab({ runId, scanRunning }) {
-  const [subTab, setSubTab] = useState("agents");
+  const [subTab, setSubTab] = useHashTab("subtab", ["agents", "log"], "agents");
   return (
     <div className="api-run-status-content">
       <div

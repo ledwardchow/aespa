@@ -1,6 +1,6 @@
 # AESPA — AI-Enabled Security Pentesting Agent
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ledwardchow/aespa) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
+[![Ask DeepWiki](docs/images/deepwiki-badge.svg)](https://deepwiki.com/ledwardchow/aespa) ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
 
 ## What is this?
 
@@ -14,7 +14,16 @@ Testing :) It's got a cool UI and stuff.
 
 ## Features
 
-Multi-agent (test lead + specialists, adversarial validator and reporting) web app and API testing.
+Point-and-click SAST and DAST for web applications, optimised for cost.
+
+Give it the source code of a web app via ZIP or GitHub checkout, and it'll spit out the findings.
+
+You can feed those SAST findings into a DAST scan for better performance/less tokens spent finding things, or just do straight grey-box DAST without the source.
+
+The DAST module will give you a lot of information about what is going on:
+
+- What each agent is doing
+- An OWASP coverage sheet, listing each URL route and discovered business process/workflow + what testing was undertaken against each
 
 You will need to provide:
 
@@ -25,43 +34,64 @@ You will need to provide:
 
 ## Performance
 
-Here's are [two](docs/results/juice-shop-results.md) [comparisons](docs/results/results-comparison.md) of this scanner, run against the [Bank of Ed](https://github.com/ledwardchow/BankOfEd/tree/vulnerable-version):
+Benchmarks are now on a dedicated website, [AESPA Benchmark](https://bench.aespa.app).
 
-- AESPA + Sonnet 4.6 
-- Claude Code + Sonnet 4.6
-- Codex + GPT 5.5 
-- Claude Code + Qwen3.6-35b-A3b
+At time of writing (October 2026) this includes results for 24 models, including:
 
-And a [comparison](docs/results/vuln-scanner-comparison.md) of a single (specialist agents turned off) vs multi-agent scan. As of 27th May 2026, a multi-agent scan on the Bank of Ed costs about $7.50 USD on Sonnet 4.6 token prices and about $1.50 on Deepseek v4 Flash prices (against the first-party API).
+- TAC1 models GPT-6 Luna/Sol
+- TAC3 model GPT-5.6-Cyber (as gpt-daybreak-red-latest)
+- Claude Mythos 5
+- Qwen 3.8 27b
 
-Also, scan results for [VAmPI](docs/results/vampi/vampi.md).
+The best performing models (cost/benefit) are:
+
+- SAST: Qwen 3.8 27b (run locally), GPT-6 Luna
+- DAST: Qwen 3.8 27b (run locally), GPT-6 Sol
 
 ## Documentation
 
-The [Architecture](docs/architecture.md).
-
-The [changelog](CHANGELOG.md).
-
-The [User Guide](docs/guide/index.md)!
+[Changelog](CHANGELOG.md)
 
 ## Requirements
 
 - Burp Suite Professional, if you want to use the active scan integration
-- One of: an Anthropic/OpenAI/Google/AWS Bedrock API key, a GitHub Copilot subscription, a ChatGPT/Codex subscription with the Codex CLI installed, or a local model
+- Access to a LLM service, AESPA supports most of them:
+  - The Anthropic API
+  - The OpenAI API
+  - Any OpenAI-compatible API (including local LLMs)
+  - OpenRouter
+  - Google Gemini API
+  - Google Vertex ADC
+  - Azure OpenAI Service/Foundry
+  - Amazon Bedrock Runtime/Mantle, via API key or IAM
+  - Claude subscription (via Claude CLI) 
+  - [Factory.AI](http://Factory.AI) subscription (via Droid CLI)
+  - GitHub Copilot subscription (via Copilot CLI)
+  - ChatGPT subscription (via Sign in with ChatGPT or Codex CLI). 
+    - Note since 16 Oct 2026 I've experienced a large number of cyber refusals on "sign in with ChatGPT" on a Daybreak account, which didn't occur when using the Codex CLI provider. I can't explain it either, just something to be aware of if this happens to you.
+  - Google Antigravity subscription (via agy CLI)
 
-Note, this was developed/tested mostly on Bedrock/Sonnet 4.6. Your results may vary on a different setup.
+If your API key has TPM/RPM quota caps this is configurable in the LLM Settings UI. If left unconfigured i've seen this consume up to ~10m TPM bursts.
 
-If your API key has TPM/RPM quota caps this is configurable in the LLM Settings UI. If left unconfigured i've seen this consume up to ~10m TPM bursts (inclusive of cached tokens).
+You will need to make sure your model is cyber-capable, i.e. doesn't have cyber refusals/you are part of the access program such as OpenAI Daybreak/Anthropic CVP/Google Fairwind.
 
+If you aren't part of any, I recommend the following:
 
+- Claude Sonnet 5 (doesn't seem to hit cyber refusals unless you type something sus on ALICE), usable results
+- Qwen 3.8 27b, runs locally on a 64GB Macbook or 24GB CUDA card, this performs better than Sonnet 5
+- GLM 5.3
 
 ## Running (macOS/Windows)
 
-Standalone binaries for Windows and macOS are available at [GitHub releases](https://github.com/ledwardchow/aespa/releases). The macOS binaries are notarised. 
+Standalone binaries for Windows and macOS are available at [GitHub releases](https://github.com/ledwardchow/aespa/releases). 
 
 These versions run in the background in the menubar or systray - click on the icon to open the interface/quit the background process. 
 
+Note the builds are automatic and I don't test these that often, the Mac one maybe I use a few times a month to check if it works, the Windows one... only when someone asks.
+
 ## Running with Docker
+
+I don't recommend you use this, running it directly is much easier to troubleshoot.
 
 The image bundles Chromium, so no separate Playwright install is needed.
 
@@ -91,17 +121,23 @@ docker compose up -d --build
 
 ## Running from source
 
+This is the most recommended way, since when something breaks you can point your favourite vibecoding app at it, paste the error message and off you go again.
+
 ### Setup
+Note, previously the built UI was committed, this is no longer the case. The frontend will build on first launch/any changes automatically, you will require node/npm/vite.
 
 Requirements:
 - Python 3.12+
 - uv: [https://docs.astral.sh/uv/getting-started/installation/](https://docs.astral.sh/uv/getting-started/installation/)
+- node 24+, npm + vite
 
 Clone or download a zip of this repository. Within a terminal with the working directory set to the root of the repo:
 
 ```bash
 # Install dependencies
 uv sync
+# Install the headless Chromium browser
+uv run playwright install chromium
 ```
 
 ### Run
@@ -111,12 +147,10 @@ uv run aespa
 ```
 
 The UI is available at `http://127.0.0.1:8000` by default.
-AESPA checks for Playwright's Chromium browser during startup and installs it
-automatically when it is missing.
 
 ### Optional agent Python sandbox
 
-AESPA can let A.L.I.C.E. and specialist agents run short Python programs for custom payload generation, parsing, and bounded request workflows. This capability is disabled by default and requires a local Docker daemon plus the dedicated executor image:
+AESPA can let Test Leads, A.L.I.C.E., and specialist agents run short Python programs in a sandbox for custom payload generation, parsing, and bounded request workflows. HTTP traffic is only permitted from the sandbox via AESPA function calls (which checks scope and logs the traffic as part of the test). This capability requires a local Docker daemon plus the dedicated executor image:
 
 ```bash
 docker pull ledwardchow/aespa-python-executor:0.1
@@ -161,7 +195,7 @@ and press Enter. Backups default to a timestamped SQLite file in your home
 folder. Clear scans keeps targets, LLM connections, and settings. Reset removes
 all database records. Clear and Reset require the confirmation shown on screen.
 
-### Frontend build (only for UI development)
+### Frontend build
 
 The compiled frontend bundle is committed under `src/aespa/web/` to make runs/deployment easier. 
 
@@ -175,31 +209,40 @@ npm run build     # regenerates src/aespa/web/
 
 See [frontend/README.md](frontend/README.md) for the development server, tests, and source layout.
 
-### Run notes
-
-Crawls work well enough on any model, including local models, so you can save a bit of money by using something cheap. Dynamic scans don't work well on local models; for best results, use Sonnet, or the budget option is Minimax M3.
-
-If your site is authenticated and you don't have credentials, you can start a dynamic scan directly without a site map. The agents will just have less context about what it is testing upfront.
-
-This app is intended for use on a computer you're sitting in front of. Note to those who want to host this on anything other than localhost, this app has **NO SECURITY**, the API is **unauthenticated** and passwords/API keys you save in this app can be stolen straight off the page; you should use an authenticating reverse proxy such as Cloudflare/Tailscale for a headless instance.
-
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust as needed:
+(Optional) Copy `.env.example` to `.env` and adjust as needed:
 
 ```bash
 cp .env.example .env
 ```
 
-| Variable             | Default                | Description                                       |
-| -------------------- | ---------------------- | ------------------------------------------------- |
-| `AESPA_DATABASE_URL` | `sqlite:///./aespa.db` | SQLAlchemy database URL                           |
-| `AESPA_HOST`         | `127.0.0.1`            | Bind address                                      |
-| `AESPA_PORT`         | `8000`                 | Bind port                                         |
-| `AESPA_WEB_DIR`      | `./src/aespa/web`      | Path to static web UI assets                      |
-| `AESPA_DATA_DIR`     | `./aespa_data`         | Path to persistent uploads and temporary storage  |
+| Variable             | Default                            | Description                               |
+| -------------------- | ---------------------------------- | ----------------------------------------- |
+| `AESPA_DATABASE_URL` | `sqlite:///./aespa_data/aespa.db` | SQLAlchemy database URL                   |
+| `AESPA_HOST`         | `127.0.0.1`                        | Bind address                              |
+| `AESPA_PORT`         | `8000`                             | Bind port                                 |
+| `AESPA_WEB_DIR`      | `./src/aespa/web`                  | Path to static web UI assets             |
+| `AESPA_DATA_DIR`     | `./aespa_data`                     | Path to databases and uploaded files     |
 
 If you don't do this, it will use the values above as the default.
+
+To move an installation, stop AESPA on both machines and copy `aespa_data/` and
+your `extensions/` folder to the new installation. AESPA stores its main,
+console-log, reporting-debug, and extension databases inside `aespa_data/`.
+On first start after upgrading an older installation, AESPA copies any databases
+at the installation root into `aespa_data/` and archives the originals under
+`aespa_data/legacy-backups/`.
+An older `.env` with `sqlite:///./aespa.db` also uses the new location. Custom
+`AESPA_DATABASE_URL` values still point to the path you configured, so include
+that database separately when moving an installation.
+
+In the console's **Settings → Data Folder**, enter a folder path to use it on
+the next launch. This works with the source run and the macOS and Windows desktop
+builds. Choose an empty folder for a new database, or a folder containing
+`aespa.db` and the rest of your AESPA data to use it without overwriting files.
+The desktop builds save this choice in their application support settings file,
+so it persists even though the app bundle is read-only.
 
 ## LLM Configuration
 
@@ -209,49 +252,48 @@ Open the app, go to **Settings → LLM**, and configure:
 - **Models & Profiles** — configure model parameters (max tokens, temperature, vision support) and create scan profiles. Scan profiles set default models and allow per-agent-role model assignments (e.g. assigning separate models for Test Lead, Specialist, Validator, or ALICE).
 - **Import / Export** — export or import your entire LLM configuration (providers, models, profiles) as a JSON file.
 
-## Use
+## Screenshots
 
-Landing page:  
-![Screenshot](docs/images/sites.png)
+These screens use fictional targets and example findings.
 
-Site test runs:  
-![Screenshot](docs/images/testruns.png)
+Systems group code components, Sites, and API collections:
+![A system with a Site and API collection attached as live targets](docs/images/systemtargets.png)
 
-Site setup:  
-![Screenshot](docs/images/sitesetup.png)
+Sites list:
+![Sites list with three example targets](docs/images/sites.png)
 
-Site Map:  
-![Screenshot](docs/images/sitemap.png)
+Web run setup, including crawl options and an optional LLM budget:
+![New web test run form](docs/images/editrun.png)
 
-A.L.I.C.E chat:  
-![Screenshot](docs/images/alice.png)
+Site Map:
+![Site Map for an example web run](docs/images/sitemap.png)
 
-Agents view: 
-![Screenshot](docs/images/agentstatus.png)
+Attack Surface shows routes and their test coverage:
+![Attack Surface route inventory](docs/images/attacksurface.png)
 
-Attack Surface  
-![Screenshot](docs/images/attacksurface.png)
+OWASP coverage for a web run:
+![Web OWASP coverage summary and page matrix](docs/images/webcoverage.png)
 
-Traffic log:  
-![Screenshot](docs/images/trafficlog.png)
+OWASP coverage for workflows:
+![Workflow OWASP coverage table with completed checks, a finding, and a workflow awaiting input](docs/images/workflowcoverage.png)
 
-Findings  
-![Screenshot](docs/images/findings.png)
+Workflows found during a crawl:
+![Workflow results, including one that needs input](docs/images/workflows.png)
 
-API Setup  
-![Screenshot](docs/images/apisetup.png)
+Web findings:
+![Confirmed web findings](docs/images/webfindings.png)
 
-Parsed API documentation  
-![Screenshot](docs/images/apispecparsed.png)
+A.L.I.C.E. chat on a web run:
+![A.L.I.C.E. chat reviewing an example finding](docs/images/alice.png)
 
-SAST Scan-based Lead Detection  
-![Screenshot](docs/images/sastleads.png)
+Endpoints parsed from an API document:
+![API collection endpoints](docs/images/apispecparsed.png)
 
-OWASP Coverage for API Scanning  
-![Screenshot](docs/images/apiworkprogram.png)
+OWASP coverage for an API run:
+![API OWASP coverage matrix](docs/images/apiworkprogram.png)
 
-API Scan Findings  
-![Screenshot](docs/images/apifindings.png)
+SAST scan setup:
+![New SAST scan form](docs/images/sastsetup.png)
 
 ## Recommended models
 

@@ -1,7 +1,8 @@
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import { useState, useEffect, useRef } from "react";
 
-import { safeParseJson } from "../../shared/runs/campaignPresentation.js";
+import { fmtTime } from "../../shared/lib/dates.js";
+import { campaignDisplayWarnings } from "../../shared/runs/campaignPresentation.js";
 
 const MAX_ENTRIES = 300;
 // If the stream is truly silent (a genuinely empty activity history), no
@@ -40,7 +41,7 @@ function normalizeEntry(e, fallbackId) {
 // `lastEventIdRef` is passed back as `?cursor=` on (re)connect — including
 // across React StrictMode's dev-only double effect invocation — so a
 // reconnect never re-replays entries already rendered.
-export function CampaignActivityTab({ applicationId, campaignId, campaign }) {
+export function CampaignActivityTab({ systemId, campaignId, campaign }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [streaming, setStreaming] = useState(true);
@@ -64,8 +65,8 @@ export function CampaignActivityTab({ applicationId, campaignId, campaign }) {
       setEntries((prev) => [...prev, normalized].slice(-MAX_ENTRIES));
     };
 
-    const url = applicationsApi.getCampaignActivityStreamUrl(
-      applicationId,
+    const url = systemsApi.getCampaignActivityStreamUrl(
+      systemId,
       campaignId,
       lastEventIdRef.current,
     );
@@ -93,7 +94,7 @@ export function CampaignActivityTab({ applicationId, campaignId, campaign }) {
       clearTimeout(initialTimer);
       es.close();
     };
-  }, [applicationId, campaignId]);
+  }, [systemId, campaignId]);
 
   // Fallback: while the stream is down, synthesize entries from status
   // polls already driven by the parent's useCampaign hook (campaign prop
@@ -119,7 +120,7 @@ export function CampaignActivityTab({ applicationId, campaignId, campaign }) {
     );
   }, [streaming, campaign]);
 
-  const warnings = safeParseJson(campaign?.warnings_json, []);
+  const warnings = campaignDisplayWarnings(campaign);
 
   return (
     <div>
@@ -153,9 +154,7 @@ export function CampaignActivityTab({ applicationId, campaignId, campaign }) {
         <div className="activity-feed">
           {entries.map((e) => (
             <div key={e.id} className="activity-entry">
-              <span className="activity-ts">
-                {new Date(e.ts).toLocaleTimeString("en-US", { hour12: false })}
-              </span>
+              <span className="activity-ts">{fmtTime(e.ts)}</span>
               <span className="activity-badge phase-other">
                 {(e.status || e.type || "").toUpperCase()}
               </span>

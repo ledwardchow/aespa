@@ -5,13 +5,15 @@ Every campaign source repository is scanned separately (see
 ``services/sast_scanner.py``). Alongside the usual leads, this module derives
 a short, structured summary of how the code talks to the outside world:
 routes/UI paths it serves, HTTP calls it makes, auth/session boundaries,
-message queues/topics, shared datastores, and framework markers — each with a
+message queues/topics, shared datastores, and framework markers - each with a
 ``file:line`` evidence pointer.
 
-This is intentionally regex-based rather than another LLM turn: it is cheap,
-deterministic, and bounded, and it only needs to be "good enough" to seed
+This is intentionally deterministic rather than another LLM turn: it is
+cheap and bounded, and it only needs to be "good enough" to seed
 cross-repository correlation (``services/correlation.py``), not to replace
-the agentic SAST analysis itself.
+the agentic SAST analysis itself. Frontend files use the shared semantic
+extractor first, with the older line-oriented patterns as a compatibility
+fallback.
 """
 
 from __future__ import annotations
@@ -34,12 +36,26 @@ _SOURCE_SUFFIXES = {
     ".jsx",
     ".ts",
     ".tsx",
+    ".vue",
+    ".html",
+    ".htm",
     ".java",
     ".go",
     ".rb",
     ".php",
     ".cs",
+    ".cshtml",
+    ".razor",
+    ".sql",
+    ".xml",
+    ".yml",
+    ".yaml",
+    ".properties",
+    ".conf",
+    ".config",
 }
+
+_FRONTEND_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".vue", ".html", ".htm"}
 
 _FRAMEWORK_MARKERS = {
     "requirements.txt": {
@@ -81,6 +97,472 @@ _ROUTE_PATTERNS = [
     ),
 ]
 
+_SPRING_MAPPING_NAMES = {
+    "requestmapping": None,
+    "getmapping": "GET",
+    "postmapping": "POST",
+    "putmapping": "PUT",
+    "patchmapping": "PATCH",
+    "deletemapping": "DELETE",
+}
+_SPRING_MAPPING_PATTERN = re.compile(
+    r"@(?P<name>RequestMapping|GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping)\b",
+    re.IGNORECASE,
+)
+
+
+def _balanced_annotation_end(text: str, opening: int) -> int:
+    """Return the closing parenthesis for a Java annotation call."""
+    depth = 0
+    quote = ""
+    escaped = False
+    for index in range(opening, len(text)):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def _spring_annotation(text: str, match: re.Match[str]) -> tuple[str, int]:
+    """Return an annotation name and its end offset."""
+    end = match.end()
+    while end < len(text) and text[end].isspace():
+        end += 1
+    if end < len(text) and text[end] == "(":
+        closing = _balanced_annotation_end(text, end)
+        return match.group("name").casefold(), closing if closing >= 0 else end
+    return match.group("name").casefold(), end
+
+
+def _spring_mapping_paths(annotation_body: str) -> list[str]:
+    """Extract route values from Spring mapping annotation arguments."""
+    value_match = re.search(
+        r"\b(?:value|path)\s*=\s*(?P<value>\{[^}]*\}|[\"'][^\"']*[\"'])",
+        annotation_body,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if value_match:
+        values = re.findall(r"[\"']([^\"']*)[\"']", value_match.group("value"))
+    else:
+        values = re.findall(r"[\"']([^\"']*)[\"']", annotation_body)
+    return [value.strip() or "/" for value in values] or ["/"]
+
+
+def _spring_mapping_methods(name: str, annotation_body: str) -> list[str | None]:
+    fixed = _SPRING_MAPPING_NAMES[name]
+    if fixed:
+        return [fixed]
+    values = re.findall(
+        r"RequestMethod\.([A-Z]+)|HttpMethod\.([A-Z]+)",
+        annotation_body,
+        re.IGNORECASE,
+    )
+    methods = [first or second for first, second in values]
+    return [method.upper() for method in methods] or [None]
+
+
+def _join_spring_paths(prefix: str, path: str) -> str:
+    joined = "/".join((prefix.rstrip("/"), path.lstrip("/"))).strip("/")
+    return "/" + joined if joined else "/"
+
+
+def _spring_route_facts(text: str, relative_path: str) -> list[dict]:
+    """Extract Spring MVC method mappings with their class-level prefix."""
+    classes: list[tuple[int, int, str]] = []
+    class_pattern = re.compile(
+        r"(?P<annotations>(?:(?:@[A-Za-z_$][\w$]*(?:\s*\([^)]*\))?)\s*)*)"
+        r"(?:public\s+|protected\s+|private\s+|abstract\s+|final\s+)*"
+        r"class\s+[A-Za-z_$][\w$]*\s*\{",
+        re.DOTALL,
+    )
+    for class_match in class_pattern.finditer(text):
+        opening = text.find("{", class_match.start(), class_match.end())
+        if opening < 0:
+            continue
+        depth = 0
+        quote = ""
+        escaped = False
+        closing = len(text)
+        for index in range(opening, len(text)):
+            char = text[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in "'\"":
+                quote = char
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    closing = index
+                    break
+        prefix = "/"
+        for mapping in _SPRING_MAPPING_PATTERN.finditer(
+            class_match.group("annotations")
+        ):
+            name, end = _spring_annotation(class_match.group("annotations"), mapping)
+            body = class_match.group("annotations")[mapping.end() : end]
+            values = _spring_mapping_paths(body)
+            if values:
+                prefix = values[0]
+                break
+        classes.append((class_match.start(), closing, prefix))
+
+    routes: list[dict] = []
+    seen: set[tuple[str | None, str, int]] = set()
+    for start, closing, prefix in classes:
+        body_start = text.find("{", start, closing) + 1
+        for mapping in _SPRING_MAPPING_PATTERN.finditer(text, body_start, closing):
+            name, end = _spring_annotation(text, mapping)
+            body = text[mapping.end() : end]
+            values = _spring_mapping_paths(body)
+            methods = _spring_mapping_methods(name, body)
+            location = f"{relative_path}:{text.count(chr(10), 0, mapping.start()) + 1}"
+            for value in values:
+                path = _join_spring_paths(prefix, value)
+                for method in methods:
+                    identity = (method, path, mapping.start())
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    routes.append(
+                        {
+                            "fact_type": "route",
+                            "method": method,
+                            "path": path,
+                            "host": None,
+                            "name": None,
+                            "detail": {"request_role": "server_ingress"},
+                            "evidence_location": location,
+                        }
+                    )
+    return routes
+
+
+_ASPNET_ATTRIBUTE = re.compile(r"\[(?P<body>[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*)\]")
+_ASPNET_VERB = re.compile(
+    r"^\s*(?:Http(?P<verb>Get|Post|Put|Patch|Delete|Head|Options))(?:Attribute)?\s*(?:\((?P<args>.*)\))?\s*$",
+    re.DOTALL,
+)
+_ASPNET_ROUTE = re.compile(r"^\s*Route(?:Attribute)?\s*\((?P<args>.*)\)\s*$", re.DOTALL)
+_ASPNET_CLASS = re.compile(
+    r"\bclass\s+(?P<name>[A-Za-z_]\w*)(?:\s*<[^>]*>)?\s*(?::\s*(?P<bases>[^{]+))?"
+)
+_ASPNET_METHOD = re.compile(
+    r"\b(?P<access>public|protected|internal|private)\b[^=;{}()]*?\b(?P<name>[A-Za-z_]\w*)\s*(?:<[^>()]*>)?\s*\("
+)
+_ASPNET_MINIMAL = re.compile(
+    r"\.Map(?P<verb>Get|Post|Put|Patch|Delete|Methods|Fallback)\s*\(\s*(?:pattern:\s*)?@?\"(?P<path>[^\"]*)\""
+)
+_RAZOR_HANDLER = re.compile(
+    r"\bpublic\s+(?:async\s+)?[\w<>\[\],?\s]*?(?<![.\w])On(?P<verb>Get|Post|Put|Patch|Delete)(?P<handler>\w*?)(?:Async)?\s*\("
+)
+_ASPNET_NON_ACTIONS = {
+    "Dispose",
+    "OnActionExecuting",
+    "OnActionExecuted",
+    "OnActionExecutionAsync",
+}
+
+
+def _aspnet_template(args: str) -> str | None:
+    match = re.search(r"(?:template\s*:\s*)?@?\"([^\"]*)\"", args or "")
+    return match.group(1) if match else None
+
+
+def _aspnet_join(
+    prefix: str, template: str | None, controller: str, action: str
+) -> str:
+    if template is not None and template.startswith(("/", "~/")):
+        joined = template.lstrip("~")
+    else:
+        joined = "/".join(
+            part.strip("/")
+            for part in (prefix, template or "")
+            if part and part.strip("/")
+        )
+    joined = re.sub(r"\[controller\]", controller, joined, flags=re.I)
+    joined = re.sub(r"\[action\]", action, joined, flags=re.I)
+    return "/" + joined.strip("/") if joined.strip("/") else "/"
+
+
+def _razor_page_path(relative_path: str) -> str | None:
+    parts = relative_path.split("/")
+    lowered = [part.casefold() for part in parts]
+    if "pages" not in lowered[:-1]:
+        return None
+    name = parts[-1]
+    for suffix in (".cshtml.cs", ".cshtml"):
+        if name.casefold().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    else:
+        return None
+    route_parts = parts[lowered.index("pages") + 1 : -1]
+    if name.casefold() != "index":
+        route_parts.append(name)
+    return "/" + "/".join(route_parts)
+
+
+def _aspnet_route_facts(text: str, relative_path: str) -> list[dict]:
+    """Extract ASP.NET Core controller, minimal API, and Razor Pages routes.
+
+    Attribute routes combine the controller's ``[Route]`` prefix with each
+    action's ``[HttpGet]``/``[Route]`` template. Public actions on an MVC
+    controller without a verb attribute use the conventional
+    ``/{controller}/{action}`` route.
+    """
+
+    routes: list[dict] = []
+    seen: set[tuple[str | None, str, int]] = set()
+
+    def _emit(method: str | None, path: str, line: int, **detail: object) -> None:
+        identity = (method, path, line)
+        if identity in seen:
+            return
+        seen.add(identity)
+        routes.append(
+            {
+                "fact_type": "route",
+                "method": method,
+                "path": path,
+                "host": None,
+                "name": None,
+                "detail": {"request_role": "server_ingress", **detail},
+                "evidence_location": f"{relative_path}:{line}",
+            }
+        )
+
+    page_path = _razor_page_path(relative_path)
+    if relative_path.casefold().endswith(".cshtml"):
+        for line_no, line in enumerate(text.splitlines(), 1):
+            directive = re.match(r"\s*@page\b\s*(?:\"([^\"]*)\")?", line)
+            if directive:
+                template = directive.group(1)
+                path = (
+                    template
+                    if template and template.startswith("/")
+                    else _aspnet_join(page_path or "/", template, "", "")
+                )
+                _emit("GET", path, line_no, route_kind="razor_page")
+                break
+        return routes
+    if relative_path.casefold().endswith(".razor"):
+        for line_no, line in enumerate(text.splitlines(), 1):
+            directive = re.match(r"\s*@page\s+\"([^\"]*)\"", line)
+            if directive:
+                _emit(
+                    "GET", directive.group(1) or "/", line_no, route_kind="blazor_page"
+                )
+        return routes
+
+    pending: list[str] = []
+    class_name = ""
+    controller = ""
+    class_prefix = ""
+    is_controller = False
+    is_page_model = False
+    for line_no, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        for match in _ASPNET_MINIMAL.finditer(line):
+            verb = match.group("verb")
+            method = None if verb in {"Methods", "Fallback"} else verb.upper()
+            path = match.group("path")
+            _emit(
+                method,
+                path if path.startswith("/") else "/" + path,
+                line_no,
+                route_kind="minimal_api",
+            )
+        remainder = stripped
+        attributes: list[str] = []
+        while remainder.startswith("["):
+            attribute = _ASPNET_ATTRIBUTE.match(remainder)
+            if attribute is None:
+                break
+            attributes.extend(
+                part
+                for part in re.split(r",\s*(?![^()]*\))", attribute.group("body"))
+                if part
+            )
+            remainder = remainder[attribute.end() :].strip()
+        pending.extend(attributes)
+        if not remainder:
+            continue
+        class_match = _ASPNET_CLASS.search(remainder)
+        if class_match:
+            class_name = class_match.group("name")
+            bases = class_match.group("bases") or ""
+            controller = re.sub(r"Controller$", "", class_name)
+            is_controller = (
+                class_name.endswith("Controller")
+                or bool(re.search(r"\bController(?:Base)?\b", bases))
+                or any(re.match(r"\s*ApiController\b", item) for item in pending)
+            )
+            is_page_model = bool(re.search(r"\bPageModel\b", bases))
+            class_prefix = ""
+            for item in pending:
+                route = _ASPNET_ROUTE.match(item)
+                if route:
+                    class_prefix = _aspnet_template(route.group("args")) or ""
+                    break
+            pending = []
+            continue
+        method_match = _ASPNET_METHOD.search(remainder)
+        if not method_match:
+            if not remainder.startswith(("[", "#")):
+                pending = []
+            continue
+        action = method_match.group("name")
+        attrs = pending
+        pending = []
+        if is_page_model:
+            handler = _RAZOR_HANDLER.search(remainder)
+            if handler and page_path is not None:
+                path = page_path
+                if handler.group("handler"):
+                    path = f"{page_path}?handler={handler.group('handler')}"
+                _emit(
+                    handler.group("verb").upper(),
+                    path,
+                    line_no,
+                    route_kind="razor_page_handler",
+                    symbol=action,
+                )
+            continue
+        if not is_controller or action == class_name:
+            continue
+        verbs: list[tuple[str | None, str | None]] = []
+        templates: list[str | None] = []
+        non_action = False
+        for item in attrs:
+            if re.match(r"\s*NonAction\b", item):
+                non_action = True
+            verb = _ASPNET_VERB.match(item)
+            if verb:
+                verbs.append(
+                    (
+                        verb.group("verb").upper(),
+                        _aspnet_template(verb.group("args") or ""),
+                    )
+                )
+                continue
+            route = _ASPNET_ROUTE.match(item)
+            if route:
+                templates.append(_aspnet_template(route.group("args")))
+        if non_action:
+            continue
+        name = action[:-5] if action.endswith("Async") else action
+        if verbs:
+            for method, template in verbs:
+                for route_template in (
+                    [template] if template is not None or not templates else templates
+                ):
+                    _emit(
+                        method,
+                        _aspnet_join(class_prefix, route_template, controller, name),
+                        line_no,
+                        route_kind="aspnet_attribute",
+                        symbol=action,
+                        controller=class_name,
+                    )
+        elif templates:
+            for template in templates:
+                _emit(
+                    None,
+                    _aspnet_join(class_prefix, template, controller, name),
+                    line_no,
+                    route_kind="aspnet_attribute",
+                    symbol=action,
+                    controller=class_name,
+                )
+        elif (
+            method_match.group("access") == "public"
+            and not class_prefix
+            and action not in _ASPNET_NON_ACTIONS
+            and not re.search(
+                r"\b(?:static|override|abstract)\b", remainder[: method_match.end()]
+            )
+        ):
+            _emit(
+                None,
+                "/" + "/".join(part for part in (controller, name) if part),
+                line_no,
+                route_kind="aspnet_conventional",
+                symbol=action,
+                controller=class_name,
+            )
+    return routes
+
+
+def _detect_dotnet_framework_facts(root: Path) -> list[dict]:
+    facts: list[dict] = []
+    projects = sorted(
+        path
+        for pattern in (
+            "*.csproj",
+            "*/*.csproj",
+            "*/*/*.csproj",
+            "*.vbproj",
+            "*/*.vbproj",
+        )
+        for path in root.glob(pattern)
+    )[:50]
+    markers = (
+        ("microsoft.net.sdk.web", "ASP.NET Core"),
+        ("microsoft.aspnetcore", "ASP.NET Core"),
+        ("microsoft.entityframeworkcore", "Entity Framework Core"),
+        ("microsoft.net.sdk.blazorwebassembly", "Blazor"),
+        ("microsoft.azure.functions", "Azure Functions"),
+        ("microsoft.net.sdk.functions", "Azure Functions"),
+        ("grpc.aspnetcore", "gRPC"),
+    )
+    seen: set[str] = set()
+    for project in projects:
+        try:
+            lowered = project.read_text("utf-8", errors="ignore").lower()
+        except OSError:
+            continue
+        relative = project.relative_to(root).as_posix()
+        for keyword, framework in markers:
+            if keyword in lowered and framework not in seen:
+                seen.add(framework)
+                facts.append(
+                    {
+                        "fact_type": "framework",
+                        "method": None,
+                        "path": None,
+                        "host": None,
+                        "name": framework,
+                        "detail": {"marker_file": relative},
+                        "evidence_location": relative,
+                    }
+                )
+    return facts
+
+
 # ── Outbound HTTP calls ───────────────────────────────────────────────────────
 _HTTP_CALL_PATTERNS = [
     re.compile(
@@ -100,6 +582,67 @@ _HTTP_CALL_PATTERNS = [
         re.IGNORECASE,
     ),
 ]
+
+# Request-bearing facts use this field to keep browser traffic separate from
+# calls made by a server.  The field lives in detail_json so existing
+# ComponentFact rows remain readable without a schema migration.
+REQUEST_ROLES = frozenset({"browser_request", "server_ingress", "server_egress"})
+
+
+def normalize_request_role(value: object) -> str | None:
+    """Return a supported request role, or ``None`` for an unknown role.
+
+    Unknown legacy facts are intentionally left unknown.  A caller can then
+    record a proof gap instead of treating a server-to-server URL as a browser
+    entry point.
+    """
+    if value is None:
+        return None
+    role = str(value).strip().casefold().replace("-", "_")
+    aliases = {
+        "browser": "browser_request",
+        "frontend": "browser_request",
+        "client": "browser_request",
+        "ingress": "server_ingress",
+        "server_in": "server_ingress",
+        "egress": "server_egress",
+        "server_out": "server_egress",
+    }
+    role = aliases.get(role, role)
+    if role not in REQUEST_ROLES:
+        raise ValueError(
+            "request_role must be one of browser_request, server_ingress, "
+            "or server_egress"
+        )
+    return role
+
+
+def request_role_for_fact(
+    fact_type: str,
+    detail: dict | None = None,
+    *,
+    source_suffix: str | None = None,
+) -> str | None:
+    """Resolve a request role from explicit detail and deterministic hints."""
+    detail = detail if isinstance(detail, dict) else {}
+    if "request_role" in detail:
+        return normalize_request_role(detail.get("request_role"))
+    if fact_type == "route":
+        return "server_ingress"
+    if fact_type != "http_call":
+        return None
+    if detail.get("frontend") or detail.get("ui_route") or detail.get("trigger"):
+        return "browser_request"
+    if source_suffix and source_suffix.casefold() in _FRONTEND_SUFFIXES:
+        return "browser_request"
+    if (
+        detail.get("handler")
+        or detail.get("handler_location")
+        or detail.get("handler_locations")
+    ):
+        return "server_egress"
+    return None
+
 
 _UI_ROUTE_PATTERNS = [
     re.compile(
@@ -122,9 +665,251 @@ _UI_ACTION_PATTERNS = [
     re.compile(r"<button\b[^>]*>(?P<label>[^<]{1,120})</button>", re.IGNORECASE),
 ]
 
+
+def _normalise_frontend_path(value: object) -> str | None:
+    """Return a stable path for frontend facts.
+
+    The semantic extractor can see JavaScript template literals while the
+    legacy extractor sees only quoted strings.  Keep the parameter shape in
+    the fact so the mapper can compare it with a backend route, and strip
+    query strings for the same reason as ``interface_fact_fingerprint``.
+    """
+    if value is None:
+        return None
+    path = str(value).strip()
+    if not path:
+        return None
+    path = re.sub(r"\$\{\s*([^}]+?)\s*\}", r"{\1}", path)
+    path = re.sub(r"\{\s*([^}]+?)\s*\}", r"{\1}", path)
+    path = re.sub(r"/:([A-Za-z_$][\w$-]*)", r"/{\1}", path)
+    if "?" in path:
+        path = path.split("?", 1)[0]
+    if "#" in path:
+        path = path.split("#", 1)[0]
+    return path or "/"
+
+
+_SERVER_FRONTEND_MARKERS = re.compile(
+    r"(?:from|require\s*\()\s*[\"'](?:express|fastify|koa|hapi|@nestjs/)"
+    r"|\b(?:express|fastify|koa|hapi)\s*\("
+    r"|\b(?:server|app|router)\.(?:listen|use|route|get|post|put|patch|delete)\s*\("
+    r"|\b(?:@Controller|@Get|@Post|@Put|@Patch|@Delete)\b",
+    re.IGNORECASE,
+)
+_BROWSER_FRONTEND_MARKERS = re.compile(
+    r"\b(?:window|document|globalThis)\b|\.addEventListener\s*\("
+    r"|\bon(?:Click|Submit)\s*=|@[\w-]+\s*=|\((?:click|submit|ngSubmit)\)\s*="
+    r"|<\s*(?:button|form|input|select|textarea|Route)\b"
+    r"|\b(?:useState|useEffect)\b|@Component\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_frontend_source(text: str, relative_path: str) -> str:
+    """Classify browser/server evidence without trusting a file extension."""
+    path_parts = {
+        part.casefold() for part in relative_path.replace("\\", "/").split("/")
+    }
+    stem = Path(relative_path).stem.casefold()
+    if _SERVER_FRONTEND_MARKERS.search(text) or path_parts & {
+        "server",
+        "backend",
+        "api",
+        "routes",
+        "controllers",
+    }:
+        return "server"
+    if (
+        _BROWSER_FRONTEND_MARKERS.search(text)
+        or stem
+        in {
+            "ui",
+            "frontend",
+            "component",
+            "page",
+            "view",
+        }
+        or path_parts & {"components", "pages", "views"}
+    ):
+        return "browser"
+    return "unknown"
+
+
+def _location_source(location: object, source_paths: tuple[str, ...]) -> str | None:
+    if not isinstance(location, str):
+        return None
+    return next(
+        (path for path in source_paths if location.startswith(f"{path}:")),
+        None,
+    )
+
+
+def _apply_frontend_request_roles(
+    facts: list[dict],
+    source_roles: dict[str, str],
+    source_paths: tuple[str, ...],
+) -> None:
+    """Apply conservative browser/server roles to semantic facts in place."""
+    browser_files = {
+        source
+        for fact in facts
+        if fact.get("fact_type") in {"ui_action", "ui_route"}
+        for source in [_location_source(fact.get("evidence_location"), source_paths)]
+        if source is not None and source_roles.get(source) != "server"
+    }
+    for fact in facts:
+        if fact.get("fact_type") != "http_call":
+            continue
+        source = _location_source(fact.get("evidence_location"), source_paths)
+        detail = fact.setdefault("detail", {})
+        handlers = detail.get("handler_locations") or []
+        if isinstance(handlers, str):
+            handlers = [handlers]
+        handler_sources = {
+            handler_source
+            for handler_source in (
+                _location_source(location, source_paths) for location in handlers
+            )
+            if handler_source is not None
+        }
+        if handler_sources & browser_files:
+            role = "browser_request"
+        elif source_roles.get(source) == "server":
+            role = "server_egress"
+        elif source_roles.get(source) == "browser":
+            role = "browser_request"
+        else:
+            role = None
+        detail["request_role"] = role
+        detail["frontend"] = role == "browser_request"
+
+
+def _frontend_evidence_location(raw: dict, relative_path: str) -> str:
+    """Keep semantic evidence tied to the source file being scanned."""
+    location = raw.get("evidence_location") or raw.get("location")
+    if isinstance(location, int):
+        return f"{relative_path}:{max(1, location)}"
+    if isinstance(location, str) and location.strip():
+        location = location.strip()
+        if location.startswith(f"{relative_path}:"):
+            # ComponentFact evidence uses file:line.  Preserve a column when
+            # the analyzer supplies one only if it is already part of the
+            # source pointer; the mapper can still display it verbatim.
+            return location
+        line_match = re.match(r"[^:]+:(\d+)(?::\d+)?$", location)
+        if line_match:
+            return f"{relative_path}:{line_match.group(1)}"
+    line = raw.get("line")
+    if isinstance(line, int):
+        return f"{relative_path}:{max(1, line)}"
+    return f"{relative_path}:1"
+
+
+def _extract_semantic_frontend_facts(text: str, relative_path: str) -> list[dict]:
+    """Adapt the shared frontend analyzer to the ComponentFact shape.
+
+    This per-file API is a compatibility fallback only. Production extraction
+    uses the repository API so imports and aliases can be resolved together.
+    Importing lazily keeps extraction usable when an older installation has no
+    semantic analyzer module.
+    """
+    try:
+        from aespa.services.frontend_semantics import extract_frontend_facts
+    except Exception:
+        return []
+    try:
+        extracted = extract_frontend_facts(text, relative_path)
+    except Exception:
+        return []
+    return _normalise_semantic_frontend_facts(extracted, relative_path)
+
+
+def _normalise_semantic_frontend_facts(
+    extracted: object,
+    relative_path: str | None = None,
+    source_paths: tuple[str, ...] = (),
+) -> list[dict]:
+    """Adapt semantic facts from either the file or repository API."""
+    if not isinstance(extracted, list):
+        return []
+
+    facts: list[dict] = []
+    for raw in extracted[:_MAX_FACTS]:
+        if not isinstance(raw, dict):
+            continue
+        fact_type = str(raw.get("fact_type") or "").strip()
+        if not fact_type:
+            continue
+        detail = raw.get("detail")
+        if not isinstance(detail, dict):
+            detail = {}
+        else:
+            detail = dict(detail)
+        path = _normalise_frontend_path(raw.get("path"))
+        name = raw.get("name")
+        if fact_type == "ui_action" and detail.get("handler"):
+            # Labels are useful display metadata, but handler identity keeps
+            # two buttons with different actions from collapsing when their
+            # surrounding markup happens to produce the same label.
+            detail.setdefault("label", name)
+            name = detail["handler"]
+        fact_path = relative_path
+        if fact_path is None:
+            location = raw.get("evidence_location") or raw.get("location")
+            if isinstance(location, str):
+                fact_path = next(
+                    (
+                        candidate
+                        for candidate in source_paths
+                        if location.startswith(f"{candidate}:")
+                    ),
+                    None,
+                )
+            fact_path = fact_path or raw.get("relative_path") or raw.get("source_path")
+        if not isinstance(fact_path, str) or not fact_path:
+            continue
+        facts.append(
+            {
+                "fact_type": fact_type,
+                "method": (
+                    str(raw["method"]).upper()
+                    if raw.get("method") is not None
+                    else None
+                ),
+                "path": path,
+                "host": raw.get("host"),
+                "name": name,
+                "detail": detail,
+                "evidence_location": _frontend_evidence_location(raw, fact_path),
+            }
+        )
+    return facts
+
+
+def _extract_semantic_frontend_repository_facts(
+    sources: dict[str, str],
+) -> tuple[list[dict], bool]:
+    """Run the production repository analyzer once per source tree."""
+    try:
+        from aespa.services.frontend_semantics import (
+            extract_frontend_repository_facts,
+        )
+    except Exception:
+        return [], False
+    try:
+        extracted = extract_frontend_repository_facts(sources)
+    except Exception:
+        return [], False
+    return _normalise_semantic_frontend_facts(
+        extracted,
+        source_paths=tuple(sources),
+    ), True
+
+
 _AUTH_MARKERS = re.compile(
     r"login_required|requires?_auth|authenticate|verify_jwt|Depends\("
-    r"\s*get_current_user|passport\.authenticate|@PreAuthorize|IsAuthenticated",
+    r"\s*get_current_user|passport\.authenticate|@PreAuthorize|IsAuthenticated"
+    r"|\[\s*Authorize\b|\bRequireAuthorization\s*\(",
     re.IGNORECASE,
 )
 _SPRING_SECURITY_MATCHER = re.compile(
@@ -146,12 +931,29 @@ _QUEUE_PATTERNS = [
 ]
 
 _DATASTORE_PATTERNS = [
-    re.compile(r"\bredis\.Redis\(", re.IGNORECASE),
-    re.compile(r"\bpsycopg2\.connect\(", re.IGNORECASE),
-    re.compile(r"\bpymongo\.MongoClient\(", re.IGNORECASE),
-    re.compile(r"\bcreate_engine\(", re.IGNORECASE),
-    re.compile(r"\b(DATABASE_URL|MONGO_URI|REDIS_URL)\b"),
+    (re.compile(r"\bredis\.Redis\(", re.IGNORECASE), "Redis"),
+    (re.compile(r"\bpsycopg2\.connect\(", re.IGNORECASE), "PostgreSQL"),
+    (re.compile(r"\bpymongo\.MongoClient\(", re.IGNORECASE), "MongoDB"),
+    (re.compile(r"\bcreate_engine\(", re.IGNORECASE), "SQL database"),
+    (re.compile(r"\b(DATABASE_URL|MONGO_URI|REDIS_URL)\b"), "Configured datastore"),
+    (re.compile(r"\bnew\s+PDO\s*\(", re.IGNORECASE), "PDO database"),
+    (re.compile(r"[\"'](?:mysql|pgsql|sqlite|sqlsrv):", re.IGNORECASE), "SQL database"),
+    (re.compile(r"\bDbContext\b|\bUseSql(?:Server|ite|Npgsql|MySql)\s*\(", re.IGNORECASE), "Entity Framework database"),
+    (re.compile(r"\b(?:EntityManager|JdbcTemplate|DataSource)\b", re.IGNORECASE), "Java database"),
+    (re.compile(r"\b(?:PrismaClient|Sequelize|TypeOrmModule|mongoose\.connect)\b", re.IGNORECASE), "JavaScript datastore"),
+    (re.compile(r"\b(?:sql\.Open|gorm\.Open)\s*\(", re.IGNORECASE), "Go SQL database"),
+    (re.compile(r"\bActiveRecord::Base\b|\bestablish_connection\b", re.IGNORECASE), "Ruby database"),
 ]
+
+_SQL_TABLE_PATTERN = re.compile(
+    r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"[]?(?P<table>[A-Za-z_][\w$]*)",
+    re.IGNORECASE,
+)
+_SENSITIVE_DATA_NAMES = re.compile(
+    r"(?:user|account|customer|card|balance|transaction|payment|token|session|"
+    r"password|secret|credential|role|permission|profile|email|address|audit)",
+    re.IGNORECASE,
+)
 
 
 def _fingerprint(*parts: str) -> str:
@@ -289,6 +1091,7 @@ def extract_component_facts(root: Path) -> list[dict]:
     / ``component_id`` / ``fingerprint`` before persisting.
     """
     facts: list[dict] = list(_detect_framework_facts(root))
+    facts.extend(_detect_dotnet_framework_facts(root))
     seen_fingerprints: set[str] = {
         interface_fact_fingerprint(
             fact_type=f["fact_type"],
@@ -313,9 +1116,8 @@ def extract_component_facts(root: Path) -> list[dict]:
         seen_fingerprints.add(fp)
         facts.append(fact)
 
+    source_files: list[tuple[Path, str, str]] = []
     for path in _iter_source_files(root):
-        if len(facts) >= _MAX_FACTS:
-            break
         if path.suffix.lower() not in _SOURCE_SUFFIXES:
             continue
         try:
@@ -325,7 +1127,77 @@ def extract_component_facts(root: Path) -> list[dict]:
         except OSError:
             continue
         rel = path.relative_to(root).as_posix()
+        source_files.append((path, rel, text))
+
+    frontend_sources = {
+        rel: text
+        for path, rel, text in source_files
+        if path.suffix.lower() in _FRONTEND_SUFFIXES
+    }
+    source_roles = {
+        rel: _classify_frontend_source(text, rel)
+        for rel, text in frontend_sources.items()
+    }
+    semantic_repository_facts, repository_api_available = (
+        _extract_semantic_frontend_repository_facts(frontend_sources)
+    )
+    _apply_frontend_request_roles(
+        semantic_repository_facts,
+        source_roles,
+        tuple(frontend_sources),
+    )
+    semantic_facts_by_file: dict[str, list[dict]] = {}
+    for semantic_fact in semantic_repository_facts:
+        location = semantic_fact.get("evidence_location") or ""
+        source_file = next(
+            (
+                rel
+                for rel in frontend_sources
+                if isinstance(location, str) and location.startswith(f"{rel}:")
+            ),
+            None,
+        )
+        if source_file is not None:
+            semantic_facts_by_file.setdefault(source_file, []).append(semantic_fact)
+        if len(facts) < _MAX_FACTS:
+            _add(semantic_fact)
+
+    for path, rel, text in source_files:
+        if len(facts) >= _MAX_FACTS:
+            break
         spring_security = _spring_security_context(text)
+        is_frontend_source = path.suffix.lower() in _FRONTEND_SUFFIXES
+
+        # Spring MVC mappings need the class prefix and method annotation
+        # together.  The line-oriented patterns below cannot recover that
+        # relationship when ``@RequestMapping("/claims")`` sits above the
+        # class and ``@PostMapping("/{id}/paid")`` sits above a method.
+        for spring_route in _spring_route_facts(text, rel):
+            if len(facts) >= _MAX_FACTS:
+                break
+            _add(spring_route)
+        if path.suffix.lower() in {".cs", ".cshtml", ".razor"}:
+            for aspnet_route in _aspnet_route_facts(text, rel):
+                if len(facts) >= _MAX_FACTS:
+                    break
+                _add(aspnet_route)
+
+        # The semantic pass follows calls through wrappers and UI bindings.
+        # Keep the line-oriented extractors below as a small compatibility
+        # fallback for syntax the semantic pass does not understand.  _add()
+        # merges equivalent facts by interface identity.
+        semantic_frontend_facts = semantic_facts_by_file.get(rel, [])
+        if is_frontend_source and not repository_api_available:
+            semantic_frontend_facts = _extract_semantic_frontend_facts(text, rel)
+            _apply_frontend_request_roles(
+                semantic_frontend_facts,
+                {rel: source_roles.get(rel, "unknown")},
+                (rel,),
+            )
+            for frontend_fact in semantic_frontend_facts:
+                if len(facts) >= _MAX_FACTS:
+                    break
+                _add(frontend_fact)
 
         # Next.js file-system routes are concrete browser roots even when no
         # JSX route declaration exists in the file.
@@ -350,7 +1222,11 @@ def extract_component_facts(root: Path) -> list[dict]:
                     "path": route.rstrip("/") or "/",
                     "host": None,
                     "name": "Next.js App Router page",
-                    "detail": {"route_kind": "next_app", "trigger": "page_load"},
+                    "detail": {
+                        "route_kind": "next_app",
+                        "trigger": "page_load",
+                        "request_role": None,
+                    },
                     "evidence_location": f"{rel}:1",
                 }
             )
@@ -375,7 +1251,11 @@ def extract_component_facts(root: Path) -> list[dict]:
                     "path": route.rstrip("/") or "/",
                     "host": None,
                     "name": "Next.js Pages Router page",
-                    "detail": {"route_kind": "next_pages", "trigger": "page_load"},
+                    "detail": {
+                        "route_kind": "next_pages",
+                        "trigger": "page_load",
+                        "request_role": None,
+                    },
                     "evidence_location": f"{rel}:1",
                 }
             )
@@ -384,7 +1264,6 @@ def extract_component_facts(root: Path) -> list[dict]:
             if len(facts) >= _MAX_FACTS:
                 break
             location = f"{rel}:{line_no}"
-            is_frontend_source = path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}
 
             if is_frontend_source:
                 for pattern in _UI_ROUTE_PATTERNS:
@@ -400,6 +1279,7 @@ def extract_component_facts(root: Path) -> list[dict]:
                                 "detail": {
                                     "route_kind": "react_router",
                                     "trigger": "page_load",
+                                    "request_role": None,
                                 },
                                 "evidence_location": location,
                             }
@@ -416,6 +1296,28 @@ def extract_component_facts(root: Path) -> list[dict]:
                             "handler": m.groupdict().get("handler"),
                             "label": (m.groupdict().get("label") or "").strip() or None,
                         }
+                        semantic_action_covered = any(
+                            semantic_fact.get("fact_type") == "ui_action"
+                            and (
+                                semantic_fact.get("evidence_location") == location
+                                or (
+                                    detail.get("handler")
+                                    and semantic_fact.get("detail", {}).get("handler")
+                                    == detail.get("handler")
+                                )
+                                or (
+                                    detail.get("label")
+                                    and (
+                                        semantic_fact.get("name") == detail.get("label")
+                                        or semantic_fact.get("detail", {}).get("label")
+                                        == detail.get("label")
+                                    )
+                                )
+                            )
+                            for semantic_fact in semantic_frontend_facts
+                        )
+                        if semantic_action_covered:
+                            break
                         _add(
                             {
                                 "fact_type": "ui_action",
@@ -443,7 +1345,7 @@ def extract_component_facts(root: Path) -> list[dict]:
                             "path": m.group("path"),
                             "host": None,
                             "name": None,
-                            "detail": {},
+                            "detail": {"request_role": "server_ingress"},
                             "evidence_location": location,
                         }
                     )
@@ -454,16 +1356,26 @@ def extract_component_facts(root: Path) -> list[dict]:
                 if m:
                     url = m.group("url")
                     method = (m.groupdict().get("method") or "GET").upper()
+                    normalized_url = _normalise_frontend_path(url) or url
+                    frontend_role = (
+                        source_roles.get(rel) if is_frontend_source else "server"
+                    )
                     _add(
                         {
                             "fact_type": "http_call",
                             "method": method,
-                            "path": url,
+                            "path": normalized_url,
                             "host": _host_from_url(url),
                             "name": None,
                             "detail": {
-                                "frontend": path.suffix.lower()
-                                in {".js", ".jsx", ".ts", ".tsx"}
+                                "frontend": frontend_role == "browser",
+                                "request_role": (
+                                    "browser_request"
+                                    if frontend_role == "browser"
+                                    else "server_egress"
+                                    if frontend_role == "server"
+                                    else None
+                                ),
                             },
                             "evidence_location": location,
                         }
@@ -536,7 +1448,7 @@ def extract_component_facts(root: Path) -> list[dict]:
                     )
                     break
 
-            for pattern in _DATASTORE_PATTERNS:
+            for pattern, datastore_name in _DATASTORE_PATTERNS:
                 m = pattern.search(line)
                 if m:
                     _add(
@@ -545,12 +1457,46 @@ def extract_component_facts(root: Path) -> list[dict]:
                             "method": None,
                             "path": None,
                             "host": None,
-                            "name": m.group(0).rstrip("("),
-                            "detail": {},
+                            "name": datastore_name,
+                            "detail": {"marker": m.group(0)[:120]},
                             "evidence_location": location,
                         }
                     )
                     break
+
+            if path.suffix.lower() == ".sql":
+                table_match = _SQL_TABLE_PATTERN.search(line)
+                if table_match:
+                    table_name = table_match.group("table")
+                    _add(
+                        {
+                            "fact_type": "datastore",
+                            "method": None,
+                            "path": None,
+                            "host": None,
+                            "name": "SQL database",
+                            "detail": {"schema_file": rel},
+                            "evidence_location": location,
+                        }
+                    )
+                    _add(
+                        {
+                            "fact_type": "asset",
+                            "method": None,
+                            "path": None,
+                            "host": None,
+                            "name": f"{table_name} data",
+                            "detail": {
+                                "table": table_name,
+                                "asset_type": (
+                                    "sensitive_data"
+                                    if _SENSITIVE_DATA_NAMES.search(table_name)
+                                    else "system_data"
+                                ),
+                            },
+                            "evidence_location": location,
+                        }
+                    )
 
     return facts[:_MAX_FACTS]
 
@@ -558,7 +1504,7 @@ def extract_component_facts(root: Path) -> list[dict]:
 def persist_component_facts(sast_run_id: int, root: Path) -> int:
     """Extract and upsert deterministic ``ComponentFact`` rows for one run.
 
-    Looks up the owning ``ApplicationComponent`` via ``CampaignSourceMember``
+    Looks up the owning ``SystemComponent`` via ``CampaignSourceMember``
     (``component_id`` stays ``NULL`` for a standalone SAST run — this never
     requires the run to know about campaigns itself). Idempotent per run: a
     deterministic facts while preserving facts recorded by the LLM mapper.

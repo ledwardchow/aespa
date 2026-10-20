@@ -1,11 +1,17 @@
 import { isDynamicScanActive } from "../../shared/runs/presentation.jsx";
+import { agentStatusLabel as sharedAgentStatusLabel } from "../../shared/runs/AgentStatusRows.jsx";
 import { truncUrl } from "../../shared/lib/urls.js";
 import { parseDate } from "../../shared/lib/dates.js";
 export function activityPresentation({ run, thinkingStatus, aliceIsThinking, activityLog }) {
+  const isTeamRun = run?.coverage_mode === "team";
+  const testLeadLabel = isTeamRun ? "Test Co-ordinator" : "Test Lead";
   const agentRoleLabel = (agent) => {
     if (agent?.id === "crawler") return "Crawler";
-    if (agent?.id === "scanner") return "Test Lead";
-    if (agent?.id === "alice") return "A.L.I.C.E";
+    if (agent?.id === "scanner") return testLeadLabel;
+    if (agent?.id === "team-primary") return "Primary Tester";
+    if (agent?.id === "team-independent") return "Pair Tester";
+    if (agent?.id === "team-closer") return "QA Tester";
+    if (agent?.id === "alice") return "A.L.I.C.E.";
     return agent?.role || "Agent";
   };
   const normalizeAgentForRun = (agent) => {
@@ -15,7 +21,7 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
   const defaultAgentRoster = () => [
     {
       id: "alice",
-      role: "A.L.I.C.E",
+      role: "A.L.I.C.E.",
       status: aliceIsThinking ? "active" : "idle",
       currentTask: aliceIsThinking ? "Processing directive..." : "Waiting for instruction",
     },
@@ -27,7 +33,7 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
     },
     {
       id: "scanner",
-      role: "Test Lead",
+      role: testLeadLabel,
       status: isDynamicScanActive(thinkingStatus?.status) ? "active" : "idle",
       currentTask: isDynamicScanActive(thinkingStatus?.status)
         ? "Coordinating pentest"
@@ -39,6 +45,16 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
       status: "idle",
       currentTask: "No specialist dispatched",
     },
+    ...(run?.coverage_mode === "deep"
+      ? [
+          {
+            id: "deep-workers",
+            role: "Deep Attack Workers",
+            status: "idle",
+            currentTask: "No Deep tasks started",
+          },
+        ]
+      : []),
     {
       id: "burp",
       role: "Burp",
@@ -71,6 +87,8 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
       return agent.role === "Validator" || agent.id?.startsWith("validator-");
     if (placeholder.id === "specialist")
       return agent.role === "Specialist" || agent.id?.startsWith("specialist-");
+    if (placeholder.id === "deep-workers")
+      return agent.role === "Deep Attack Worker" || agent.id?.startsWith("deep-worker-");
     if (placeholder.id === "reporting")
       return agent.role === "Reporting" || agent.id === "reporting";
     return false;
@@ -111,7 +129,7 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
     activityLog
       .filter(
         (entry) =>
-          ["crawl", "reconcile"].includes(entry.phase) &&
+          ["crawl", "reconcile", "crawl_workflow"].includes(entry.phase) &&
           entry.data?.stage &&
           (entry.page_url || entry.data?.username),
       )
@@ -203,7 +221,7 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
         outcome: thinkingStepOutcome(entry),
       }));
   const agentTaskHistory = (agent) =>
-    agent?.id === "scanner" && testLeadHistory().length
+    agent?.id === "scanner" && !isTeamRun && testLeadHistory().length
       ? testLeadHistory()
       : agent?.taskHistory || [];
   const formatCrawlEvent = (event) => {
@@ -218,6 +236,7 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
   };
   const agentCurrentTask = (agent) => {
     agent = normalizeAgentForRun(agent);
+    if (agent?.id === "crawler" && agent.workflowRetryActive) return agent.currentTask;
     const crawlEvents = agentCrawlEvents(agent);
     const explicitCrawlerStage =
       agent?.id === "crawler" &&
@@ -256,18 +275,16 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
     if (agent?.id === "scanner" && lifecycleTasks.has(agent.currentTask)) {
       return agent.currentTask;
     }
-    if (agent?.id === "scanner" && testLeadHistory().length) {
+    if (agent?.id === "scanner" && !isTeamRun && testLeadHistory().length) {
       if (agent.status !== "active") return "Standing by";
       return testLeadHistory()[testLeadHistory().length - 1].task;
     }
     return agent?.currentTask || "Waiting for work";
   };
-  const agentStatusLabel = (agent) => {
-    if (agent?.status === "active") return "ACTIVE";
-    if (agent?.status === "idle") return "IDLE";
-    if (agent?.status === "failed") return "FAILED";
-    return "COMPLETE";
-  };
+  const agentStatusLabel = (agent) =>
+    sharedAgentStatusLabel(
+      ["active", "idle", "failed"].includes(agent?.status) ? agent.status : "complete",
+    );
   return {
     normalizeAgentForRun,
     defaultAgentRoster,
@@ -277,5 +294,40 @@ export function activityPresentation({ run, thinkingStatus, aliceIsThinking, act
     agentCrawlEvents,
     agentTaskHistory,
     agentStatusLabel,
+  };
+}
+
+const TEAM_TESTER_ROLES = {
+  "team-primary": "Primary Tester",
+  "team-independent": "Pair Tester",
+  "team-closer": "QA Tester",
+};
+
+export function routeScannerEventToActiveTeamTester(patch, activeTeamTester) {
+  if (
+    patch?.id !== "scanner" ||
+    patch?.status !== "active" ||
+    !activeTeamTester?.id ||
+    !(activeTeamTester.id in TEAM_TESTER_ROLES) ||
+    patch.currentTask === "Dynamic scan started" ||
+    patch.currentTask === "Stopping scan…"
+  ) {
+    return patch;
+  }
+  return {
+    ...patch,
+    id: activeTeamTester.id,
+    role: TEAM_TESTER_ROLES[activeTeamTester.id],
+  };
+}
+
+export function teamCoordinatorStatus(activeTeamTester, mission = "") {
+  const role = TEAM_TESTER_ROLES[activeTeamTester?.id];
+  if (!role) return null;
+  return {
+    id: "scanner",
+    role: "Test Co-ordinator",
+    status: "active",
+    currentTask: `Co-ordinating ${role}${mission ? `: ${mission}` : ""}`,
   };
 }

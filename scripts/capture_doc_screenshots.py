@@ -2,7 +2,7 @@
 """
 Documentation Screenshot Capture Utility for AESPA
 
-Automatically inspects aespa.db to locate top web and API scan runs,
+Automatically inspects aespa_data/aespa.db to locate top web and API scan runs,
 launches headless Playwright, navigates all UI routes and tab views,
 and saves updated documentation screenshots to docs/images/.
 """
@@ -135,8 +135,8 @@ async def capture_screenshots(
         await page.goto(web_run_url)
         await wait_for_ready(page)
 
-        # 5. Status / runlanding / agentstatus (with ALICE minimized)
-        print(" -> agentstatus.png & runlanding.png")
+        # 5. Status / agentstatus (with ALICE minimized)
+        print(" -> agentstatus.png")
         await page.click('button.tab-btn:has-text("Status")')
         await wait_for_ready(page)
         alice_role = page.locator('.agent-row:has-text("A.L.I.C.E") .agent-role-name')
@@ -144,7 +144,6 @@ async def capture_screenshots(
             await alice_role.first.click()
             await wait_for_ready(page)
         await page.screenshot(path=os.path.join(out_dir, "agentstatus.png"))
-        await page.screenshot(path=os.path.join(out_dir, "runlanding.png"))
 
         # 6. Site Map
         print(" -> sitemap.png")
@@ -159,10 +158,9 @@ async def capture_screenshots(
         await page.screenshot(path=os.path.join(out_dir, "attacksurface.png"))
 
         # 8. Web Findings
-        print(" -> findings.png & webfindings.png")
+        print(" -> webfindings.png")
         await page.click('button.tab-btn:has-text("Findings")')
         await wait_for_ready(page)
-        await page.screenshot(path=os.path.join(out_dir, "findings.png"))
         await page.screenshot(path=os.path.join(out_dir, "webfindings.png"))
 
         # 9. Traffic Log
@@ -202,10 +200,9 @@ async def capture_screenshots(
 
         # API Section
         # 12. APIs list
-        print(" -> apis.png & apisetup.png")
+        print(" -> apisetup.png")
         await page.goto(f"{base_url}/#/apis")
         await wait_for_ready(page)
-        await page.screenshot(path=os.path.join(out_dir, "apis.png"))
         await page.screenshot(path=os.path.join(out_dir, "apisetup.png"))
 
         # 13. API Collection Detail
@@ -245,7 +242,9 @@ def main():
     parser.add_argument(
         "--out-dir", default="docs/images", help="Target output directory for images"
     )
-    parser.add_argument("--db-path", default="aespa.db", help="Path to SQLite database")
+    parser.add_argument(
+        "--db-path", default="aespa_data/aespa.db", help="Path to SQLite database"
+    )
     args = parser.parse_args()
 
     web_run_id, site_id, api_run_id, collection_id = get_top_runs(args.db_path)

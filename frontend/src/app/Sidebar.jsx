@@ -1,28 +1,41 @@
 import {
   IconSites,
   IconApis,
-  IconSettings,
   IconPlay,
   IconShield,
   IconChevronLeft,
   IconChevronRight,
   IconBug,
   IconChart,
-  IconApplications,
+  IconSystems,
+  IconCpu,
+  IconPuzzle,
+  IconSliders,
+  IconGauge,
+  IconFlask,
 } from "../shared/ui/Icons.jsx";
 export function Sidebar({ section, collapsed, onToggle, preferences }) {
-  const { appVersion, username, showUsername, showApplications, reportingDebugCfg } = preferences;
+  const {
+    appVersion,
+    username,
+    showUsername,
+    showSystems,
+    reportingDebugCfg,
+    benchmarkLabCfg,
+    planUsageCfg,
+  } = preferences;
   const onSites = section === "sites";
   const onApis = section === "apis";
-  const onApplications = section === "applications";
+  const onSystems = section === "systems";
   const onActiveJobs = section === "active-jobs";
   const onSettings = section === "settings";
   const onScanPolicy = section === "scan-policy";
-  const onExternalIntegrations = section === "external-integrations";
+  const onExtensions = section === "extensions";
   const onSast = section === "sast";
-  const onDebug = section === "debug";
   const onReportingDebug = section === "reporting-debug";
+  const onBenchmarkLab = section === "benchmark-lab";
   const onStats = section === "stats";
+  const onPlanUsage = section === "chatgpt-plan-usage";
 
   return (
     <aside className={"sidebar" + (collapsed ? " sidebar--collapsed" : "")}>
@@ -103,16 +116,12 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
       </div>
       <nav className="sidebar-nav">
         {!collapsed && <div className="nav-section-label">Targets</div>}
-        {showApplications && (
-          <a
-            href="#/applications"
-            className={"nav-item" + (onApplications ? " active" : "")}
-            title="Applications"
-          >
+        {showSystems && (
+          <a href="#/systems" className={"nav-item" + (onSystems ? " active" : "")} title="Systems">
             <span className="nav-icon">
-              <IconApplications />
+              <IconSystems />
             </span>
-            {!collapsed && " Applications"}
+            {!collapsed && " Systems"}
           </a>
         )}
         <a href="#/" className={"nav-item" + (onSites ? " active" : "")} title="Sites">
@@ -127,12 +136,17 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           </span>
           {!collapsed && " APIs"}
         </a>
-        <a href="#/sast-runs" className={"nav-item" + (onSast ? " active" : "")} title="SAST">
+        <a href="#/sast-runs" className={"nav-item" + (onSast ? " active" : "")} title="SAST Scans">
           <span className="nav-icon">
             <IconShield />
           </span>
-          {!collapsed && " SAST"}
+          {!collapsed && " SAST Scans"}
         </a>
+        {!collapsed && (
+          <div className="nav-section-label" style={{ marginTop: 8 }}>
+            Activity
+          </div>
+        )}
         <a
           href="#/active-jobs"
           className={"nav-item" + (onActiveJobs ? " active" : "")}
@@ -143,21 +157,24 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           </span>
           {!collapsed && " Active Jobs"}
         </a>
-        {!collapsed && (
-          <div className="nav-section-label" style={{ marginTop: 8 }}>
-            Stats
-          </div>
-        )}
-        <a
-          href="#/stats/usage"
-          className={"nav-item" + (onStats ? " active" : "")}
-          title="Usage statistics"
-        >
+        <a href="#/stats/usage" className={"nav-item" + (onStats ? " active" : "")} title="Usage">
           <span className="nav-icon">
             <IconChart />
           </span>
           {!collapsed && " Usage"}
         </a>
+        {planUsageCfg?.panel_enabled && (
+          <a
+            href="#/stats/chatgpt-plan"
+            className={"nav-item" + (onPlanUsage ? " active" : "")}
+            title="ChatGPT Plan Usage"
+          >
+            <span className="nav-icon">
+              <IconGauge />
+            </span>
+            {!collapsed && " ChatGPT Plan Usage"}
+          </a>
+        )}
         {!collapsed && (
           <div
             className="nav-section-label"
@@ -169,46 +186,36 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
           </div>
         )}
         <a
-          href="#/settings"
+          href="#/settings/profiles"
           className={"nav-item" + (onSettings ? " active" : "")}
-          title="LLM Settings"
+          title="LLM Configuration"
         >
           <span className="nav-icon">
-            <IconSettings />
+            <IconCpu />
           </span>
-          {!collapsed && " LLM Settings"}
+          {!collapsed && " LLM Configuration"}
+        </a>
+        <a
+          href="#/extensions"
+          className={"nav-item" + (onExtensions ? " active" : "")}
+          title="Extensions"
+        >
+          <span className="nav-icon">
+            <IconPuzzle />
+          </span>
+          {!collapsed && " Extensions"}
         </a>
         <a
           href="#/scan-policy"
           className={"nav-item" + (onScanPolicy ? " active" : "")}
-          title="Agent Settings"
+          title="Settings"
         >
           <span className="nav-icon">
-            <IconShield />
+            <IconSliders />
           </span>
-          {!collapsed && " Agent Settings"}
+          {!collapsed && " Settings"}
         </a>
-        <a
-          href="#/external-integrations"
-          className={"nav-item" + (onExternalIntegrations ? " active" : "")}
-          title="External Integrations"
-        >
-          <span className="nav-icon">
-            <IconShield />
-          </span>
-          {!collapsed && " External Integrations"}
-        </a>
-        <a
-          href="#/debug"
-          className={"nav-item" + (onDebug ? " active" : "")}
-          title="System Settings"
-        >
-          <span className="nav-icon">
-            <IconBug />
-          </span>
-          {!collapsed && " System Settings"}
-        </a>
-        {reportingDebugCfg?.panel_enabled && (
+        {(reportingDebugCfg?.panel_enabled || benchmarkLabCfg?.panel_enabled) && (
           <>
             {!collapsed && (
               <div
@@ -217,19 +224,33 @@ export function Sidebar({ section, collapsed, onToggle, preferences }) {
                   marginTop: 8,
                 }}
               >
-                Testing Features
+                Labs
               </div>
             )}
-            <a
-              href="#/reporting-debug"
-              className={"nav-item" + (onReportingDebug ? " active" : "")}
-              title="Reporting Lab"
-            >
-              <span className="nav-icon">
-                <IconBug />
-              </span>
-              {!collapsed && " Reporting Lab"}
-            </a>
+            {reportingDebugCfg?.panel_enabled && (
+              <a
+                href="#/reporting-debug"
+                className={"nav-item" + (onReportingDebug ? " active" : "")}
+                title="Reporting Lab"
+              >
+                <span className="nav-icon">
+                  <IconBug />
+                </span>
+                {!collapsed && " Reporting Lab"}
+              </a>
+            )}
+            {benchmarkLabCfg?.panel_enabled && (
+              <a
+                href="#/benchmark-lab"
+                className={"nav-item" + (onBenchmarkLab ? " active" : "")}
+                title="Benchmark Lab"
+              >
+                <span className="nav-icon">
+                  <IconFlask />
+                </span>
+                {!collapsed && " Benchmark Lab"}
+              </a>
+            )}
           </>
         )}
       </nav>

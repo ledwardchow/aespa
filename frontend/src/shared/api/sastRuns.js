@@ -15,6 +15,11 @@ export const getSastAnalysis = (id) => req(`/api/sast-runs/${id}/analysis`);
 
 export const getSastHandoffTargets = (id) => req(`/api/sast-runs/${id}/handoff-targets`);
 
+export const getSastLiveTargets = (id) => req(`/api/sast-runs/${id}/live-targets`);
+
+export const createSastLiveTestRun = (id, lid, body) =>
+  req(`/api/sast-runs/${id}/leads/${lid}/live-test-runs`, { method: "POST", body });
+
 export const handoffSastLead = (id, lid, b) =>
   req(`/api/sast-runs/${id}/leads/${lid}/handoff`, { method: "POST", body: b });
 
@@ -28,18 +33,50 @@ export const stopSastScan = (id) => req(`/api/sast-runs/${id}/scan/stop`, { meth
 
 export const resumeSastScan = (id) => req(`/api/sast-runs/${id}/scan/resume`, { method: "POST" });
 
+export const resumeSastSource = (id) =>
+  req(`/api/sast-runs/${id}/source/resume`, { method: "POST" });
+
 export const getSastScanStatus = (id) => req(`/api/sast-runs/${id}/scan/status`);
 
 export const getSastAgentLog = (id) => req(`/api/sast-runs/${id}/agent-log`);
 
 export const getSastLeads = (id) => req(`/api/sast-runs/${id}/leads`);
 
+export const revalidateSastLead = (id, leadId) =>
+  req(`/api/sast-runs/${id}/leads/${leadId}/revalidate`, { method: "POST" });
+
 export const getSastTokenUsage = (id) => req(`/api/sast-runs/${id}/token-usage`);
 
-export const createStandaloneSastRun = (file, name, llm_profile_id) => {
+export const createStandaloneSastRun = (file, name, llm_profile_id, analysis_mode) => {
   const fd = new FormData();
   fd.append("file", file);
   if (name) fd.append("name", name);
   if (llm_profile_id) fd.append("llm_profile_id", llm_profile_id);
+  if (analysis_mode) fd.append("analysis_mode", analysis_mode);
   return req(`/api/sast-runs`, { method: "POST", body: fd });
 };
+
+export const createSastRunFromSource = ({
+  provider_id,
+  parameters,
+  name,
+  llm_profile_id,
+  analysis_mode,
+}) =>
+  req(`/api/sast-runs/from-source`, {
+    method: "POST",
+    body: {
+      provider_id,
+      parameters,
+      name,
+      llm_profile_id,
+      analysis_mode,
+      start_scan: true,
+    },
+  });
+
+export const getSastSarifUrl = (id, reportableOnly = false) =>
+  `/api/sast-runs/${id}/sarif${reportableOnly ? "?reportable_only=true" : ""}`;
+
+export const getSastSarif = (id, reportableOnly = false) =>
+  req(getSastSarifUrl(id, reportableOnly));

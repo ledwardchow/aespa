@@ -1,3 +1,5 @@
+import { parseDate } from "../lib/dates.js";
+import { fmtUsd } from "../lib/money.ts";
 export function fmtTok(n) {
   if (!n || n <= 0) return "0";
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
@@ -12,47 +14,111 @@ export function fmtCredits(n) {
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-export function fmtUsd(n) {
-  const value = Number(n);
-  if (!Number.isFinite(value)) return "—";
-  if (value === 0) return "$0.00";
-  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+export { fmtUsd };
+
+function ModelUsageRow({ model, v }) {
+  return (
+    <div className="token-breakdown-row">
+      <span className="token-model-name">{model}</span>
+      {v.factory_credits > 0 ? (
+        <span className="token-in">{fmtTok(v.factory_credits)} Droid credits</span>
+      ) : null}
+      {v.ai_credits > 0 ? (
+        <span className="token-in">{fmtCredits(v.ai_credits)} credits</span>
+      ) : null}
+      {v.premium_requests > 0 ? (
+        <span className="token-in">{fmtCredits(v.premium_requests)} premium</span>
+      ) : null}
+      {v.requests > 0 ? <span className="token-out">{fmtTok(v.requests)} calls</span> : null}
+      {v.input > 0 || v.cache_read > 0 || v.cache_write > 0 ? (
+        <span className="token-in" title="Input tokens excluding cache reads and writes">
+          ↑{fmtTok(v.uncached_input ?? v.input)}
+        </span>
+      ) : null}
+      {v.output > 0 ? <span className="token-out">↓{fmtTok(v.output)}</span> : null}
+      {v.cache_read > 0 || v.cache_write > 0 ? (
+        <>
+          {v.cache_read > 0 ? (
+            <span className="token-cache-read" title="Cache read">
+              ⚡{fmtTok(v.cache_read)}
+            </span>
+          ) : null}
+          {v.cache_write > 0 ? (
+            <span className="token-cache-write" title="Cache write">
+              ✎{fmtTok(v.cache_write)}
+            </span>
+          ) : null}
+        </>
+      ) : null}
+      {v.estimated_cost_available && v.estimated_total_cost_usd != null ? (
+        <span
+          className="token-cost"
+          title="Estimated cost based on recorded usage and model pricing"
+        >
+          ≈{fmtUsd(v.estimated_total_cost_usd)} est.
+        </span>
+      ) : null}
+    </div>
+  );
 }
 
-export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
-  const hasTokens = tokenUsage && (tokenUsage.total_input > 0 || tokenUsage.total_output > 0);
-  const providers = new Set(Object.values(tokenUsage?.by_model || {}).map((v) => v.provider));
+export function TokenUsageBar({
+  tokenUsage,
+  tokenExpanded,
+  setTokenExpanded,
+  hideEstimatedCost = false,
+  children,
+}) {
+  const hasTokens =
+    tokenUsage &&
+    (tokenUsage.total_input > 0 ||
+      tokenUsage.total_output > 0 ||
+      tokenUsage.total_cache_read > 0 ||
+      tokenUsage.total_cache_write > 0);
+  const pendingInputTokens = Number(tokenUsage?.pending_input_tokens || 0);
+  const pendingRequests = Number(tokenUsage?.pending_requests || 0);
+  const hasPendingUsage = pendingRequests > 0 || pendingInputTokens > 0;
+  const fastModels = Object.entries(tokenUsage?.by_model_fast || {});
+  const providers = new Set(
+    [...Object.values(tokenUsage?.by_model || {}), ...fastModels.map(([, v]) => v)].map(
+      (v) => v.provider,
+    ),
+  );
   const hasCopilot = providers.has("github_copilot");
   const hasDroid = providers.has("factory_droid");
   const hasCodex = providers.has("openai_codex");
+  const hasChatGPTPlan = providers.has("openai_chatgpt_plan");
   const hasAntigravity = providers.has("google_antigravity");
-  const hasProviderUsage = hasCopilot || hasDroid || hasCodex || hasAntigravity;
+  const hasProviderUsage = hasCopilot || hasDroid || hasCodex || hasChatGPTPlan || hasAntigravity;
   const hasBilledUsage =
     tokenUsage &&
     (tokenUsage.total_ai_credits > 0 ||
       tokenUsage.total_factory_credits > 0 ||
       tokenUsage.total_premium_requests > 0);
-  const hasUsage = hasTokens || hasProviderUsage;
+  const hasCompletedUsage = hasTokens || hasProviderUsage;
+  const hasUsage = hasCompletedUsage || hasPendingUsage;
   const hasEstimatedCost =
     tokenUsage?.estimated_cost_available && tokenUsage.estimated_total_cost_usd != null;
   const usageLabel =
-    hasAntigravity && !hasCodex && !hasDroid && !hasCopilot
-      ? "Antigravity usage"
-      : hasCodex && !hasDroid && !hasCopilot
-        ? "Codex usage"
-        : hasDroid && !hasCopilot
-          ? "Droid usage"
-          : hasCopilot && !hasDroid
-            ? "Copilot usage"
-            : "LLM usage";
+    hasChatGPTPlan && !hasCodex && !hasDroid && !hasCopilot && !hasAntigravity
+      ? "ChatGPT plan usage"
+      : hasAntigravity && !hasCodex && !hasDroid && !hasCopilot
+        ? "Antigravity usage"
+        : hasCodex && !hasDroid && !hasCopilot
+          ? "Codex usage"
+          : hasDroid && !hasCopilot
+            ? "Droid usage"
+            : hasCopilot && !hasDroid
+              ? "Copilot usage"
+              : "LLM usage";
   const quota = tokenUsage?.codex_quota || tokenUsage?.copilot_quota;
 
   return (
     <>
       <div
         className="activity-token-bar"
-        onClick={hasUsage ? () => setTokenExpanded?.((p) => !p) : undefined}
-        style={{ cursor: hasUsage ? "pointer" : "default" }}
+        onClick={hasCompletedUsage ? () => setTokenExpanded?.((p) => !p) : undefined}
+        style={{ cursor: hasCompletedUsage ? "pointer" : "default" }}
       >
         {hasUsage ? (
           <>
@@ -94,12 +160,26 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
             {hasTokens ? (
               <>
                 {hasProviderUsage ? <span className="token-bar-sep">·</span> : null}
-                <span className="token-bar-in" title="Input tokens">
-                  ↑{fmtTok(tokenUsage.total_input)} in
+                <span
+                  className="token-bar-in"
+                  title="Input tokens excluding cache reads and writes"
+                >
+                  ↑{fmtTok(tokenUsage.total_uncached_input ?? tokenUsage.total_input)} in
                 </span>
                 <span className="token-bar-sep">·</span>
                 <span className="token-bar-out" title="Output tokens">
                   ↓{fmtTok(tokenUsage.total_output)} out
+                </span>
+              </>
+            ) : null}
+            {hasPendingUsage ? (
+              <>
+                {hasCompletedUsage ? <span className="token-bar-sep">·</span> : null}
+                <span
+                  className="token-bar-in"
+                  title="Estimated input tokens in requests waiting for an LLM response"
+                >
+                  ≈{fmtTok(pendingInputTokens)} input pending
                 </span>
               </>
             ) : null}
@@ -118,7 +198,7 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
                 ) : null}
               </>
             ) : null}
-            {hasEstimatedCost ? (
+            {hasEstimatedCost && !hideEstimatedCost ? (
               <>
                 <span className="token-bar-sep">·</span>
                 <span
@@ -129,15 +209,21 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
                 </span>
               </>
             ) : null}
-            <span className="activity-expand-chevron" style={{ marginLeft: 4 }}>
-              {tokenExpanded ? "▲" : "▼"}
-            </span>
+            {children}
+            {hasCompletedUsage ? (
+              <span className="activity-expand-chevron" style={{ marginLeft: 4 }}>
+                {tokenExpanded ? "▲" : "▼"}
+              </span>
+            ) : null}
           </>
         ) : (
-          <span className="token-bar-empty">No usage data yet</span>
+          <>
+            <span className="token-bar-empty">No usage data yet</span>
+            {children}
+          </>
         )}
       </div>
-      {tokenExpanded && hasUsage && (
+      {tokenExpanded && hasCompletedUsage && (
         <div className="token-breakdown">
           {quota && Number.isFinite(Number(quota.remaining_percentage)) ? (
             <div className="token-breakdown-row">
@@ -149,52 +235,22 @@ export function TokenUsageBar({ tokenUsage, tokenExpanded, setTokenExpanded }) {
               </span>
               {quota.reset_at ? (
                 <span className="token-out" title={quota.reset_at}>
-                  resets {new Date(quota.reset_at).toLocaleDateString()}
+                  resets {parseDate(quota.reset_at).toLocaleDateString()}
                 </span>
               ) : null}
             </div>
           ) : null}
           {Object.entries(tokenUsage.by_model || {}).map(([model, v]) => (
-            <div key={model} className="token-breakdown-row">
-              <span className="token-model-name">{model}</span>
-              {v.factory_credits > 0 ? (
-                <span className="token-in">{fmtTok(v.factory_credits)} Droid credits</span>
-              ) : null}
-              {v.ai_credits > 0 ? (
-                <span className="token-in">{fmtCredits(v.ai_credits)} credits</span>
-              ) : null}
-              {v.premium_requests > 0 ? (
-                <span className="token-in">{fmtCredits(v.premium_requests)} premium</span>
-              ) : null}
-              {v.requests > 0 ? (
-                <span className="token-out">{fmtTok(v.requests)} calls</span>
-              ) : null}
-              {v.input > 0 ? <span className="token-in">↑{fmtTok(v.input)}</span> : null}
-              {v.output > 0 ? <span className="token-out">↓{fmtTok(v.output)}</span> : null}
-              {v.cache_read > 0 || v.cache_write > 0 ? (
-                <>
-                  {v.cache_read > 0 ? (
-                    <span className="token-cache-read" title="Cache read">
-                      ⚡{fmtTok(v.cache_read)}
-                    </span>
-                  ) : null}
-                  {v.cache_write > 0 ? (
-                    <span className="token-cache-write" title="Cache write">
-                      ✎{fmtTok(v.cache_write)}
-                    </span>
-                  ) : null}
-                </>
-              ) : null}
-              {v.estimated_cost_available && v.estimated_total_cost_usd != null ? (
-                <span
-                  className="token-cost"
-                  title="Estimated cost based on recorded usage and model pricing"
-                >
-                  ≈{fmtUsd(v.estimated_total_cost_usd)} est.
-                </span>
-              ) : null}
-            </div>
+            <ModelUsageRow key={model} model={model} v={v} />
           ))}
+          {fastModels.length > 0 ? (
+            <>
+              <div className="token-breakdown-heading">Fast mode</div>
+              {fastModels.map(([model, v]) => (
+                <ModelUsageRow key={`fast:${model}`} model={model} v={v} />
+              ))}
+            </>
+          ) : null}
         </div>
       )}
     </>

@@ -1,0 +1,399 @@
+/* Every card on an extension's settings page shares one column width. */
+.extension-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 960px;
+}
+
+/* Headings inside a card, below the card's own form-section-title. */
+.extension-subsection-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.api-tokens {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.api-tokens-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.api-tokens-head > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.api-token-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.api-token-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.api-token-card.off .api-token-facts {
+  opacity: 0.6;
+}
+
+.api-token-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.api-token-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.api-token-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.api-token-title code {
+  font-size: 12px;
+}
+
+.api-token-actions {
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.api-token-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 20px;
+  margin: 0;
+}
+
+.api-token-facts dt {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.api-token-facts dd {
+  margin: 2px 0 0;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.api-token-url {
+  overflow-wrap: anywhere;
+}
+
+.api-token-hint {
+  font-size: 12px;
+}
+
+.api-token-shown {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--ok);
+  border-radius: 8px;
+  background: var(--ok-bg);
+}
+
+.api-token-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.api-token-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 24px;
+}
+
+.api-token-scopes {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.api-token-scopes legend {
+  padding: 0;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: none;
+}
+
+.api-token-more {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-2);
+  border-radius: 8px;
+}
+
+.api-token-more-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.api-token-form-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.api-def-secret {
+  font-family: var(--mono);
+}
+
+.api-def-intro {
+  margin-top: 16px;
+}
+
+.api-def-intro > summary,
+.api-def-operation > summary {
+  cursor: pointer;
+}
+
+.api-def-description {
+  white-space: pre-wrap;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.api-def-group {
+  margin-top: 20px;
+}
+
+.api-def-operation {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  background: var(--panel-2);
+}
+
+.api-def-operation > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 12px;
+  list-style: none;
+}
+
+.api-def-operation > summary::-webkit-details-marker {
+  display: none;
+}
+
+.api-def-method {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  min-width: 56px;
+  text-align: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--hover);
+}
+
+.api-def-method.get {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+
+.api-def-method.post,
+.api-def-method.put,
+.api-def-method.patch {
+  color: var(--accent);
+  background: var(--accent-glow);
+}
+
+.api-def-method.event {
+  color: var(--warn);
+  background: rgba(245, 166, 35, 0.1);
+}
+
+.api-def-method.delete {
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.api-def-path {
+  font-family: var(--mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.api-def-summary {
+  flex: 1 1 200px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.api-def-scopes {
+  font-size: 12px;
+}
+
+.api-def-details {
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.api-def-heading {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 12px 0 4px;
+}
+
+.api-def-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.api-def-table td {
+  white-space: normal;
+  overflow: visible;
+  padding: 4px 8px 4px 0;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+
+.api-def-name {
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.api-def-type {
+  font-family: var(--mono);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.api-def-required {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--warn);
+}
+
+.api-def-note {
+  font-size: 13px;
+}
+
+.api-def .row > input,
+.api-tokens .row > input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Short token values wrap instead of being cut off. */
+.api-tokens td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Object names that open their Data objects entry. */
+.api-def-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.api-def-link:hover,
+.api-def-link:focus-visible {
+  text-decoration: underline;
+}
+
+.api-def-toggle {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  background: none;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.api-def-toggle:hover,
+.api-def-toggle:focus-visible {
+  color: var(--text);
+  background: var(--hover);
+}
+
+/* A nested object's fields sit under the field that holds them. */
+.api-def-nested > td {
+  padding: 4px 0 8px 16px;
+  border-left: 2px solid var(--border-2);
+}
+
+.api-def-code-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.api-def-code {
+  margin: 0;
+  align-self: stretch;
+  padding: 10px 12px;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.api-def-copy {
+  order: -1;
+}
+
+.api-def-example-choices {
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}

@@ -48,7 +48,7 @@ export function ApiRunEndpointsTab({ run }) {
     ok ? (
       <span
         style={{
-          color: "var(--success,#4caf50)",
+          color: "var(--ok)",
         }}
       >
         ✔
@@ -56,7 +56,7 @@ export function ApiRunEndpointsTab({ run }) {
     ) : (
       <span
         style={{
-          color: "var(--danger,#f44336)",
+          color: "var(--danger)",
         }}
       >
         ✘
@@ -140,7 +140,7 @@ export function ApiRunEndpointsTab({ run }) {
                   <td
                     style={{
                       fontSize: 11,
-                      color: notes.length ? "var(--danger,#f44336)" : "var(--muted)",
+                      color: notes.length ? "var(--danger)" : "var(--muted)",
                     }}
                   >
                     {notes.length ? notes.join(" · ") : "—"}

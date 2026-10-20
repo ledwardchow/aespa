@@ -47,6 +47,7 @@ from aespa.services import alice_goals, alice_tasks, run_cleanup
 from aespa.services import findings as findings_svc
 from aespa.services import scanner_sessions as scanner_session_svc
 from aespa.services.references import ensure_finding_reference
+from aespa.services.run_cleanup import detach_finding_dependents
 
 _UTC = timezone.utc
 
@@ -177,6 +178,7 @@ class AliceRunRequest(BaseModel):
 
 class AliceSteerRequest(BaseModel):
     message: str
+    tab_id: str | None = None
 
 
 def _save_api_sessions(
@@ -227,11 +229,12 @@ async def start_alice_run(
 async def alice_stream(
     run_id: int,
     cursor: int = Query(default=0, ge=0),
+    tab_id: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> StreamingResponse:
     _get_run_or_404(session, run_id)
     return StreamingResponse(
-        alice_tasks.stream_events(run_id, cursor, run_type="api"),
+        alice_tasks.stream_events(run_id, cursor, run_type="api", tab_id=tab_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -242,9 +245,13 @@ async def alice_stream(
 
 
 @router.delete("/{run_id}/alice/run")
-async def stop_alice_run(run_id: int, session: Session = Depends(get_session)) -> dict:
+async def stop_alice_run(
+    run_id: int,
+    tab_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+) -> dict:
     _get_run_or_404(session, run_id)
-    stopped = await alice_tasks.stop(run_id, run_type="api")
+    stopped = await alice_tasks.stop(run_id, run_type="api", tab_id=tab_id)
     return {"ok": True, "stopped": stopped}
 
 
@@ -255,16 +262,22 @@ async def steer_alice_goal(
     session: Session = Depends(get_session),
 ) -> dict:
     _get_run_or_404(session, run_id)
-    accepted = await alice_tasks.steer_goal(run_id, req.message, run_type="api")
+    accepted = await alice_tasks.steer_goal(
+        run_id, req.message, run_type="api", tab_id=req.tab_id
+    )
     if not accepted:
         raise HTTPException(status_code=409, detail="No active ALICE goal")
     return {"ok": True}
 
 
 @router.get("/{run_id}/alice/status")
-def alice_status(run_id: int, session: Session = Depends(get_session)) -> dict:
+def alice_status(
+    run_id: int,
+    tab_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+) -> dict:
     _get_run_or_404(session, run_id)
-    return alice_tasks.status(run_id, run_type="api")
+    return alice_tasks.status(run_id, run_type="api", tab_id=tab_id)
 
 
 # ── Events alias ───────────────────────────────────────────────────────────────
@@ -520,6 +533,7 @@ def delete_api_finding(
     finding = session.get(ScanFinding, finding_id)
     if finding is None or finding.api_test_run_id != run_id:
         raise HTTPException(status_code=404, detail="Finding not found")
+    detach_finding_dependents(session, [finding_id])
     session.delete(finding)
     session.commit()
 
@@ -527,13 +541,20 @@ def delete_api_finding(
 @router.delete("/{run_id}/findings", status_code=204)
 def clear_api_findings(
     run_id: int,
+    title: str | None = Query(
+        default=None,
+        description="Delete all findings with this title. Omit to clear ALL findings.",
+    ),
     session: Session = Depends(get_session),
 ) -> None:
-    """Delete all findings for this API test run."""
+    """Delete findings for this API test run, or only those with *title*."""
     _get_run_or_404(session, run_id)
-    for f in session.exec(
-        select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
-    ).all():
+    stmt = select(ScanFinding).where(ScanFinding.api_test_run_id == run_id)
+    if title is not None:
+        stmt = stmt.where(ScanFinding.title == title)
+    findings = session.exec(stmt).all()
+    detach_finding_dependents(session, [f.id for f in findings if f.id is not None])
+    for f in findings:
         session.delete(f)
     session.commit()
 
@@ -629,6 +650,17 @@ def get_api_traffic_count(
     from aespa.services import traffic as traffic_svc
 
     return {"count": traffic_svc.count_traffic(0, api_run_id=run_id)}
+
+
+@router.delete("/{run_id}/traffic", status_code=204)
+def clear_api_traffic(
+    run_id: int,
+    session: Session = Depends(get_session),
+) -> None:
+    _get_run_or_404(session, run_id)
+    from aespa.services import traffic as traffic_svc
+
+    traffic_svc.clear_traffic(0, api_run_id=run_id)
 
 
 @router.get("/{run_id}/code-executions")
@@ -826,7 +858,7 @@ def update_api_scanner_session(
     session.add(record)
     session.commit()
     session.refresh(record)
-    return ScannerSessionOut.model_validate(record)
+    return _scanner_session_out(record)
 
 
 @router.get("/{run_id}/token-usage")

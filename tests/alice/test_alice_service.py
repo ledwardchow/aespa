@@ -15,7 +15,66 @@ from aespa.main import create_app
 from aespa.models import CrawledPage, LLMConfig, Site
 from aespa.models import TestRun as RunModel
 from aespa.services import alice_tasks as at
-from aespa.services.alice import run_alice_turn, run_alice_turn_stream
+from aespa.services.alice import (
+    _bounded_goal_evidence,
+    _bounded_goal_proposal,
+    _redact_goal_evidence_text,
+    run_alice_turn,
+    run_alice_turn_stream,
+)
+from tests.auth import authenticate_client
+
+
+def test_goal_verifier_payload_keeps_newest_evidence_with_omission_counts():
+    evidence = [
+        {
+            "step": index,
+            "tool": "http_request",
+            "input": {"body": "x" * 10_000},
+            "result": "result-" + ("y" * 10_000),
+        }
+        for index in range(40)
+    ]
+    bounded = _bounded_goal_evidence(evidence)
+    proposal = _bounded_goal_proposal(
+        {
+            "status": "completed",
+            "summary": "s" * 5_000,
+            "completed_criteria": ["criterion"] * 30,
+            "metadata": {
+                "nested": {"payload": "z" * 5_000},
+                "array": [{"value": "q" * 5_000} for _ in range(30)],
+            },
+        }
+    )
+
+    assert bounded["entries"][0]["step"] == 10
+    assert bounded["entries"][-1]["step"] == 39
+    assert bounded["omitted_entries"] == 10
+    assert bounded["omitted_chars"] > 0
+    assert proposal["completed_criteria_omitted"] == 10
+    assert proposal["summary_omitted_chars"] == 3_000
+    assert proposal["metadata"]["nested"]["payload_omitted_chars"] == 4_600
+    assert proposal["metadata"]["array_omitted_items"] == 10
+
+
+def test_goal_evidence_redacts_quoted_authorization_bearer():
+    redacted = _redact_goal_evidence_text(
+        '{"Authorization": "Bearer quoted-token", "note": "ok"}'
+    )
+
+    assert "quoted-token" not in redacted
+    assert "[REDACTED_BEARER]" in redacted
+
+
+def test_goal_evidence_redacts_plain_and_quoted_authorization_basic():
+    redacted = _redact_goal_evidence_text(
+        'Authorization: Basic plain-secret\n{"Authorization": "Basic quoted-secret"}'
+    )
+
+    assert "plain-secret" not in redacted
+    assert "quoted-secret" not in redacted
+    assert redacted.count("[REDACTED_BASIC]") == 2
 
 
 @pytest.fixture(name="test_data")
@@ -126,7 +185,11 @@ def test_alice_prompt_explains_aespa_operational_questions():
 
 
 def test_alice_operational_question_tool_gate_preserves_explicit_testing():
-    from aespa.services.alice import _classify_alice_intent
+    from aespa.services.alice import (
+        _classify_alice_intent,
+        _finding_management_tools,
+        _get_alice_tools,
+    )
 
     assert _classify_alice_intent("What is the progress of the crawl?") == "operational"
     assert (
@@ -135,6 +198,133 @@ def test_alice_operational_question_tool_gate_preserves_explicit_testing():
     assert _classify_alice_intent("Test the crawl for XSS") == "testing"
     assert _classify_alice_intent("Probe the API for IDOR") == "testing"
     assert _classify_alice_intent("Re-run validation for all findings") == "testing"
+    assert (
+        _classify_alice_intent(
+            'consolidate all of the "cleartext HTTP" findings into one'
+        )
+        == "finding_management"
+    )
+    assert _classify_alice_intent("rewrite finding JUQE-002") == "finding_management"
+    assert _classify_alice_intent("delete duplicate findings") == "finding_management"
+
+    management_names = {
+        tool["name"] for tool in _finding_management_tools(_get_alice_tools())
+    }
+    assert management_names == {
+        "context_tool",
+        "update_finding",
+        "consolidate_findings",
+        "remove_finding",
+        "done",
+    }
+
+
+@pytest.mark.anyio
+async def test_alice_consolidates_findings_transactionally(db_session, test_data):
+    from aespa.models import PageOwaspTest, ScanFinding
+    from aespa.services.alice import _execute_alice_tool
+
+    run = test_data["run"]
+    page = CrawledPage(
+        test_run_id=run.id,
+        url="http://target.local/account",
+        status="crawled",
+    )
+    keeper = ScanFinding(
+        test_run_id=run.id,
+        public_reference="TEST-001",
+        owasp_category="A02",
+        severity="high",
+        title="First cleartext finding",
+        description="First description",
+        affected_url="http://target.local/account",
+        evidence="first evidence",
+        validation_status="confirmed",
+    )
+    duplicate = ScanFinding(
+        test_run_id=run.id,
+        public_reference="TEST-002",
+        owasp_category="A02",
+        severity="medium",
+        title="Second cleartext finding",
+        description="Second description",
+        affected_url="http://target.local/login",
+        evidence="second evidence",
+        validation_status="confirmed",
+    )
+    db_session.add_all([page, keeper, duplicate])
+    db_session.commit()
+    db_session.refresh(page)
+    db_session.refresh(keeper)
+    db_session.refresh(duplicate)
+    cell = PageOwaspTest(
+        test_run_id=run.id,
+        page_id=page.id,
+        owasp_category="A02",
+        status="finding",
+        finding_ids_json=json.dumps([keeper.id, duplicate.id]),
+        test_classes_json=json.dumps(
+            {"transport": {"finding_ids": [keeper.id, duplicate.id]}}
+        ),
+    )
+    db_session.add(cell)
+    db_session.commit()
+    keeper_id = keeper.id
+    duplicate_id = duplicate.id
+
+    result = json.loads(
+        await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="consolidate_findings",
+            tool_input={
+                "keep_finding_reference": "TEST-001",
+                "remove_finding_references": ["TEST-002"],
+                "title": "Cleartext HTTP exposes sensitive traffic",
+                "description": "The application serves sensitive routes over HTTP.",
+                "affected_url": "http://target.local/",
+                "evidence": "Affected routes include /account and /login.",
+                "recommendation": "Require HTTPS across the application.",
+            },
+            step=1,
+        )
+    )
+
+    db_session.expire_all()
+    saved = db_session.get(ScanFinding, keeper_id)
+    saved_cell = db_session.get(PageOwaspTest, cell.id)
+    assert result["ok"] is True
+    assert result["removed_finding_references"] == ["TEST-002"]
+    assert saved.title == "Cleartext HTTP exposes sensitive traffic"
+    assert saved.validation_status == "confirmed"
+    assert db_session.get(ScanFinding, duplicate_id) is None
+    assert json.loads(saved_cell.finding_ids_json) == [keeper_id]
+    assert json.loads(saved_cell.test_classes_json)["transport"]["finding_ids"] == [
+        keeper_id
+    ]
+    merged = json.loads(saved.merged_instances)
+    assert merged[0]["finding_reference"] == "TEST-002"
+
+    update_result = json.loads(
+        await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="update_finding",
+            tool_input={
+                "finding_reference": "TEST-001",
+                "impact": "Credentials and account data may be intercepted.",
+            },
+            step=2,
+        )
+    )
+    db_session.expire_all()
+    assert update_result["ok"] is True
+    assert db_session.get(ScanFinding, keeper_id).impact.startswith("Credentials")
+    assert db_session.get(ScanFinding, keeper_id).validation_status == "confirmed"
 
 
 def test_goal_mode_done_schema_requires_completion_state():
@@ -230,8 +420,16 @@ async def test_goal_mode_rejects_partial_done_then_accepts_verified_completion(
     lines = []
     with (
         patch("aespa.services.llm._call_with_tools", side_effect=mock_call),
-        patch("aespa.services.alice._execute_alice_tool", new=AsyncMock(return_value="site map evidence")),
-        patch("aespa.services.llm.plain_completion", new=AsyncMock(return_value='{"verdict":"completed","reason":"verified","missing_work":[]}')),
+        patch(
+            "aespa.services.alice._execute_alice_tool",
+            new=AsyncMock(return_value="site map evidence"),
+        ),
+        patch(
+            "aespa.services.llm.plain_completion",
+            new=AsyncMock(
+                return_value='{"verdict":"completed","reason":"verified","missing_work":[]}'
+            ),
+        ),
         patch("aespa.services.validator.is_validating", return_value=False),
     ):
         async for line in run_alice_turn_stream(
@@ -239,7 +437,9 @@ async def test_goal_mode_rejects_partial_done_then_accepts_verified_completion(
         ):
             lines.append(line)
 
-    events = [json.loads(line[6:].strip()) for line in lines if line.startswith("data: ")]
+    events = [
+        json.loads(line[6:].strip()) for line in lines if line.startswith("data: ")
+    ]
     assert calls == 3
     assert any(event["type"] == "goal_progress" for event in events)
     assert any(event["type"] == "goal_completed" for event in events)
@@ -302,16 +502,15 @@ async def test_active_goal_accepts_steering(test_data):
         goal_id=goal.id,
         goal=alice_goals.goal_out(goal),
     )
-    at._registry[("site", test_data["run"].id)] = task
+    at._registry[("site", test_data["run"].id, task.tab_id)] = task
     try:
         assert (
-            await at.steer_goal(test_data["run"].id, "Focus on the reset token")
-            is True
+            await at.steer_goal(test_data["run"].id, "Focus on the reset token") is True
         )
         assert task.steering.get_nowait() == "Focus on the reset token"
         assert task.events[-1]["type"] == "goal_steered"
     finally:
-        at._registry.pop(("site", test_data["run"].id), None)
+        at._registry.pop(("site", test_data["run"].id, task.tab_id), None)
 
 
 def test_alice_run_status_prefers_live_scan_state(db_session, test_data):
@@ -400,6 +599,7 @@ def test_client_fixture(db_engine):
     app.dependency_overrides[get_session] = _override_session
 
     with TestClient(app, raise_server_exceptions=True) as c:
+        authenticate_client(c, app)
         yield c
 
 
@@ -473,6 +673,44 @@ async def test_alice_turn_includes_live_status_for_operational_questions(
     initial_message = captured["initial_message"]
     assert "CURRENT AESPA RUN STATUS" in initial_message
     assert '"pages_discovered": 4' in initial_message
+
+
+@pytest.mark.anyio
+async def test_alice_finding_management_turn_uses_writable_saved_record_tools(
+    db_session, test_data
+):
+    run = test_data["run"]
+    captured = {}
+
+    async def mock_call_with_tools(*args, **kwargs):
+        captured["system"] = args[1]
+        captured["tools"] = {tool["name"] for tool in kwargs["tools"]}
+        blocks = [
+            {
+                "type": "tool_use",
+                "id": "done-1",
+                "name": "done",
+                "input": {"summary": "Finding consolidation is complete."},
+            }
+        ]
+        return blocks, "tool_use", blocks
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        response = await run_alice_turn(
+            run.id,
+            'consolidate all of the "cleartext HTTP" findings into one',
+            [],
+        )
+
+    assert response["status"] == "complete"
+    assert "managing findings already saved in AESPA" in captured["system"]
+    assert captured["tools"] == {
+        "context_tool",
+        "update_finding",
+        "consolidate_findings",
+        "remove_finding",
+        "done",
+    }
 
 
 @pytest.mark.anyio
@@ -552,6 +790,82 @@ async def test_run_alice_turn_stream_yields_correct_chunks(db_session, test_data
         assert any(mock_reply in c["delta"] for c in message_chunks)
         assert len(done_chunks) == 1
         assert mock_reply in done_chunks[0]["message"]
+
+
+@pytest.mark.anyio
+async def test_run_alice_turn_forwards_native_provider_deltas_once(
+    db_session, test_data
+):
+    run = test_data["run"]
+    from aespa.services import llm as llm_service
+
+    async def mock_call_with_tools(*args, **kwargs):
+        on_delta = llm_service._tool_text_delta_var.get()
+        assert on_delta is not None
+        await on_delta("Live ")
+        await asyncio.sleep(0)
+        await on_delta("reply")
+        text_block = {"type": "text", "text": "Live reply"}
+        return [text_block], "end_turn", [text_block]
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        chunks = []
+        async for line in run_alice_turn_stream(
+            run.id, "What is the current run status?", []
+        ):
+            if line.startswith("data: "):
+                chunks.append(json.loads(line[6:].strip()))
+
+    message = "".join(
+        chunk.get("delta", "")
+        for chunk in chunks
+        if chunk.get("type") == "message_chunk"
+    )
+    assert message == "Live reply"
+    assert [chunk["type"] for chunk in chunks].index("message_chunk") < [
+        chunk["type"] for chunk in chunks
+    ].index("done")
+    assert chunks[-1]["message"] == "Live reply"
+
+
+@pytest.mark.anyio
+async def test_run_alice_turn_retracts_streamed_text_when_tools_follow(
+    db_session, test_data
+):
+    run = test_data["run"]
+    from aespa.services import llm as llm_service
+
+    calls = 0
+
+    async def mock_call_with_tools(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            on_delta = llm_service._tool_text_delta_var.get()
+            assert on_delta is not None
+            await on_delta("Checking now.")
+            text = {"type": "text", "text": "Checking now."}
+            tool = {
+                "type": "tool_use",
+                "id": "done-1",
+                "name": "done",
+                "input": {"summary": "Finished"},
+            }
+            return [text, tool], "tool_use", [text, tool]
+        raise AssertionError("ALICE should stop after done")
+
+    with patch("aespa.services.llm._call_with_tools", side_effect=mock_call_with_tools):
+        chunks = []
+        async for line in run_alice_turn_stream(run.id, "Check the target", []):
+            if line.startswith("data: "):
+                chunks.append(json.loads(line[6:].strip()))
+
+    assert any(chunk.get("type") == "message_retract" for chunk in chunks)
+    assert "Checking now." in "".join(
+        chunk.get("delta", "")
+        for chunk in chunks
+        if chunk.get("type") == "thinking_chunk"
+    )
 
 
 @pytest.mark.anyio
@@ -722,6 +1036,7 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
     """Verify that calling write_finding via the agentic loop persists a finding."""
 
     from aespa.services.alice import _execute_alice_tool
+    from aespa.services.scanner import FindingWriteResult
 
     run = test_data["run"]
     llm_cfg = test_data["llm_cfg"]
@@ -747,7 +1062,7 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
             "aespa.services.validator.validate_finding_inline", new_callable=AsyncMock
         ) as mock_validate,
     ):
-        mock_persist.return_value = mock_finding
+        mock_persist.return_value = FindingWriteResult("saved", finding=mock_finding)
         result = await _execute_alice_tool(
             run_id=run.id,
             llm_cfg=llm_cfg,
@@ -764,6 +1079,53 @@ async def test_alice_write_finding_tool_persists(db_session, test_data):
     assert call_kwargs["raw"]["finding_source"] == "alice"
     assert call_kwargs["raw"]["title"] == "Default Admin Access Enabled"
     mock_validate.assert_called_once()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("write_result", "expected"),
+    [
+        ("duplicate", "Duplicate skipped"),
+        ("rejected", "Finding rejected: invalid object check"),
+    ],
+)
+async def test_alice_write_finding_reports_unsaved_result(
+    db_session, test_data, write_result, expected
+):
+    from aespa.services.alice import _execute_alice_tool
+    from aespa.services.scanner import FindingWriteResult
+
+    run = test_data["run"]
+    with (
+        patch(
+            "aespa.services.scanner._persist_dynamic_finding", new_callable=AsyncMock
+        ) as mock_persist,
+        patch(
+            "aespa.services.validator.validate_finding_inline", new_callable=AsyncMock
+        ) as mock_validate,
+    ):
+        mock_persist.return_value = FindingWriteResult(
+            write_result,
+            reason="invalid object check" if write_result == "rejected" else None,
+        )
+        result = await _execute_alice_tool(
+            run_id=run.id,
+            llm_cfg=test_data["llm_cfg"],
+            base_url="http://target.local",
+            site_id=test_data["site"].id,
+            tool_name="write_finding",
+            tool_input={
+                "title": "Access control finding",
+                "severity": "high",
+                "affected_url": "http://target.local/accounts/1",
+                "description": "Account data was accessible.",
+                "evidence": "HTTP 200 returned account data.",
+            },
+            step=1,
+        )
+
+    assert expected in result
+    mock_validate.assert_not_called()
 
 
 def _capturing_scanner_client(captured: dict):
@@ -1271,7 +1633,7 @@ def test_stream_events_replays_exactly_from_cursor_after_trim():
     for i in range(total):
         at._append(task, {"type": "x", "i": i})
     task.done = True
-    at._registry[("site", 42)] = task
+    at._registry[("site", 42, task.tab_id)] = task
     try:
         cursor = total - 5
 
@@ -1284,4 +1646,49 @@ def test_stream_events_replays_exactly_from_cursor_after_trim():
         got = [json.loads(line[6:]) for line in asyncio.run(_drain())]
         assert [e["i"] for e in got] == list(range(cursor, total))
     finally:
-        at._registry.pop(("site", 42), None)
+        at._registry.pop(("site", 42, task.tab_id), None)
+
+
+def test_stream_events_sends_snapshot_when_cursor_was_trimmed():
+    task = _alice_task(run_id=43)
+    for i in range(at.BUFFER_LIMIT + 1):
+        at._append(task, {"type": "message_chunk", "delta": str(i % 10)})
+    task.done = True
+    at._registry[("site", 43, task.tab_id)] = task
+    try:
+
+        async def _drain():
+            return [
+                line async for line in at.stream_events(43, cursor=0, run_type="site")
+            ]
+
+        got = [json.loads(line[6:]) for line in asyncio.run(_drain())]
+        assert len(got) == 1
+        assert got[0]["type"] == "state_snapshot"
+        assert got[0]["message"] == task.accumulated_message
+    finally:
+        at._registry.pop(("site", 43, task.tab_id), None)
+
+
+def test_stream_events_replays_done_after_snapshot_when_cursor_was_trimmed():
+    task = _alice_task(run_id=44)
+    for i in range(at.BUFFER_LIMIT + 1):
+        at._append(task, {"type": "message_chunk", "delta": str(i % 10)})
+    at._append(task, {"type": "done", "thought": "", "message": "final"})
+    task.done = True
+    at._registry[("site", 44, task.tab_id)] = task
+    try:
+
+        async def _drain():
+            return [
+                line async for line in at.stream_events(44, cursor=0, run_type="site")
+            ]
+
+        got = [json.loads(line[6:]) for line in asyncio.run(_drain())]
+        assert [event["type"] for event in got] == ["state_snapshot", "done"]
+        assert got[1]["message"] == "final"
+        assert at.status(44, "site", task.tab_id)["event_count"] == (
+            task.dropped + len(task.events)
+        )
+    finally:
+        at._registry.pop(("site", 44, task.tab_id), None)

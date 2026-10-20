@@ -1,4 +1,5 @@
 // Shared helpers/constants for the SiteDetail page and its tab/panel components.
+import { statusText } from "../ui/StatusBadge.jsx";
 
 export const SCOPE_IN_COLOR = "#3b82f6";
 export const SCOPE_OUT_COLOR = "#ef4444";
@@ -69,7 +70,7 @@ export function runWorkflowStatus(run, opts = {}) {
   if (run.status === "stopped")
     return {
       key: "neutral",
-      label: "crawl stopped",
+      label: "stopped",
     };
   if (thinkingStatus === "stopped")
     return {
@@ -79,12 +80,17 @@ export function runWorkflowStatus(run, opts = {}) {
   if (thinkingStatus === "complete")
     return {
       key: "ok",
-      label: "Dynamic Scan complete",
+      label: "Dynamic Scan completed",
+    };
+  if (run.status === "complete" && run.phase === "crawled")
+    return {
+      key: "ok",
+      label: "Crawled",
     };
   if (run.status === "complete")
     return {
       key: "ok",
-      label: "complete",
+      label: "completed",
     };
   return {
     key: "neutral",
@@ -93,7 +99,7 @@ export function runWorkflowStatus(run, opts = {}) {
 }
 export const workflowBadge = (run, opts = {}) => {
   const st = runWorkflowStatus(run, opts);
-  return <span className={"badge " + st.key}>{st.label}</span>;
+  return <span className={"badge " + st.key}>{statusText(st.label)}</span>;
 };
 
 // Human-readable labels for the raw `phase` / `terminal_reason` enums stored on

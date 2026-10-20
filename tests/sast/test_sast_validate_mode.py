@@ -245,10 +245,13 @@ def test_quick_resume_refreshes_leads_and_blocks_done(isolated_db_engine, monkey
         title="Lead added after checkpoint",
     )
     captured = {}
+    events = []
 
     async def fake_agentic_loop(_config, **kwargs):
         captured["system_message"] = kwargs["system_message"]
-        allowed, feedback = kwargs["done_check"]({}, 5)
+        allowed, feedback = kwargs["done_check"](
+            {"summary": "I think the scan is complete."}, 5
+        )
         assert allowed is False
         assert "still open" in feedback
 
@@ -258,7 +261,9 @@ def test_quick_resume_refreshes_leads_and_blocks_done(isolated_db_engine, monkey
             session.add(row)
             session.commit()
 
-        allowed, feedback = kwargs["done_check"]({}, 6)
+        allowed, feedback = kwargs["done_check"](
+            {"summary": "All imported leads are resolved."}, 6
+        )
         assert allowed is True
         return "done"
 
@@ -267,7 +272,8 @@ def test_quick_resume_refreshes_leads_and_blocks_done(isolated_db_engine, monkey
         fake_agentic_loop,
     )
     monkeypatch.setattr(
-        "aespa.services.scanner.events_svc.emit", lambda *args, **kwargs: None
+        "aespa.services.scanner.events_svc.emit",
+        lambda event_run_id, event: events.append((event_run_id, event)),
     )
 
     asyncio.run(
@@ -304,6 +310,21 @@ def test_quick_resume_refreshes_leads_and_blocks_done(isolated_db_engine, monkey
 
     assert "resumed Quick run" in captured["system_message"]
     assert "Lead added after checkpoint" in captured["system_message"]
+    done_events = [
+        event
+        for event_run_id, event in events
+        if event_run_id == run.id
+        and event.get("type") == "agent_status"
+        and event.get("current_task", "").endswith("Called done")
+    ]
+    assert [event["current_task"] for event in done_events] == [
+        "Step 5: Called done",
+        "Step 6: Called done",
+    ]
+    assert [event["outcome"] for event in done_events] == [
+        "I think the scan is complete.",
+        "All imported leads are resolved.",
+    ]
 
 
 def test_lead_detail_returns_full_owned_data_and_rejects_foreign_leads(
@@ -483,6 +504,8 @@ def test_sast_validate_prompt_and_tools_are_focused():
         assert "attack path" in prompt
         assert "configured" in prompt
         assert "incidental" in prompt
+        assert "baseline" in prompt
+        assert "binding is stale" in prompt
     assert "browser" in {
         tool["name"] for tool in get_sast_validate_tools(is_api_run=False)
     }
@@ -508,6 +531,15 @@ def test_sast_validate_prompt_and_tools_are_focused():
     )
     assert "store_as" in api_http_tool["input_schema"]["properties"]
     assert "store_as" in api_prompt
+    update_tool = next(
+        tool
+        for tool in get_sast_validate_tools(is_api_run=True)
+        if tool["name"] == "update_lead"
+    )
+    update_schema = update_tool["input_schema"]
+    assert "outcome_reason" in update_schema["properties"]
+    assert "baseline_evidence" in update_schema["properties"]
+    assert "mutated_evidence" in update_schema["properties"]
     from aespa.services.prompts.test_lead import _API_THINKING_AGENT_SYSTEM
 
     assert "lead_detail" in _API_THINKING_AGENT_SYSTEM
@@ -556,6 +588,7 @@ def test_api_login_response_session_is_reused_by_stable_label(
             {
                 "method": "POST",
                 "url": "https://api.local/api/auth",
+                "request_role": "setup",
                 "body": {"email": "user@example.com", "password": "correct"},
                 "use_session": "anonymous",
                 "store_as": "configured_primary",
@@ -571,6 +604,7 @@ def test_api_login_response_session_is_reused_by_stable_label(
             {
                 "method": "GET",
                 "url": "https://api.local/api/private",
+                "request_role": "setup",
                 "use_session": "configured_primary",
                 "owasp_category": "API2",
             },
@@ -583,6 +617,7 @@ def test_api_login_response_session_is_reused_by_stable_label(
             {
                 "method": "POST",
                 "url": "https://api.local/api/cookie-auth",
+                "request_role": "setup",
                 "body": {"username": "cookie-user", "password": "correct"},
                 "use_session": "anonymous",
                 "store_as": "cookie_primary",
@@ -598,6 +633,7 @@ def test_api_login_response_session_is_reused_by_stable_label(
             {
                 "method": "GET",
                 "url": "https://api.local/api/cookie-private",
+                "request_role": "setup",
                 "use_session": "cookie_primary",
                 "owasp_category": "API2",
             },

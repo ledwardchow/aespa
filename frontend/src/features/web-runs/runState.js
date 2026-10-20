@@ -1,8 +1,15 @@
 export const isCrawlerAgentActive = (agent, crawlStopping = false) =>
   crawlStopping || agent?.status === "active";
 
+export const hasResumableExperimentalScan = (run) =>
+  ["deep", "team"].includes(run?.coverage_mode) && ["paused", "stopped"].includes(run?.status);
+
+export const canResumeSelectedScanMode = (hasCheckpoint, selectedMode, savedMode) =>
+  hasCheckpoint && selectedMode === savedMode;
+
 export const RUN_PRIMARY_ACTION = Object.freeze({
   START_CRAWL: "start_crawl",
+  START_CRAWL_THEN_PENTEST: "start_crawl_then_pentest",
   START_PENTEST: "start_pentest",
   RESUME_PENTEST: "resume_pentest",
 });
@@ -42,3 +49,14 @@ export const runStatusFromThinkingStatus = (thinkingStatus, currentStatus) => {
   }
   return currentStatus;
 };
+
+export const settleAgentsAfterScan = (agents, scanStatus, validationRunning) =>
+  agents.map((agent) =>
+    agent.status === "active" &&
+    agent.id !== "crawler" &&
+    agent.id !== "alice" &&
+    (validationRunning === false ||
+      (!agent.id?.startsWith("validator-") && agent.role !== "Validator"))
+      ? { ...agent, status: scanStatus === "paused" ? "paused" : "idle" }
+      : agent,
+  );

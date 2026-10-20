@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 
@@ -114,6 +115,7 @@ def upgrade_pre_alembic_schema(engine: Engine) -> None:
         engine, "llm_config", "force_tool_choice", "INTEGER NOT NULL DEFAULT 0"
     )
     _ensure_column(engine, "llm_config", "project_id", "TEXT")
+    _ensure_column(engine, "llm_config", "location", "TEXT")
     _ensure_column(engine, "test_run", "current_url", "TEXT")
     _ensure_column(engine, "test_run", "per_user_progress", "TEXT")
     _ensure_column(
@@ -275,6 +277,7 @@ def upgrade_pre_alembic_schema(engine: Engine) -> None:
     _ensure_column(engine, "llm_provider_config", "max_tpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "max_rpm", "INTEGER")
     _ensure_column(engine, "llm_provider_config", "project_id", "TEXT")
+    _ensure_column(engine, "llm_provider_config", "location", "TEXT")
     _ensure_column(engine, "llm_provider_config", "username", "TEXT")
     _ensure_column(engine, "llm_config", "username", "TEXT")
     # agent_log / scan_log retain a shared test_run_id column and a run kind so
@@ -340,19 +343,7 @@ def upgrade_pre_alembic_schema(engine: Engine) -> None:
         "batch_max_concurrent",
         "INTEGER NOT NULL DEFAULT 4",
     )
-    with engine.connect() as conn:
-        conn.execute(
-            __import__("sqlalchemy").text("""
-            CREATE TABLE IF NOT EXISTS upstream_proxy_config (
-                id INTEGER PRIMARY KEY,
-                proxy_url TEXT,
-                proxy_scanner INTEGER NOT NULL DEFAULT 0,
-                proxy_llm INTEGER NOT NULL DEFAULT 0,
-                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        )
-        conn.commit()
+    _ensure_upstream_proxy_config(engine)
     with engine.connect() as conn:
         conn.execute(
             __import__("sqlalchemy").text("""
@@ -372,54 +363,6 @@ def upgrade_pre_alembic_schema(engine: Engine) -> None:
         """)
         )
         conn.commit()
-    with engine.connect() as conn:
-        conn.execute(
-            __import__("sqlalchemy").text("""
-            CREATE TABLE IF NOT EXISTS burp_rest_api_config (
-                id INTEGER PRIMARY KEY,
-                enabled INTEGER NOT NULL DEFAULT 0,
-                api_url TEXT NOT NULL DEFAULT 'http://127.0.0.1:1337',
-                api_key TEXT,
-                scan_configuration_name TEXT DEFAULT 'Audit checks - all except time-based detection methods',
-                scan_sqli INTEGER NOT NULL DEFAULT 1,
-                scan_xss INTEGER NOT NULL DEFAULT 1,
-                scan_command_injection INTEGER NOT NULL DEFAULT 1,
-                scan_path_traversal INTEGER NOT NULL DEFAULT 1,
-                scan_ssrf INTEGER NOT NULL DEFAULT 1,
-                scan_xxe INTEGER NOT NULL DEFAULT 1,
-                scan_ssti INTEGER NOT NULL DEFAULT 1,
-                updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        )
-        conn.commit()
-    _ensure_column(
-        engine,
-        "burp_rest_api_config",
-        "scan_configuration_name",
-        "TEXT DEFAULT 'Audit checks - all except time-based detection methods'",
-    )
-    _ensure_column(
-        engine,
-        "burp_rest_api_config",
-        "scan_command_injection",
-        "INTEGER NOT NULL DEFAULT 1",
-    )
-    _ensure_column(
-        engine,
-        "burp_rest_api_config",
-        "scan_path_traversal",
-        "INTEGER NOT NULL DEFAULT 1",
-    )
-    _ensure_column(
-        engine, "burp_rest_api_config", "scan_ssrf", "INTEGER NOT NULL DEFAULT 1"
-    )
-    _ensure_column(
-        engine, "burp_rest_api_config", "scan_xxe", "INTEGER NOT NULL DEFAULT 1"
-    )
-    _ensure_column(
-        engine, "burp_rest_api_config", "scan_ssti", "INTEGER NOT NULL DEFAULT 1"
-    )
     # api_collection — created as a full table (not an ALTER)
     with engine.connect() as conn:
         conn.execute(
@@ -772,12 +715,6 @@ def upgrade_pre_alembic_schema(engine: Engine) -> None:
         """)
         )
         conn.commit()
-    _ensure_column(
-        engine,
-        "specialist_agent_config",
-        "trigger_specialist_on_burp",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
     _ensure_column(
         engine,
         "adversarial_validator_config",
@@ -1291,6 +1228,41 @@ def _ensure_column(engine: Engine, table: str, column: str, col_def: str) -> Non
             conn.execute(
                 __import__("sqlalchemy").text(
                     f"ALTER TABLE {table} ADD COLUMN {column} {col_def}"
+                )
+            )
+            conn.commit()
+
+
+def _ensure_upstream_proxy_config(engine: Engine) -> None:
+    """Create or upgrade the legacy singleton to use per-traffic proxy URLs."""
+    with engine.connect() as conn:
+        conn.execute(
+            text("""
+                CREATE TABLE IF NOT EXISTS upstream_proxy_config (
+                    id INTEGER PRIMARY KEY,
+                    proxy_url TEXT,
+                    scanner_proxy_url TEXT,
+                    llm_proxy_url TEXT,
+                    proxy_scanner INTEGER NOT NULL DEFAULT 0,
+                    proxy_llm INTEGER NOT NULL DEFAULT 0,
+                    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+        )
+        conn.commit()
+
+    _ensure_column(engine, "upstream_proxy_config", "scanner_proxy_url", "TEXT")
+    _ensure_column(engine, "upstream_proxy_config", "llm_proxy_url", "TEXT")
+    columns = {
+        item["name"] for item in inspect(engine).get_columns("upstream_proxy_config")
+    }
+    if "proxy_url" in columns:
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "UPDATE upstream_proxy_config "
+                    "SET scanner_proxy_url = COALESCE(scanner_proxy_url, proxy_url), "
+                    "llm_proxy_url = COALESCE(llm_proxy_url, proxy_url)"
                 )
             )
             conn.commit()

@@ -19,10 +19,11 @@ import json
 import logging
 import re
 import secrets
+import ssl
 import time
 from contextvars import ContextVar as _ContextVar
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, NamedTuple, Optional
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
@@ -37,16 +38,20 @@ from aespa.db import get_engine
 from aespa.models import (
     CrawledPage,
     Credential,
+    DiscoveredTarget,
     PageCredentialView,
     ScanFinding,
+    ScanLog,
+    ScanObligation,
     Site,
+    SpecialistHandoff,
     TargetIntelItem,
     TestRun,
     TrafficEntry,
 )
-from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import checkpoint as checkpoint_svc
 from aespa.services import events as events_svc
+from aespa.services import external_scans, js_libraries, retire_repository
 from aespa.services import llm as llm_svc
 from aespa.services import recon_summary as recon_summary_svc
 from aespa.services import scanner_sessions as session_svc
@@ -56,6 +61,7 @@ from aespa.services.execution_monitor import (
     InterventionState,
     intentional_repetition_contract,
 )
+from aespa.services.js_xss_sinks import find_js_xss_sinks
 from aespa.services.prompts.specialist import (
     SPECIALIST_SYSTEM_PROMPT as _SPECIALIST_SYSTEM_PROMPT,
 )
@@ -75,16 +81,30 @@ from aespa.services.scan_completion import ScanCompletionPolicy
 from aespa.services.scope import check_scope, register_scope_host_for_run
 from aespa.services.settings import (
     get_browser_debug_config,
-    get_burp_rest_api_config_model,
     get_global_http_header_config,
     get_llm_config_for_role,
-    get_reporting_debug_config,
     get_run_scanner_policy,
+    get_scanner_policy,
     get_specialist_agent_config,
     get_upstream_proxy_config,
 )
+from aespa.services.tls import httpx_verify
 
 log = logging.getLogger("aespa.scanner")
+
+
+def is_scan_mode_locked(session: Session, run: TestRun) -> bool:
+    """Return whether this run has started a dynamic scan at least once."""
+    if run.execution_snapshot_json:
+        return True
+    scan_started = session.exec(
+        select(ScanLog.id)
+        .where(ScanLog.test_run_id == run.id)
+        .where(ScanLog.run_kind == "web")
+        .where(ScanLog.phase == "scan_started")
+        .limit(1)
+    ).first()
+    return scan_started is not None
 
 
 def _exercised_coverage_progress(
@@ -157,13 +177,13 @@ def _persist_execution_snapshot(
             "schema_version": 1,
             "captured_at": datetime.now(timezone.utc).isoformat(),
             "aespa_version": version,
-                "model": {
-                    "provider": getattr(llm_cfg, "provider", None),
-                    "model": getattr(llm_cfg, "model", None),
-                    "max_tokens": getattr(llm_cfg, "max_tokens", None),
-                    "max_context_tokens": getattr(llm_cfg, "max_context_tokens", None),
-                    "context_limit_source": getattr(llm_cfg, "context_limit_source", None),
-                    "temperature": getattr(llm_cfg, "temperature", None),
+            "model": {
+                "provider": getattr(llm_cfg, "provider", None),
+                "model": getattr(llm_cfg, "model", None),
+                "max_tokens": getattr(llm_cfg, "max_tokens", None),
+                "max_context_tokens": getattr(llm_cfg, "max_context_tokens", None),
+                "context_limit_source": getattr(llm_cfg, "context_limit_source", None),
+                "temperature": getattr(llm_cfg, "temperature", None),
                 "use_vision": getattr(llm_cfg, "use_vision", False),
                 "force_tool_choice": getattr(llm_cfg, "force_tool_choice", False),
             },
@@ -187,13 +207,20 @@ def _persist_execution_snapshot(
 _scanner_proxy_var: _ContextVar[str | None] = _ContextVar(
     "_scanner_proxy", default=None
 )
+_scanner_ca_bundle_var: _ContextVar[str | None] = _ContextVar(
+    "_scanner_ca_bundle", default=None
+)
 _scanner_global_header_var: _ContextVar[dict[str, str]] = _ContextVar(
     "_scanner_global_header", default={}
 )
 
 
+def _scanner_tls_verify() -> ssl.SSLContext | bool:
+    return httpx_verify(_scanner_ca_bundle_var.get(), False)
+
+
 def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
-    kwargs.setdefault("verify", False)
+    kwargs.setdefault("verify", _scanner_tls_verify())
     if proxy := _scanner_proxy_var.get():
         kwargs["proxy"] = proxy
     if global_header := _scanner_global_header_var.get():
@@ -213,7 +240,7 @@ def _make_scanner_client(**kwargs) -> httpx.AsyncClient:
 
 @contextlib.contextmanager
 def _client_session_cookies(hx: httpx.AsyncClient, selected_session: dict | None):
-    """Make the shared client's cookie jar reflect *exactly* the selected session.
+    """Make the shared client's auth state reflect *exactly* the selected session.
 
     The agentic loop reuses one httpx client whose jar holds the primary
     authenticated session. httpx MERGES per-request ``cookies=`` into that jar
@@ -222,21 +249,25 @@ def _client_session_cookies(hx: httpx.AsyncClient, selected_session: dict | None
     an intended unauthenticated probe into an authenticated one (false-positive
     "unauthenticated access" findings).
 
-    When an explicit session is selected, swap the jar to that session's cookies
-    (anonymous → none) for the duration of the request, then restore the prior
-    jar so other requests/handlers still default to the primary session (which
-    re-auth keeps fresh in-place). When no session is selected, leave the jar
-    untouched.
+    HTTPX merges both per-request cookies and headers with the client's defaults.
+    Merely omitting Authorization from a per-request header mapping therefore does
+    not remove the primary credential.  When an explicit session is selected,
+    temporarily clear both client-level stores.  Callers pass the selected
+    session's sanitized headers on the request itself and this context installs
+    exactly its cookies.  The primary defaults are restored afterwards.
     """
     if selected_session is None:
         yield
         return
-    saved = hx.cookies
+    saved_cookies = hx.cookies
+    saved_headers = hx.headers
     hx.cookies = httpx.Cookies(selected_session.get("cookies") or {})
+    hx.headers = httpx.Headers()
     try:
         yield
     finally:
-        hx.cookies = saved
+        hx.cookies = saved_cookies
+        hx.headers = saved_headers
 
 
 def _cookies_sent(
@@ -855,7 +886,6 @@ _thinking_tasks: dict[int, asyncio.Task] = {}
 _thinking_scan_status: dict[
     int, str
 ] = {}  # run_id → idle|running|complete|stopped|failed
-_burp_active_scan_targets: set[tuple[int, str, str]] = set()
 _persist_write_locks: dict[int, asyncio.Lock] = {}
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -1328,11 +1358,15 @@ def _infer_step_note(tool_name: str, tool_input: dict, step: int) -> str:
     """
     explicit = tool_input.get("note")
     if explicit:
-        return str(explicit)
+        return _compact_log_value(explicit, 240)
+    for key in ("hypothesis", "payload_purpose", "purpose"):
+        description = _compact_log_value(tool_input.get(key), 240)
+        if description:
+            return description
     if tool_name == "http_request":
         method = (tool_input.get("method") or "HTTP").upper()
         url = tool_input.get("url") or ""
-        return f"{method} {url}" if url else f"{method} request"
+        return f"Send {method} request to {url}" if url else f"Send {method} request"
     if tool_name == "context_tool":
         inner = tool_input.get("tool") or "context lookup"
         args = tool_input.get("args") or {}
@@ -1342,7 +1376,7 @@ def _infer_step_note(tool_name: str, tool_input: dict, step: int) -> str:
         if inner == "remove_finding":
             fid = args.get("finding_id") or ""
             return f"Remove finding {fid}"
-        return f"Query: {inner}"
+        return f"Look up {str(inner).replace('_', ' ')}"
     if tool_name == "write_finding":
         title = tool_input.get("title") or "untitled"
         return f"Write finding: {title}"
@@ -1367,8 +1401,8 @@ def _infer_step_note(tool_name: str, tool_input: dict, step: int) -> str:
     if tool_name == "browser":
         action = tool_input.get("action") or "navigate"
         url = tool_input.get("url") or ""
-        return f"Browser {action}: {url}" if url else f"Browser {action}"
-    return tool_name
+        return f"Use browser to {action}: {url}" if url else f"Use browser to {action}"
+    return str(tool_name).replace("_", " ").capitalize()
 
 
 def _context_budget_reason(action: dict[str, Any]) -> str:
@@ -2060,6 +2094,33 @@ def _build_thinking_context_from_recon_summary(
             ),
         ]
 
+        route_groups = [
+            group
+            for group in summary.get("route_groups") or []
+            if isinstance(group, dict) and group.get("route_pattern")
+        ]
+        if route_groups:
+            sections.append(
+                "Grouped pages (the crawl visited examples, not every link):\n"
+                + "\n".join(
+                    f"  {group['route_pattern']}: {group.get('links_seen', 0)} links seen, "
+                    f"{group.get('pages_sampled', 0)} example pages visited"
+                    + (
+                        f" ({group['examples_different']} looked different)"
+                        if group.get("examples_different")
+                        else ""
+                    )
+                    for group in route_groups[:10]
+                )
+                + "\nThese groups describe crawl sampling for indexing, not scan scope. "
+                "Use the examples to start, then test other in-scope URLs and object IDs "
+                "when a security question needs them, including unsampled records for "
+                "access control, IDOR, ownership, roles, and business logic. Similar page "
+                "layout does not establish shared authorization or coverage. Base findings "
+                "and coverage claims on concrete tests and evidence. You do not need to "
+                "index or exhaustively test every linked page."
+            )
+
         gaps = [
             item for item in coverage.get("by_category") or [] if item.get("remaining")
         ]
@@ -2132,12 +2193,41 @@ def _build_thinking_context_from_recon_summary(
 
 def _build_target_intelligence_context(run_id: int, limit: int = 80) -> str:
     with Session(get_engine()) as s:
-        items = s.exec(
+        all_xss_items = list(
+            s.exec(
+                select(TargetIntelItem)
+                .where(TargetIntelItem.test_run_id == run_id)
+                .where(TargetIntelItem.kind == "xss_sink")
+                .order_by(
+                    TargetIntelItem.confidence.desc(),
+                    TargetIntelItem.discovered_at.desc(),
+                )
+                .limit(300)
+            ).all()
+        )
+        xss_items = []
+        by_script: dict[str, list[TargetIntelItem]] = {}
+        for item in all_xss_items:
+            by_script.setdefault(item.value, []).append(item)
+        # First show one lead from each script, then fill from the highest
+        # confidence leads. A long script cannot crowd out every other page.
+        for group in sorted(by_script.values(), key=lambda rows: -rows[0].confidence):
+            if len(xss_items) >= min(24, limit):
+                break
+            xss_items.append(group.pop(0))
+        remaining = sorted(
+            (item for group in by_script.values() for item in group),
+            key=lambda item: -item.confidence,
+        )
+        xss_items.extend(remaining[: max(0, min(24, limit) - len(xss_items))])
+        other_items = s.exec(
             select(TargetIntelItem)
             .where(TargetIntelItem.test_run_id == run_id)
+            .where(TargetIntelItem.kind != "xss_sink")
             .order_by(TargetIntelItem.kind, TargetIntelItem.discovered_at.desc())
-            .limit(limit)
+            .limit(max(0, limit - len(xss_items)))
         ).all()
+        items = [*xss_items, *other_items]
     if not items:
         return ""
 
@@ -2149,6 +2239,17 @@ def _build_target_intelligence_context(run_id: int, limit: int = 80) -> str:
         "Counts in sampled inventory: "
         + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())),
     ]
+    if xss_items:
+        lines.append(
+            "XSS sink leads come from JavaScript source. Trace each field to an input, "
+            "write a harmless canary, and check the rendering page in a browser. "
+            "A source match alone is not a finding."
+        )
+        if len(all_xss_items) > len(xss_items):
+            lines.append(
+                f"Showing {len(xss_items)} of {len(all_xss_items)} XSS sink leads; "
+                "use target_inventory with kind=xss_sink for the rest."
+            )
     for item in items[:limit]:
         method = f" {item.method}" if item.method else ""
         url = f" @ {item.url}" if item.url else ""
@@ -2159,6 +2260,12 @@ def _build_target_intelligence_context(run_id: int, limit: int = 80) -> str:
         lines.append(
             f"  - {item.kind}{method} {item.key}{value}{url}; source={item.source}{evidence}"
         )
+        if item.kind == "xss_sink":
+            pages = _loads_json_dict(item.item_metadata).get("observed_pages") or []
+            if pages:
+                lines.append(
+                    "    Seen on: " + ", ".join(str(page) for page in pages[:3])
+                )
     return "\n".join(lines)
 
 
@@ -2777,6 +2884,25 @@ def _run_thinking_context_tool(
             return {"tool": tool_name, "error": "run_id unavailable"}
         return _thinking_tool_target_inventory(run_id, args, limit, search_tokens)
 
+    if tool_name == "discovered_targets":
+        if run_id is None or api_run_id is not None:
+            return {"tool": tool_name, "error": "web run unavailable"}
+        from aespa.services.target_catalog import list_targets
+
+        try:
+            return {
+                "tool": tool_name,
+                **list_targets(
+                    run_id,
+                    route_pattern_filter=args.get("route_pattern"),
+                    search=args.get("search"),
+                    cursor=args.get("cursor"),
+                    limit=limit,
+                ),
+            }
+        except ValueError as exc:
+            return {"tool": tool_name, "error": str(exc)}
+
     if tool_name == "traffic_search":
         if run_id is None:
             return {"tool": tool_name, "error": "run_id unavailable"}
@@ -2822,6 +2948,30 @@ def _run_thinking_context_tool(
 
         return get_web_coverage_gaps(run_id, limit=limit)
 
+    if tool_name in {"workflow_list", "workflow_detail"}:
+        if run_id is None or api_run_id is not None:
+            return {"tool": tool_name, "error": "web run unavailable"}
+        from aespa.services.workflow_workprogram import list_workflow_tests
+
+        data = list_workflow_tests(run_id)
+        if tool_name == "workflow_list":
+            return {"tool": tool_name, **data}
+        try:
+            item_id = int(args.get("item_id"))
+        except (TypeError, ValueError):
+            return {"tool": tool_name, "error": "item_id is required"}
+        item = next((item for item in data["items"] if item["id"] == item_id), None)
+        if item is None:
+            return {"tool": tool_name, "error": "workflow test not found"}
+        with Session(get_engine()) as s:
+            page = s.get(CrawledPage, item["reached_page_id"])
+            if page is not None and page.test_run_id == run_id:
+                item = {
+                    **item,
+                    "replay_steps": _loads_json_dict(page.replay_steps_json),
+                }
+        return {"tool": tool_name, "item": item}
+
     return {
         "tool": tool_name,
         "error": "unknown tool",
@@ -2841,6 +2991,8 @@ def _run_thinking_context_tool(
             "auth_matrix",
             "extract_entities",
             "coverage_gaps",
+            "workflow_list",
+            "workflow_detail",
         ],
     }
 
@@ -2912,6 +3064,7 @@ def _thinking_tool_traffic_search(
     api_run_id: int | None = None,
 ) -> dict[str, Any]:
     method = str(args.get("method") or "").upper()
+    traffic_id = args.get("traffic_id")
     page_id = args.get("page_id")
     session_label = str(args.get("session_label") or "").strip()
     status = args.get("status")
@@ -2927,6 +3080,11 @@ def _thinking_tool_traffic_search(
             query = query.where(TrafficEntry.test_run_id == run_id)
         if method:
             query = query.where(TrafficEntry.method == method)
+        if traffic_id is not None:
+            try:
+                query = query.where(TrafficEntry.id == int(traffic_id))
+            except (TypeError, ValueError):
+                return {"tool": "traffic_search", "count": 0, "entries": []}
         if status_int is not None:
             query = query.where(TrafficEntry.status == status_int)
         if page_id is not None:
@@ -3836,7 +3994,7 @@ def _finding_from_llm(
 ) -> ScanFinding:
     probe_urls = list(result_by_url.keys())
     llm_url = (raw.get("affected_url") or "").strip()
-    if llm_url and llm_url != page_url:
+    if llm_url:
         affected_url = llm_url
     elif probe_urls:
         desc = (
@@ -3925,6 +4083,87 @@ def _finding_from_llm(
     )
 
 
+_UNAUTHENTICATED_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bunauthenticated\b", re.IGNORECASE),
+    re.compile(
+        r"\bwithout\s+(?:any\s+)?(?:authentication|credentials?|login|session|token)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bno\s+(?:authentication|credentials?|login|session|token)\s+(?:is\s+)?required\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bmissing\s+authentication\b", re.IGNORECASE),
+)
+
+
+def _finding_claims_unauthenticated(raw: dict) -> bool:
+    claim_text = "\n".join(
+        _as_text(raw.get(field))
+        for field in ("title", "description", "evidence", "impact", "likelihood")
+    )
+    return any(
+        pattern.search(claim_text) for pattern in _UNAUTHENTICATED_CLAIM_PATTERNS
+    )
+
+
+def _unauthenticated_finding_rejection(
+    raw: dict,
+    result_by_url: dict[str, dict],
+) -> str | None:
+    """Require wire-level no-credential proof for missing-auth claims.
+
+    Natural-language probe notes are intent, not evidence.  A model can omit
+    ``use_session='anonymous'`` while describing a request as anonymous, and a
+    transport regression can attach credentials despite the requested label.
+    Only the final request observed on the wire is authoritative.
+    """
+    if not _finding_claims_unauthenticated(raw):
+        return None
+
+    affected = str(raw.get("affected_url") or "").strip()
+    matched = result_by_url.get(affected, {})
+    sent_authenticated = matched.get("sent_authenticated")
+    status = matched.get("status")
+    if sent_authenticated is False and status in {401, 403, 419, 440}:
+        return (
+            "Unauthenticated-access finding rejected: the credential-free request "
+            f"was denied with HTTP {status}."
+        )
+    if sent_authenticated is False:
+        return None
+    if sent_authenticated is True:
+        return (
+            "Unauthenticated-access finding rejected: the supporting request "
+            "sent authentication credentials. Re-run the endpoint with "
+            "use_session='anonymous' and cite that request's wire evidence."
+        )
+
+    request_evidence = "\n".join(
+        value
+        for value in (
+            str(matched.get("request_evidence") or ""),
+            str(raw.get("request_evidence") or ""),
+        )
+        if value
+    ).lower()
+    proves_no_authorization = bool(
+        re.search(
+            r"\bauthorization\s*:\s*(?:none|absent|not present)\b", request_evidence
+        )
+    )
+    proves_no_cookies = bool(
+        re.search(r"\bcookies?\s*:\s*(?:none|absent|not present)\b", request_evidence)
+    )
+    if proves_no_authorization and proves_no_cookies:
+        return None
+    return (
+        "Unauthenticated-access finding rejected: supporting wire evidence must "
+        "explicitly show both 'Authorization: none' and 'Cookies: none'. Re-run "
+        "the endpoint with use_session='anonymous'."
+    )
+
+
 def _save_deterministic_findings(
     run_id: int, findings: list[ScanFinding], *, is_api_run: bool = False
 ) -> int:
@@ -4006,7 +4245,7 @@ def _run_deterministic_analysis_for_dynamic_results(
             findings.extend(
                 _deterministic_findings_from_results(
                     run_id=run_id,
-                    page_id=page_id or first_page_id,
+                    page_id=page_id,
                     page_url=affected,
                     results=[result],
                 )
@@ -4091,21 +4330,19 @@ def _dynamic_finding_page_id(
     pages_snapshot: list[dict[str, Any]],
     first_page_id: int | None,
 ) -> int | None:
-    url_to_page: dict[str, int] = {p["url"]: p["id"] for p in pages_snapshot}
-    if affected_url in url_to_page:
-        return url_to_page[affected_url]
-    for page_url, page_id in url_to_page.items():
-        if affected_url.startswith(page_url) or page_url.startswith(affected_url):
-            return page_id
-
     dynamic_page_url = _dynamic_page_url_for_finding(affected_url, base_url)
     if dynamic_page_url:
-        return _find_or_create_dynamic_page(
+        from aespa.services.web_workprogram import resolve_web_page_id
+
+        page_id = resolve_web_page_id(
             session,
             run_id=run_id,
             url=dynamic_page_url,
-            base_url=base_url,
+            create=False,
         )
+        if page_id is not None:
+            return page_id
+        return None
 
     return first_page_id if first_page_id is not None and not affected_url else None
 
@@ -4146,20 +4383,104 @@ def _find_dynamic_duplicate(
         .where(_finding_run_filter(run_id, is_api_run))
         .where(ScanFinding.affected_url == affected_url)
     ).all()
-    normalized_title = title.strip().lower()
+    normalized_title = _canonical_finding_title(title)
     normalized_owasp = owasp_category.strip().lower()
     return next(
         (
             finding
             for finding in existing
-            if finding.title.strip().lower() == normalized_title
+            if _canonical_finding_title(finding.title) == normalized_title
             or (
                 finding.owasp_category.strip().lower() == normalized_owasp
-                and finding.title.strip().lower() == normalized_title
+                and _canonical_finding_title(finding.title) == normalized_title
             )
         ),
         None,
     )
+
+
+def _coerce_object_check_id(value: Any) -> int | None:
+    """Return a real object-check id, or None for an absent/sentinel value.
+
+    Models emit ``0``, ``"0"``, ``""``, or ``"none"``/``"null"`` to mean "no
+    object check selected". Obligation ids autoincrement from 1, so any value
+    that is not a positive integer is treated as no selection rather than a
+    link to a nonexistent check.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "0", "none", "null"):
+            return None
+    try:
+        check_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return check_id if check_id > 0 else None
+
+
+def _canonical_finding_title(title: str) -> str:
+    """Normalize cosmetic report prefixes before exact-title deduplication."""
+    normalized = str(title or "").strip()
+    normalized = re.sub(
+        r"^\[(?:A\d{2}(?::[^\]]+)?|API\d+)\]\s*",
+        "",
+        normalized,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"^\[(?:critical|high|medium|low|info)\]\s*",
+        "",
+        normalized,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return " ".join(normalized.lower().split())
+
+
+_FINDING_SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def _upgrade_duplicate_finding(
+    existing: ScanFinding, candidate: ScanFinding, *, original_title: str
+) -> bool:
+    """Replace a preliminary report when the same issue has a stronger finding."""
+    if (
+        existing.owasp_category.strip().lower()
+        != candidate.owasp_category.strip().lower()
+    ):
+        return False
+    if _FINDING_SEVERITY_RANK.get(
+        candidate.severity.lower(), -1
+    ) <= _FINDING_SEVERITY_RANK.get(existing.severity.lower(), -1):
+        return False
+
+    for field in (
+        "description",
+        "impact",
+        "likelihood",
+        "recommendation",
+        "cvss_score",
+        "cvss_vector",
+        "severity",
+        "evidence",
+        "request_evidence",
+        "response_evidence",
+        "evidence_json",
+        "screenshot_b64",
+        "finding_source",
+    ):
+        setattr(existing, field, getattr(candidate, field))
+    existing.title = original_title or candidate.title
+    existing.validation_status = "unvalidated"
+    existing.validation_note = None
+    existing.poc_command = ""
+    existing.poc_setup = ""
+    if candidate.page_id is not None:
+        existing.page_id = candidate.page_id
+    return True
 
 
 def _finding_exists(
@@ -4190,212 +4511,36 @@ def _finding_exists(
     )
 
 
-# ── Burp REST API helpers ──────────────────────────────────────────────────────
-
-_SQLI_TITLE_KEYWORDS = frozenset(
-    ["sql injection", "sql error", "blind sql", "sqli", "sql blind"]
-)
-_XSS_TITLE_KEYWORDS = frozenset(
-    [
-        "xss",
-        "cross-site scripting",
-        "cross site scripting",
-        "reflected xss",
-        "stored xss",
-        "dom xss",
-        "dom-based xss",
-    ]
-)
-_COMMAND_INJECTION_KEYWORDS = frozenset(
-    [
-        "command injection",
-        "os command",
-        "shell injection",
-        "shell command",
-        "rce",
-        "remote code execution",
-    ]
-)
-_PATH_TRAVERSAL_KEYWORDS = frozenset(
-    [
-        "path traversal",
-        "directory traversal",
-        "file traversal",
-        "local file inclusion",
-        "remote file inclusion",
-        "lfi",
-        "rfi",
-    ]
-)
-_SSRF_KEYWORDS = frozenset(
-    [
-        "ssrf",
-        "server-side request forgery",
-        "server side request forgery",
-    ]
-)
-_XXE_KEYWORDS = frozenset(
-    [
-        "xxe",
-        "xml external entity",
-        "external entity",
-    ]
-)
-_SSTI_KEYWORDS = frozenset(
-    [
-        "ssti",
-        "server-side template injection",
-        "server side template injection",
-        "template injection",
-    ]
-)
+# ── External scanner specialist dispatch ─────────────────────────────────────
 
 
-def _finding_triggers_burp_sqli(finding: ScanFinding) -> bool:
-    title = (finding.title or "").lower()
-    cat = (finding.owasp_category or "").lower()
-    return (
-        any(kw in title for kw in _SQLI_TITLE_KEYWORDS)
-        or ("sql" in title and "inject" in title)
-        or ("sql" in title and cat.startswith("a03"))
-    )
-
-
-def _finding_triggers_burp_xss(finding: ScanFinding) -> bool:
-    title = (finding.title or "").lower()
-    desc = (finding.description or "").lower()
-    return (
-        any(kw in title for kw in _XSS_TITLE_KEYWORDS)
-        or any(kw in desc for kw in _XSS_TITLE_KEYWORDS)
-        or "cross-site" in title
-    )
-
-
-def _finding_burp_vuln_class(finding: ScanFinding) -> str | None:
-    text = " ".join(
-        [
-            finding.title or "",
-            finding.description or "",
-            finding.owasp_category or "",
-        ]
-    )
-    return _burp_vuln_class_from_text(text)
-
-
-def _burp_vuln_class_from_text(text: str) -> str | None:
-    text = (text or "").lower()
-    if any(kw in text for kw in _SQLI_TITLE_KEYWORDS) or (
-        "sql" in text and "inject" in text
-    ):
-        return "SQL Injection"
-    if any(kw in text for kw in _XSS_TITLE_KEYWORDS) or "cross-site" in text:
-        return "XSS"
-    if any(kw in text for kw in _COMMAND_INJECTION_KEYWORDS):
-        return "Command Injection"
-    if any(kw in text for kw in _PATH_TRAVERSAL_KEYWORDS):
-        return "Path Traversal"
-    if any(kw in text for kw in _SSRF_KEYWORDS):
-        return "SSRF"
-    if any(kw in text for kw in _XXE_KEYWORDS):
-        return "XXE"
-    if any(kw in text for kw in _SSTI_KEYWORDS):
-        return "SSTI"
-    return None
-
-
-def _burp_class_enabled(config, vuln_class: str) -> bool:
-    return {
-        "SQL Injection": config.scan_sqli,
-        "XSS": config.scan_xss,
-        "Command Injection": config.scan_command_injection,
-        "Path Traversal": config.scan_path_traversal,
-        "SSRF": config.scan_ssrf,
-        "XXE": config.scan_xxe,
-        "SSTI": config.scan_ssti,
-    }.get(vuln_class, False)
-
-
-def _burp_investigation_candidate(
-    tool_input: dict, note: str
-) -> tuple[str, str] | None:
-    text = " ".join(
-        str(tool_input.get(key) or "")
-        for key in ("hypothesis", "payload_purpose", "observation", "url")
-    )
-    text = f"{note or ''} {text}"
-    vuln_class = _burp_vuln_class_from_text(text)
-    if not vuln_class:
-        return None
-    title = str(
-        tool_input.get("hypothesis")
-        or tool_input.get("payload_purpose")
-        or note
-        or vuln_class
-    )
-    return vuln_class, title[:200]
-
-
-def _best_burp_auth(session_vault: dict) -> tuple[dict[str, str], dict[str, str]]:
-    """Return (cookies, extra_headers) from the first non-anonymous session found."""
-    for label, session in (session_vault or {}).items():
-        if session.get("kind") == "anonymous":
-            continue
-        cookies = dict(session.get("cookies") or {})
-        headers = dict(session.get("extra_headers") or {})
-        if cookies or headers:
-            return cookies, headers
-    return {}, {}
-
-
-# Maps Burp vuln class strings to specialist attack_class values.
-_BURP_VULN_TO_SPECIALIST_CLASS: dict[str, str] = {
-    "SQL Injection": "sqli",
-    "XSS": "xss",
-    "Command Injection": "sqli",
-    "Path Traversal": "path_traversal",
-    "SSRF": "ssrf",
-    "XXE": "sqli",
-    "SSTI": "xss",
-}
-
-
-def _maybe_trigger_specialist_for_burp(
+def _schedule_external_specialist(
     run_id: int,
     url: str,
-    vuln_class: str,
+    attack_class: str,
     session_vault: dict,
 ) -> None:
-    """If trigger_specialist_on_burp is enabled, dispatch a specialist alongside the Burp scan."""
-    with Session(get_engine()) as s:
-        specialist_cfg = get_specialist_agent_config(s)
-        if not specialist_cfg.trigger_specialist_on_burp:
+    """Dispatch a specialist requested by a web active scanner extension."""
+    with Session(get_engine()) as session:
+        specialist_cfg = get_specialist_agent_config(session)
+        if not specialist_cfg.enabled:
             return
-        run = s.get(TestRun, run_id)
-        if not run:
+        run = session.get(TestRun, run_id)
+        if run is None:
             return
-        llm_cfg = get_llm_config_for_role(s, run, "specialist")
-        scanner_policy = get_run_scanner_policy(s, run)
-        site_id: int = getattr(run, "site_id", 0) or 0
+        llm_cfg = get_llm_config_for_role(session, run, "specialist")
+        scanner_policy = get_run_scanner_policy(session, run)
+        site_id = run.site_id or 0
 
-    attack_class = _BURP_VULN_TO_SPECIALIST_CLASS.get(vuln_class, "xss")
     agent_id = _next_specialist_agent_id(run_id, attack_class)
-    log.info(
-        "debug trigger_specialist_on_burp: dispatching %s for %s url=%s",
-        agent_id,
-        vuln_class,
-        url,
-    )
     try:
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(
+        task = asyncio.get_running_loop().create_task(
             _run_specialist_agent(
                 run_id=run_id,
                 agent_id=agent_id,
                 attack_class=attack_class,
                 target_url=url,
-                rationale=(
-                    f"Debug: triggered alongside Burp active scan for {vuln_class} on {url}"
-                ),
+                rationale=f"Triggered alongside external active scan on {url}",
                 session_vault=session_vault,
                 llm_cfg=llm_cfg,
                 base_url=url,
@@ -4403,342 +4548,18 @@ def _maybe_trigger_specialist_for_burp(
                 max_steps=specialist_cfg.max_steps,
                 site_id=site_id,
             ),
-            name=f"specialist-debug-{run_id}-{agent_id}",
-        )
-        _specialist_tasks.setdefault(run_id, []).append(task)
-        task.add_done_callback(
-            lambda t, rid=run_id: (
-                _specialist_tasks.get(rid, []).remove(t)
-                if t in _specialist_tasks.get(rid, [])
-                else None
-            )
+            name=f"specialist-external-{run_id}-{agent_id}",
         )
     except RuntimeError:
-        pass
-
-
-async def _run_burp_active_scan_for_target(
-    run_id: int,
-    *,
-    url: str,
-    title: str,
-    vuln_class: str,
-    session_vault: dict,
-    finding_id: int | None = None,
-    page_id: int | None = None,
-) -> None:
-    """Fire-and-forget task: run Burp active scan on a specific candidate URL."""
-    with Session(get_engine()) as s:
-        burp_cfg = get_burp_rest_api_config_model(s)
-
-    if not burp_cfg.enabled:
         return
-
-    if not _burp_class_enabled(burp_cfg, vuln_class):
-        return
-
-    if not url.startswith(("http://", "https://")):
-        return
-    target_key = (run_id, vuln_class, url)
-    if target_key in _burp_active_scan_targets:
-        return
-    _burp_active_scan_targets.add(target_key)
-
-    log.info(
-        "burp_rest: scheduling active scan for %s url=%s",
-        vuln_class,
-        url,
+    _specialist_tasks.setdefault(run_id, []).append(task)
+    task.add_done_callback(
+        lambda completed, rid=run_id: (
+            _specialist_tasks.get(rid, []).remove(completed)
+            if completed in _specialist_tasks.get(rid, [])
+            else None
+        )
     )
-    target_label = (
-        f'finding "{title}"' if finding_id is not None else f'investigation "{title}"'
-    )
-    # Stable agent_id for this Burp scan (URL slug, truncated).
-    _burp_agent_id = "burp-" + re.sub(r"[^a-z0-9]+", "-", url.lower())[:50].strip("-")
-    events_svc.emit(
-        run_id,
-        {
-            "type": "scanner_phase",
-            "phase": "burp_active_scan",
-            "status": "start",
-            "message": (
-                f"Burp active scan triggered for {vuln_class} {target_label} — {url}"
-            ),
-            "data": {"finding_id": finding_id, "url": url, "vuln_class": vuln_class},
-        },
-    )
-    events_svc.emit(
-        run_id,
-        {
-            "type": "agent_status",
-            "agent_id": _burp_agent_id,
-            "role": "Burp",
-            "status": "active",
-            "current_task": f"Active scan: {url} ({vuln_class})",
-            "outcome": None,
-            "_persist": True,
-        },
-    )
-
-    cookies, extra_headers = _best_burp_auth(session_vault)
-
-    # Debug: if trigger_specialist_on_burp is set, dispatch a specialist alongside
-    # the Burp scan.  We fire this immediately (before the launch attempt) so the
-    # specialist still runs even when Burp is not reachable.
-    _maybe_trigger_specialist_for_burp(run_id, url, vuln_class, session_vault)
-
-    try:
-        task_id = await burp_rest_svc.launch_active_scan(
-            burp_cfg,
-            url,
-            cookies=cookies or None,
-            extra_headers=extra_headers or None,
-        )
-    except Exception as exc:
-        log.warning(
-            "burp_rest: failed to launch scan for %s %s: %s", vuln_class, url, exc
-        )
-        _burp_active_scan_targets.discard(target_key)
-        events_svc.emit(
-            run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "burp_active_scan",
-                "status": "error",
-                "message": f"Burp active scan launch failed: {exc}",
-                "data": {"finding_id": finding_id, "url": url},
-            },
-        )
-        events_svc.emit(
-            run_id,
-            {
-                "type": "agent_status",
-                "agent_id": _burp_agent_id,
-                "role": "Burp",
-                "status": "failed",
-                "current_task": "Launch failed",
-                "outcome": str(exc)[:200],
-                "_persist": True,
-            },
-        )
-        return
-
-    events_svc.emit(
-        run_id,
-        {
-            "type": "scanner_phase",
-            "phase": "burp_active_scan",
-            "status": "running",
-            "message": f'Burp active scan task {task_id} running for "{title}" — polling…',
-            "data": {"finding_id": finding_id, "task_id": task_id, "url": url},
-        },
-    )
-
-    try:
-        issues = await burp_rest_svc.wait_for_scan(burp_cfg, task_id)
-    except Exception as exc:
-        log.warning("burp_rest: scan task %d error: %s", task_id, exc)
-        events_svc.emit(
-            run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "burp_active_scan",
-                "status": "error",
-                "message": f"Burp active scan task {task_id} failed: {exc}",
-                "data": {"finding_id": finding_id, "task_id": task_id},
-            },
-        )
-        events_svc.emit(
-            run_id,
-            {
-                "type": "agent_status",
-                "agent_id": _burp_agent_id,
-                "role": "Burp",
-                "status": "failed",
-                "current_task": f"Scan task {task_id} failed",
-                "outcome": str(exc)[:200],
-                "_persist": True,
-            },
-        )
-        return
-
-    if not issues:
-        events_svc.emit(
-            run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "burp_active_scan",
-                "status": "complete",
-                "message": f"Burp active scan task {task_id} completed — no issues found.",
-                "data": {
-                    "finding_id": finding_id,
-                    "task_id": task_id,
-                    "issue_count": 0,
-                },
-            },
-        )
-        events_svc.emit(
-            run_id,
-            {
-                "type": "agent_status",
-                "agent_id": _burp_agent_id,
-                "role": "Burp",
-                "status": "complete",
-                "current_task": f"Active scan: {url}",
-                "outcome": "No issues found",
-                "_persist": True,
-            },
-        )
-        return
-
-    # Persist Burp findings as new ScanFinding rows
-    saved_count = 0
-    with Session(get_engine()) as s:
-        for issue in issues:
-            issue_url = issue.get("affected_url") or url
-            issue_title = f"[Burp] {issue.get('name') or 'Unknown issue'}"
-            owasp = "A03"  # Injection
-            severity = issue.get("severity") or "medium"
-            # Skip if already exists
-            if _finding_exists(
-                s,
-                run_id=run_id,
-                title=issue_title,
-                affected_url=issue_url,
-                owasp_category=owasp,
-            ):
-                continue
-            new_finding = ScanFinding(
-                test_run_id=run_id,
-                page_id=page_id,
-                owasp_category=owasp,
-                severity=severity,
-                title=issue_title,
-                description=issue.get("description") or "",
-                impact="",
-                likelihood=f"Confidence: {issue.get('confidence', 'unknown')}",
-                recommendation=issue.get("remediation") or "",
-                cvss_score=0.0,
-                cvss_vector="",
-                affected_url=issue_url,
-                evidence=f"Burp active scan task {task_id} identified: {issue.get('name')}",
-                request_evidence=issue.get("request_evidence") or "",
-                response_evidence=issue.get("response_evidence") or "",
-                evidence_json="[]",
-                screenshot_b64=None,
-                finding_source="burp_active_scan",
-                validation_status="confirmed",
-                validation_note=f"Confirmed by Burp active scanner (task {task_id}).",
-                created_at=_utcnow(),
-            )
-            s.add(new_finding)
-            ensure_finding_reference(s, new_finding)
-            saved_count += 1
-        if saved_count:
-            s.commit()
-
-    log.info(
-        "burp_rest: task %d saved %d finding(s) for run_id=%s url=%s",
-        task_id,
-        saved_count,
-        run_id,
-        url,
-    )
-    if saved_count:
-        _emit_scan_update(run_id)
-    events_svc.emit(
-        run_id,
-        {
-            "type": "scanner_phase",
-            "phase": "burp_active_scan",
-            "status": "complete",
-            "message": (
-                f"Burp active scan task {task_id} complete — {len(issues)} issue(s) found, {saved_count} saved."
-            ),
-            "data": {
-                "finding_id": finding_id,
-                "task_id": task_id,
-                "url": url,
-                "issue_count": len(issues),
-                "saved_count": saved_count,
-            },
-        },
-    )
-    events_svc.emit(
-        run_id,
-        {
-            "type": "agent_status",
-            "agent_id": _burp_agent_id,
-            "role": "Burp",
-            "status": "complete",
-            "current_task": f"Active scan: {url}",
-            "outcome": f"{len(issues)} issue(s), {saved_count} saved",
-            "_persist": True,
-        },
-    )
-
-
-async def _run_burp_active_scan_for_finding(
-    run_id: int,
-    finding: ScanFinding,
-    session_vault: dict,
-) -> None:
-    """Fire-and-forget task: run Burp active scan on a specific finding's URL."""
-    vuln_class = _finding_burp_vuln_class(finding)
-    if not vuln_class:
-        return
-    await _run_burp_active_scan_for_target(
-        run_id,
-        url=finding.affected_url or "",
-        title=finding.title or vuln_class,
-        vuln_class=vuln_class,
-        session_vault=session_vault,
-        finding_id=finding.id,
-        page_id=finding.page_id,
-    )
-
-
-def _schedule_burp_active_scan(
-    run_id: int,
-    finding: ScanFinding,
-    session_vault: dict,
-) -> None:
-    """Schedule a Burp active scan as a background asyncio task (non-blocking)."""
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(
-            _run_burp_active_scan_for_finding(run_id, finding, session_vault)
-        )
-    except RuntimeError:
-        # No running event loop (e.g. during tests) — silently skip
-        pass
-
-
-def _schedule_burp_active_scan_for_investigation(
-    run_id: int,
-    tool_input: dict,
-    note: str,
-    session_vault: dict,
-) -> None:
-    candidate = _burp_investigation_candidate(tool_input, note)
-    if not candidate:
-        return
-    url = str(tool_input.get("url") or "").strip()
-    if not url.startswith(("http://", "https://")):
-        return
-    vuln_class, title = candidate
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(
-            _run_burp_active_scan_for_target(
-                run_id,
-                url=url,
-                title=title,
-                vuln_class=vuln_class,
-                session_vault=session_vault,
-            )
-        )
-    except RuntimeError:
-        pass
 
 
 # ── Specialist agent dispatch ─────────────────────────────────────────────────
@@ -4767,6 +4588,7 @@ _specialist_seq: dict[int, int] = {}
 # Tracks live specialist asyncio tasks so they can be cancelled on stop.
 _specialist_tasks: dict[int, list[asyncio.Task]] = {}
 _specialist_pending: dict[int, list[dict[str, Any]]] = {}
+_deferred_specialist_contexts: dict[int, dict[str, Any]] = {}
 # Per-run callback fired after every persisted finding (covers all agents, not just the main loop).
 _finding_hooks: dict[int, Any] = {}
 
@@ -4872,6 +4694,13 @@ async def _run_specialist_agent(
     target_page_id: int | None = None,
     target_session_label: str | None = None,
     handoff_id: int | None = None,
+    agent_role: str = "Specialist",
+    event_phase: str = "specialist_step",
+    post_probe_fn=None,
+    post_finding_fn=None,
+    default_owasp_category: str = "",
+    system_prompt_override: str | None = None,
+    tools_override: list[dict] | None = None,
 ) -> None:
     """Run a focused specialist agent for a specific vulnerability lead."""
     # The specialist role may be assigned a different Model than the Test Lead
@@ -4911,6 +4740,18 @@ async def _run_specialist_agent(
             "The tool executor will flag canary matches automatically with [SSRF CANARY MATCH].\n"
         )
 
+    alternate_accounts = ""
+    if attack_class == "xss" and not is_api_run:
+        with Session(get_engine()) as _site_session:
+            site = _site_session.get(Site, site_id)
+            account_names = [c.username for c in site.credentials] if site else []
+        if len(account_names) > 1:
+            alternate_accounts = (
+                "Configured accounts for cross-user viewing: "
+                + ", ".join(account_names)
+                + ". Use browser login_as to log in as a different account.\n"
+            )
+
     initial_message = "".join(
         [
             f"Target: {base_url}\n",
@@ -4923,6 +4764,7 @@ async def _run_specialist_agent(
             ),
             f"Use session: {target_session_label}\n" if target_session_label else "",
             f"Lead rationale: {rationale}\n",
+            alternate_accounts,
             f"{recon_block}",
             f"{canary_block}\n",
             f"You have a budget of {max_steps} steps. Begin immediately.",
@@ -4942,11 +4784,15 @@ async def _run_specialist_agent(
                 tool_input.setdefault("use_session", target_session_label)
         note = _infer_step_note(tool_name, tool_input, step)
 
-        # Emit specialist_step as scanner_phase so it persists to scan_log
-        # (Log tab) and also as specialist_step for the Agents panel thread view.
+        # Persist worker steps to the Log tab and send the matching live event.
         step_event_data = {
             "agent_id": agent_id,
             "step": step,
+            "description": note,
+            "tool_name": tool_name,
+            "context_tool": (
+                tool_input.get("tool") if tool_name == "context_tool" else None
+            ),
             "action_type": (
                 "http_request"
                 if tool_name == "http_request"
@@ -4960,13 +4806,14 @@ async def _run_specialist_agent(
             "url": tool_input.get("url") or target_url,
             "observation": tool_input.get("observation"),
             "hypothesis": tool_input.get("hypothesis"),
+            "payload_purpose": tool_input.get("payload_purpose"),
             "payload_summary": tool_input.get("payload_summary"),
         }
         events_svc.emit(
             run_id,
             {
                 "type": "scanner_phase",
-                "phase": "specialist_step",
+                "phase": event_phase,
                 "status": "running",
                 "message": (
                     f"[{agent_id}] Step {step}: "
@@ -4982,7 +4829,7 @@ async def _run_specialist_agent(
         events_svc.emit(
             run_id,
             {
-                "type": "specialist_step",
+                "type": event_phase,
                 **step_event_data,
             },
         )
@@ -4991,7 +4838,7 @@ async def _run_specialist_agent(
             {
                 "type": "agent_status",
                 "agent_id": agent_id,
-                "role": "Specialist",
+                "role": agent_role,
                 "status": "active",
                 "current_task": f"Step {step}: {note}",
                 "outcome": None,
@@ -5033,6 +4880,11 @@ async def _run_specialist_agent(
                 "finding_source": "specialist_agent",
                 "_handoff_id": handoff_id,
             }
+            finding_rejection = _unauthenticated_finding_rejection(
+                raw, {affected: result_dict}
+            )
+            if finding_rejection:
+                return finding_rejection
             async with _make_scanner_client(
                 cookies=cookies,
                 headers={"User-Agent": _UA, **extra_headers},
@@ -5040,9 +4892,8 @@ async def _run_specialist_agent(
                 if scanner_policy
                 else REQUEST_TIMEOUT,
                 follow_redirects=True,
-                verify=False,
             ) as _hx:
-                saved = await _persist_dynamic_finding(
+                write_result = await _persist_dynamic_finding(
                     run_id=run_id,
                     llm_cfg=llm_cfg,
                     raw=raw,
@@ -5052,8 +4903,16 @@ async def _run_specialist_agent(
                     result_by_url={affected: result_dict},
                     writeup_source=f"specialist:{agent_id}",
                 )
+            saved = write_result.finding
+            write_outcome = (
+                "Duplicate skipped"
+                if write_result.status == "duplicate"
+                else f"Finding rejected: {write_result.reason}"
+            )
             if saved is not None:
                 findings_written[0] += 1
+                if post_finding_fn is not None:
+                    post_finding_fn(saved, tool_input)
                 if handoff_id is not None:
                     handoff_svc.update_handoff(handoff_id, finding_id=saved.id)
                 _emit_scan_update(run_id)
@@ -5079,7 +4938,7 @@ async def _run_specialist_agent(
                     "outcome": (
                         f"Saved [{tool_input.get('severity', '?')}] {_fw_title} (ID: {saved.id})"
                         if saved
-                        else f"Duplicate skipped: {_fw_title}"
+                        else f"{write_outcome}: {_fw_title}"
                     ),
                     "_persist": True,
                 },
@@ -5088,10 +4947,10 @@ async def _run_specialist_agent(
                 run_id,
                 {
                     "type": "scanner_phase",
-                    "phase": "specialist_step",
+                    "phase": event_phase,
                     "status": "complete",
                     "message": (
-                        f"[{agent_id}] Step {step}: {'recorded finding' if saved else 'skipped duplicate'} {_fw_title}"
+                        f"[{agent_id}] Step {step}: {'recorded finding' if saved else write_outcome.lower()} {_fw_title}"
                     ),
                     "data": {
                         **step_event_data,
@@ -5104,6 +4963,8 @@ async def _run_specialist_agent(
                     f'Finding recorded: "{tool_input.get("title")}" '
                     f"(severity: {tool_input.get('severity')}, ID: {saved.id})"
                 )
+            if write_result.status == "rejected":
+                return f"Finding rejected: {write_result.reason}"
             return f'Duplicate skipped: "{tool_input.get("title")}" already exists. Move to a different test vector.'
 
         if tool_name == "execute_python":
@@ -5125,7 +4986,7 @@ async def _run_specialist_agent(
                 def execution_scope(url: str) -> str | None:
                     return check_scope(url, site_id, run_id)
 
-                execution_post_probe = _make_web_post_probe_fn(run_id)
+                execution_post_probe = post_probe_fn or _make_web_post_probe_fn(run_id)
             return await execute_agent_python(
                 run_kind="api" if is_api_run else "web",
                 run_id=run_id,
@@ -5138,6 +4999,7 @@ async def _run_specialist_agent(
                 scanner_policy=scanner_policy,
                 scope_check_fn=execution_scope,
                 post_probe_fn=execution_post_probe,
+                default_owasp_category=default_owasp_category,
                 requested_timeout_s=tool_input.get("timeout_s"),
             )
 
@@ -5148,6 +5010,25 @@ async def _run_specialist_agent(
                 return f"[SCOPE BLOCK] {_scope_err}"
             method = str(tool_input.get("method") or "GET").upper()
             url = str(tool_input.get("url") or target_url)
+            try:
+                request_page_id = (
+                    int(tool_input.get("page_id"))
+                    if tool_input.get("page_id") is not None
+                    else target_page_id
+                )
+            except (TypeError, ValueError):
+                request_page_id = target_page_id
+            if not is_api_run:
+                from aespa.services.web_workprogram import resolve_web_page_id
+
+                with Session(get_engine()) as _page_session:
+                    request_page_id = resolve_web_page_id(
+                        _page_session,
+                        run_id=run_id,
+                        url=url,
+                        page_id=request_page_id,
+                        create=False,
+                    )
             headers = dict(tool_input.get("headers") or {})
             body = tool_input.get("body")
             use_session_label = (
@@ -5171,18 +5052,33 @@ async def _run_specialist_agent(
             )
             async with _make_scanner_client(
                 run_id=run_id,
-                username="specialist",
+                username=(
+                    (
+                        selected_session
+                        if selected_session is not None
+                        else primary_session
+                    )
+                    or {}
+                ).get("username"),
                 cookies=req_cookies,
                 headers=req_headers,
                 timeout=scanner_policy.request_timeout_s
                 if scanner_policy
                 else REQUEST_TIMEOUT,
                 follow_redirects=True,
-                verify=False,
-                event_hooks=traffic_svc.make_httpx_hooks(run_id, username="specialist"),
+                provenance={
+                    "agent_id": agent_id,
+                    "agent_step": step,
+                    "purpose": traffic_svc.request_purpose(
+                        tool_input, "Probe target", agent_name=agent_role
+                    ),
+                    "owasp_category": tool_input.get("owasp_category"),
+                    "test_class": tool_input.get("test_class"),
+                    "obligation_id": tool_input.get("obligation_id"),
+                },
             ) as _hx:
                 if isinstance(_hx, traffic_svc.LoggingAsyncClient):
-                    _hx.page_id = target_page_id
+                    _hx.page_id = request_page_id
                     _hx.session_label = use_session_label
                 try:
                     kwargs: dict = {}
@@ -5196,6 +5092,48 @@ async def _run_specialist_agent(
                         _hx, method, url, site_id=site_id, run_id=run_id, **kwargs
                     )
                     resp_body = resp.text[:BODY_READ_LIMIT]
+                    if (
+                        not is_api_run
+                        and request_page_id is None
+                        and resp.status_code != 404
+                    ):
+                        with Session(get_engine()) as _page_session:
+                            request_page_id = resolve_web_page_id(
+                                _page_session,
+                                run_id=run_id,
+                                url=url,
+                                create=True,
+                            )
+                            _page_session.commit()
+                        if request_page_id is not None:
+                            traffic_svc.assign_web_traffic_page(
+                                _hx.last_traffic_id,
+                                run_id,
+                                request_page_id,
+                            )
+                            if handoff_id is not None:
+                                handoff_svc.update_handoff(
+                                    handoff_id,
+                                    page_id=request_page_id,
+                                )
+                    probe_category = str(
+                        tool_input.get("owasp_category") or default_owasp_category
+                    )
+                    if post_probe_fn is not None:
+                        try:
+                            if is_api_run:
+                                post_probe_fn(url, method, probe_category)
+                            else:
+                                post_probe_fn(
+                                    url,
+                                    method,
+                                    probe_category,
+                                    str(tool_input.get("test_class") or "") or None,
+                                    resp.status_code,
+                                    request_page_id,
+                                )
+                        except Exception as exc:
+                            log.debug("specialist post_probe_fn error: %s", exc)
                     if _session_resolution_note:
                         resp_body = f"{_session_resolution_note}\n\n{resp_body}"
                     _sp_canary_fp = _ssrf_canary.get(run_id)
@@ -5233,12 +5171,52 @@ async def _run_specialist_agent(
             except (TypeError, ValueError):
                 browser_page_id = None
             browser_action = dict(tool_input)
+            login_as = str(tool_input.get("login_as") or "").strip()
+            if login_as and tool_input.get("use_session"):
+                return "Browser: set either login_as or use_session, not both."
+            alternate_credential = None
+            if login_as and not is_api_run:
+                with Session(get_engine()) as _site_session:
+                    site = _site_session.get(Site, site_id)
+                    alternate_credential = _alternate_configured_credential(
+                        list(site.credentials) if site else [], login_as
+                    )
+            if login_as and alternate_credential is None:
+                return (
+                    "Browser: login_as must name one configured account different "
+                    "from the primary account. Cross-user viewing was not checked."
+                )
+            if alternate_credential is not None:
+                login_target = (
+                    _login_url_for_credential(
+                        site.login_url if site else base_url, alternate_credential
+                    )
+                    or base_url
+                )
+                for checked_url in (
+                    login_target,
+                    browser_action.get("url") or base_url,
+                ):
+                    scope_error = check_scope(checked_url, site_id, run_id)
+                    if scope_error:
+                        return f"[SCOPE BLOCK] {scope_error}"
             browser_session_label = (
                 tool_input.get("use_session") or target_session_label
             )
-            browser_session_label, browser_session, browser_note = (
-                _resolve_requested_scan_session(session_vault, browser_session_label)
-            )
+            if alternate_credential is not None:
+                browser_session_label = (
+                    f"configured_credential_{alternate_credential.id}"
+                )
+                browser_session = {"username": alternate_credential.username}
+                browser_note = (
+                    f"Logged in as configured account {alternate_credential.username}."
+                )
+            else:
+                browser_session_label, browser_session, browser_note = (
+                    _resolve_requested_scan_session(
+                        session_vault, browser_session_label
+                    )
+                )
             if browser_page_id is not None and tool_input.get("replay"):
                 with Session(get_engine()) as _page_session:
                     replay_page = _page_session.get(CrawledPage, browser_page_id)
@@ -5281,8 +5259,20 @@ async def _run_specialist_agent(
 
                 async with async_playwright() as _pw:
                     _browser = await _pw.chromium.launch(headless=True)
-                    _ctx = await _browser.new_context(ignore_https_errors=True)
-                    if browser_session:
+                    if alternate_credential is not None:
+                        _ctx, _page = await _open_browser_as_configured_account(
+                            _browser,
+                            alternate_credential,
+                            base_url=base_url,
+                            login_url=login_target,
+                            run_id=run_id,
+                            llm_cfg=llm_cfg,
+                            request_headers=tool_input.get("headers"),
+                        )
+                    else:
+                        _ctx = await _browser.new_context(ignore_https_errors=True)
+                        _page = await _ctx.new_page()
+                    if browser_session and alternate_credential is None:
                         cookies_to_add = [
                             {
                                 "name": name,
@@ -5295,13 +5285,26 @@ async def _run_specialist_agent(
                         ]
                         if cookies_to_add:
                             await _ctx.add_cookies(cookies_to_add)
-                    traffic_svc.setup_playwright_logging(
-                        _ctx, run_id, username="specialist"
-                    )
+                    if alternate_credential is None:
+                        traffic_svc.setup_playwright_logging(
+                            _ctx,
+                            run_id,
+                            username=(browser_session or {}).get("username"),
+                        )
                     traffic_svc.set_browser_context_tag(
-                        _ctx, browser_page_id, browser_session_label
+                        _ctx,
+                        browser_page_id,
+                        browser_session_label,
+                        username=(browser_session or {}).get("username"),
+                        purpose=traffic_svc.request_purpose(
+                            tool_input,
+                            "Browser probe",
+                            agent_name=agent_role,
+                        ),
+                        owasp_category=tool_input.get("owasp_category"),
+                        test_class=tool_input.get("test_class"),
+                        obligation_id=tool_input.get("obligation_id"),
                     )
-                    _page = await _ctx.new_page()
                     try:
                         browser_result = await _run_thinking_browser_action(
                             _page,
@@ -5309,6 +5312,12 @@ async def _run_specialist_agent(
                             default_url=base_url,
                             scanner_policy=scanner_policy,
                         )
+                        if alternate_credential is not None:
+                            final_scope_error = check_scope(
+                                str(browser_result.get("url") or ""), site_id, run_id
+                            )
+                            if final_scope_error:
+                                return f"[SCOPE BLOCK] {final_scope_error}"
                     finally:
                         traffic_svc.clear_browser_context_tag(_ctx)
                         await _browser.close()
@@ -5318,6 +5327,21 @@ async def _run_specialist_agent(
                     browser_result.get("captured_traffic"),
                     browser_session_label,
                 )
+                probe_category = str(
+                    tool_input.get("owasp_category") or default_owasp_category
+                )
+                if post_probe_fn is not None:
+                    try:
+                        post_probe_fn(
+                            str(browser_result.get("url") or target_url),
+                            "BROWSER",
+                            probe_category,
+                            str(tool_input.get("test_class") or "") or None,
+                            browser_result.get("status"),
+                            browser_page_id,
+                        )
+                    except Exception as exc:
+                        log.debug("specialist browser post_probe_fn error: %s", exc)
                 return (
                     (f"{browser_note}\n\n" if browser_note else "")
                     + f"Browser {browser_result.get('url')} → {browser_result.get('status')}\n"
@@ -5367,7 +5391,7 @@ async def _run_specialist_agent(
             {
                 "type": "agent_status",
                 "agent_id": agent_id,
-                "role": "Specialist",
+                "role": agent_role,
                 "status": "active",
                 "current_task": f"Starting {attack_class} investigation on {target_url}",
                 "outcome": None,
@@ -5375,9 +5399,21 @@ async def _run_specialist_agent(
             },
         )
 
-        specialist_system_prompt = _specialist_system_prompt_for_run(
-            attack_class, is_api_run=is_api_run
+        specialist_system_prompt = (
+            system_prompt_override
+            or _specialist_system_prompt_for_run(attack_class, is_api_run=is_api_run)
         )
+        recovery_prompt = None
+        if not is_api_run and getattr(
+            scanner_policy, "openai_refusal_recovery_enabled", False
+        ):
+            from aespa.services.prompts.refusal_recovery import (
+                specialist_recovery_prompt,
+            )
+
+            recovery_prompt = specialist_recovery_prompt(
+                attack_class=attack_class, initial_user=initial_message
+            )
 
         await llm_svc.thinking_agentic_loop(
             llm_cfg,
@@ -5387,7 +5423,8 @@ async def _run_specialist_agent(
             stop_check=lambda: (
                 step_count[0] >= max_steps or run_id in _thinking_stop_requested
             ),
-            tools=_get_specialist_tools(attack_class),
+            tools=tools_override or _get_specialist_tools(attack_class),
+            refusal_recovery_prompt=recovery_prompt,
         )
 
         outcome = (
@@ -5397,10 +5434,8 @@ async def _run_specialist_agent(
         )
         if handoff_id is not None:
             persisted_handoff = handoff_svc.get_handoff(handoff_id)
-            if persisted_handoff is not None and persisted_handoff.finding_id:
-                outcome = persisted_handoff.outcome or (
-                    f"Linked to finding #{persisted_handoff.finding_id}"
-                )
+            if persisted_handoff is not None and persisted_handoff.outcome:
+                outcome = persisted_handoff.outcome
         if handoff_id is not None:
             handoff_svc.update_handoff(
                 handoff_id,
@@ -5412,7 +5447,7 @@ async def _run_specialist_agent(
             {
                 "type": "agent_status",
                 "agent_id": agent_id,
-                "role": "Specialist",
+                "role": agent_role,
                 "status": "complete",
                 "current_task": outcome,
                 "outcome": outcome,
@@ -5427,7 +5462,7 @@ async def _run_specialist_agent(
             {
                 "type": "agent_status",
                 "agent_id": agent_id,
-                "role": "Specialist",
+                "role": agent_role,
                 "status": "complete",
                 "current_task": "Stopped",
                 "outcome": "Stopped",
@@ -5439,14 +5474,16 @@ async def _run_specialist_agent(
                 handoff_id, status="cancelled", outcome="Specialist stopped."
             )
         raise
-    except llm_svc.LLMQuotaPauseError:
-        # A subscription allowance exhaustion must reach the outer scan task so
-        # it can pause the whole run and preserve a resumable checkpoint.
+    except llm_svc.LLMQuotaPauseError as exc:
+        # An exhausted allowance or an unreachable provider must reach the outer
+        # scan task so it can pause the whole run and keep a resumable checkpoint.
         if handoff_id is not None:
+            from aespa.services import run_pause as run_pause_svc
+
             handoff_svc.update_handoff(
                 handoff_id,
                 status="failed",
-                outcome="Specialist paused because the LLM allowance was exhausted.",
+                outcome=run_pause_svc.pause_kind(exc.reason).specialist_outcome,
             )
         raise
     except Exception as exc:
@@ -5456,7 +5493,7 @@ async def _run_specialist_agent(
             {
                 "type": "agent_status",
                 "agent_id": agent_id,
-                "role": "Specialist",
+                "role": agent_role,
                 "status": "failed",
                 "current_task": f"Error: {exc}",
                 "outcome": "Error",
@@ -5484,7 +5521,9 @@ def _launch_specialist_task(context: dict[str, Any]) -> None:
         def _completed(completed: asyncio.Task, rid: int = run_id) -> None:
             if completed in _specialist_tasks.get(rid, []):
                 _specialist_tasks[rid].remove(completed)
-            _drain_specialist_queue(rid)
+            _drain_specialist_queue(
+                rid, run_kind="api" if context.get("is_api_run") else "web"
+            )
 
         task.add_done_callback(_completed)
     except RuntimeError:
@@ -5496,7 +5535,13 @@ def _launch_specialist_task(context: dict[str, Any]) -> None:
             )
 
 
-def _drain_specialist_queue(run_id: int) -> None:
+def _drain_specialist_queue(run_id: int, *, run_kind: str = "web") -> None:
+    for handoff in handoff_svc.activate_deferred(
+        run_id, run_kind=run_kind, eligible_ids=set(_deferred_specialist_contexts)
+    ):
+        context = _deferred_specialist_contexts.pop(handoff.id, None)
+        if context is not None:
+            _specialist_pending.setdefault(run_id, []).append(context)
     pending = _specialist_pending.get(run_id) or []
     while pending:
         context = pending[0]
@@ -5508,6 +5553,27 @@ def _drain_specialist_queue(run_id: int) -> None:
         _launch_specialist_task(context)
     if not pending:
         _specialist_pending.pop(run_id, None)
+
+
+def _principal_scope_actor(session_vault: dict, label: str | None) -> str:
+    if label == "anonymous":
+        return "anonymous"
+    session = session_vault.get(label or "configured_primary") or {}
+    credential_id = session.get("credential_id")
+    if credential_id is not None:
+        return f"credential:{credential_id}"
+    return f"unknown:session:{label or 'configured_primary'}"
+
+
+def _handoff_body_identity(body: Any) -> str | None:
+    from aespa.services.web_workprogram import _request_body_identity
+
+    if body is None:
+        return None
+    raw = (
+        body if isinstance(body, str) else json.dumps(body, sort_keys=True, default=str)
+    )
+    return _request_body_identity(raw)
 
 
 def _schedule_specialist_agent(
@@ -5546,7 +5612,19 @@ def _schedule_specialist_agent(
         )
     except (TypeError, ValueError):
         target_page_id = None
+    if not is_api_run:
+        from aespa.services.web_workprogram import resolve_web_page_id
+
+        with Session(get_engine()) as _page_session:
+            target_page_id = resolve_web_page_id(
+                _page_session,
+                run_id=run_id,
+                url=target_url,
+                page_id=target_page_id,
+                create=False,
+            )
     target_session_label = str(dispatch.get("use_session") or "").strip() or None
+    target_actor_key = _principal_scope_actor(session_vault, target_session_label)
 
     rejection = _specialist_dispatch_rejection(
         attack_class or raw_attack_class, priority, specialist_config
@@ -5575,21 +5653,22 @@ def _schedule_specialist_agent(
         run_kind="api" if is_api_run else "web",
         attack_class=attack_class,
         target_url=target_url,
+        page_id=target_page_id,
         parameter=parameter,
         session_label=target_session_label,
         priority=priority,
         rationale=rationale,
         dispatch_source=str(dispatch.get("dispatch_source") or "test_lead"),
         agent_id=agent_id,
+        method=str(dispatch.get("method") or "GET"),
+        state_key=dispatch.get("state_key"),
+        body_identity=_handoff_body_identity(dispatch.get("body")),
+        actor_key=target_actor_key,
+        comparison_actor_key=dispatch.get("comparison_actor_key"),
+        evidence_observation_ids=tuple(
+            int(value) for value in dispatch.get("evidence_observation_ids") or ()
+        ),
     )
-    if not created:
-        return {
-            "status": "duplicate",
-            "reason": f"scope already {handoff.status} as {handoff.agent_id}",
-            "agent_id": handoff.agent_id,
-            "handoff_id": handoff.id,
-        }
-
     context = {
         "run_id": run_id,
         "agent_id": agent_id,
@@ -5603,10 +5682,26 @@ def _schedule_specialist_agent(
         "max_steps": max_steps,
         "site_id": site_id,
         "is_api_run": is_api_run,
-        "target_page_id": target_page_id,
+        "target_page_id": handoff.page_id,
         "target_session_label": target_session_label,
         "handoff_id": handoff.id,
     }
+    if not created:
+        if handoff.status == "deferred":
+            context["_specialist_config"] = specialist_config
+            _deferred_specialist_contexts[handoff.id] = context
+            return {
+                "status": "queued",
+                "reason": "waiting for the active specialist to finish",
+                "agent_id": handoff.agent_id,
+                "handoff_id": handoff.id,
+            }
+        return {
+            "status": "duplicate",
+            "reason": f"scope already {handoff.status} as {handoff.agent_id}",
+            "agent_id": handoff.agent_id,
+            "handoff_id": handoff.id,
+        }
     if at_capacity:
         context["_specialist_config"] = specialist_config
         pending.append(context)
@@ -5687,6 +5782,12 @@ def dispatch_specialist_agent(
     )
 
 
+class FindingWriteResult(NamedTuple):
+    status: Literal["saved", "duplicate", "rejected"]
+    finding: ScanFinding | None = None
+    reason: str | None = None
+
+
 async def _persist_dynamic_finding(
     *,
     run_id: int,
@@ -5699,10 +5800,12 @@ async def _persist_dynamic_finding(
     writeup_source: str | None = None,
     skip_normalize: bool = False,
     is_api_run: bool = False,
-) -> ScanFinding | None:
+) -> FindingWriteResult:
     """Persist a dynamic finding as soon as the thinking loop has enough evidence."""
     affected = (raw.get("affected_url") or base_url).strip() or base_url
+    selected_check_id = _coerce_object_check_id(raw.get("object_check_id"))
     raw = {**raw, "affected_url": affected}
+    original_title = _as_text(raw.get("title"))
 
     # normalize_finding_titles renames new findings to match existing titles when
     # they share the same OWASP category — useful for the automated scanner, but
@@ -5720,6 +5823,8 @@ async def _persist_dynamic_finding(
                         "title": f.title,
                         "owasp_category": f.owasp_category,
                         "severity": f.severity,
+                        "affected_url": f.affected_url,
+                        "description": f.description,
                     }
                     for f in existing
                 ]
@@ -5735,17 +5840,50 @@ async def _persist_dynamic_finding(
         except Exception as exc:
             log.warning("normalize_finding_titles failed (dynamic finding): %s", exc)
 
+    rejection = _unauthenticated_finding_rejection(raw, result_by_url)
+    if rejection:
+        log.warning("Dynamic finding rejected for run_id=%s: %s", run_id, rejection)
+        return FindingWriteResult("rejected", reason=rejection)
+
+    if selected_check_id is not None:
+        if is_api_run:
+            return FindingWriteResult(
+                "rejected", reason="Object checks are only available for web runs."
+            )
+        from aespa.services.web_workprogram import validate_object_finding_link
+
+        try:
+            selected_check_id = int(selected_check_id)
+            validate_object_finding_link(
+                run_id,
+                selected_check_id,
+                affected_url=affected,
+                category=str(raw.get("owasp_category") or "").upper(),
+            )
+        except (TypeError, ValueError) as exc:
+            log.warning("Selected object finding rejected: %s", exc)
+            return FindingWriteResult("rejected", reason=str(exc))
+
     lock = _persist_write_locks.setdefault(run_id, asyncio.Lock())
     async with lock:
         with Session(get_engine()) as s:
-            page_id = _dynamic_finding_page_id(
-                s,
-                run_id=run_id,
-                affected_url=affected,
-                base_url=base_url,
-                pages_snapshot=pages_snapshot,
-                first_page_id=first_page_id,
-            )
+            if selected_check_id is not None:
+                exact_pages = s.exec(
+                    select(CrawledPage)
+                    .where(CrawledPage.test_run_id == run_id)
+                    .where(CrawledPage.url == affected)
+                    .where(CrawledPage.status == "crawled")
+                ).all()
+                page_id = exact_pages[0].id if len(exact_pages) == 1 else None
+            else:
+                page_id = _dynamic_finding_page_id(
+                    s,
+                    run_id=run_id,
+                    affected_url=affected,
+                    base_url=base_url,
+                    pages_snapshot=pages_snapshot,
+                    first_page_id=first_page_id,
+                )
 
             duplicate = _find_dynamic_duplicate(
                 s,
@@ -5755,56 +5893,75 @@ async def _persist_dynamic_finding(
                 owasp_category=str(raw.get("owasp_category") or "A00"),
                 is_api_run=is_api_run,
             )
+            finding = None
             if duplicate is not None:
-                handoff_id = raw.get("_handoff_id")
-                source = str(raw.get("finding_source") or writeup_source or "")
-                if source == "specialist_agent" or str(writeup_source or "").startswith(
-                    "specialist:"
+                candidate = _finding_from_llm(
+                    run_id=run_id,
+                    page_id=page_id,
+                    page_url=affected,
+                    raw={**raw, "title": original_title or raw.get("title")},
+                    result_by_url=result_by_url,
+                    validation_status="unvalidated",
+                    validation_note=None,
+                    is_api_run=is_api_run,
+                )
+                if _upgrade_duplicate_finding(
+                    duplicate, candidate, original_title=original_title
                 ):
-                    additions = []
-                    for label, field in (
-                        ("Evidence", "evidence"),
-                        ("Request", "request_evidence"),
-                        ("Response", "response_evidence"),
-                    ):
-                        value = str(raw.get(field) or "").strip()
-                        current = str(getattr(duplicate, field) or "")
-                        if value and value not in current:
-                            setattr(
-                                duplicate,
-                                field,
-                                (
-                                    current
-                                    + f"\n\nSpecialist {label.lower()}:\n"
-                                    + value
-                                )[-EVIDENCE_TEXT_LIMIT:],
+                    finding = duplicate
+                else:
+                    handoff_id = raw.get("_handoff_id")
+                    source = str(raw.get("finding_source") or writeup_source or "")
+                    if source == "specialist_agent" or str(
+                        writeup_source or ""
+                    ).startswith("specialist:"):
+                        additions = []
+                        for label, field in (
+                            ("Evidence", "evidence"),
+                            ("Request", "request_evidence"),
+                            ("Response", "response_evidence"),
+                        ):
+                            value = str(raw.get(field) or "").strip()
+                            current = str(getattr(duplicate, field) or "")
+                            if value and value not in current:
+                                setattr(
+                                    duplicate,
+                                    field,
+                                    (
+                                        current
+                                        + f"\n\nSpecialist {label.lower()}:\n"
+                                        + value
+                                    )[-EVIDENCE_TEXT_LIMIT:],
+                                )
+                                additions.append(label.lower())
+                        if additions and duplicate.finding_source == "dynamic_scan":
+                            duplicate.finding_source = "test_lead+specialist_agent"
+                        s.add(duplicate)
+                        s.commit()
+                        if handoff_id is not None:
+                            handoff_svc.update_handoff(
+                                int(handoff_id),
+                                finding_id=duplicate.id,
+                                outcome=(
+                                    f"Corroborated existing finding #{duplicate.id}; "
+                                    f"merged {', '.join(additions) or 'matching evidence'}."
+                                ),
                             )
-                            additions.append(label.lower())
-                    if additions and duplicate.finding_source == "dynamic_scan":
-                        duplicate.finding_source = "test_lead+specialist_agent"
-                    s.add(duplicate)
-                    s.commit()
-                    if handoff_id is not None:
-                        handoff_svc.update_handoff(
-                            int(handoff_id),
-                            finding_id=duplicate.id,
-                            outcome=(
-                                f"Corroborated existing finding #{duplicate.id}; "
-                                f"merged {', '.join(additions) or 'matching evidence'}."
-                            ),
-                        )
-                return None
+                    return FindingWriteResult("duplicate")
 
-            finding = _finding_from_llm(
-                run_id=run_id,
-                page_id=page_id,
-                page_url=affected,
-                raw=raw,
-                result_by_url=result_by_url,
-                validation_status="unvalidated",
-                validation_note=None,
-                is_api_run=is_api_run,
-            )
+            if finding is None:
+                finding = _finding_from_llm(
+                    run_id=run_id,
+                    page_id=page_id,
+                    page_url=affected,
+                    raw=raw,
+                    result_by_url=result_by_url,
+                    validation_status="unvalidated",
+                    validation_note=None,
+                    is_api_run=is_api_run,
+                )
+            if selected_check_id is not None:
+                finding.object_check_id = selected_check_id
             s.add(finding)
             ensure_finding_reference(s, finding)
             s.commit()
@@ -5923,7 +6080,7 @@ async def _persist_dynamic_finding(
                 _hk_exc,
             )
 
-    return finding
+    return FindingWriteResult("saved", finding=finding)
 
 
 def _capture_dynamic_writeup_if_enabled(
@@ -6062,6 +6219,7 @@ def request_thinking_stop(run_id: int) -> None:
     from aespa.services.code_execution import cancel_run_executions
 
     cancel_run_executions("web", run_id)
+    external_scans.cancel_run(run_id)
     # Cancel the main scan task immediately so it doesn't wait out a full LLM
     # round-trip or Playwright navigation before seeing the stop flag.
     task = _thinking_tasks.get(run_id)
@@ -6201,6 +6359,12 @@ async def start_thinking_scan(run_id: int) -> None:
             session.commit()
     # Clear any stale checkpoint so the scan starts fresh.
     checkpoint_svc.clear_checkpoint(run_id)
+    with Session(get_engine()) as session:
+        run = session.get(TestRun, run_id)
+        if run is not None and run.coverage_mode == "team":
+            from aespa.services.team_scan import reset_team_progress
+
+            reset_team_progress(run_id)
     # Tag this run's events as run_kind='web'.  The scope — snapshotted by
     # create_task below — keeps web log rows correctly tagged for compatibility
     # run earlier in this process.
@@ -6246,7 +6410,7 @@ async def start_thinking_scan_resume(run_id: int) -> None:
 
 
 async def start_sast_validation_resume(run_id: int) -> None:
-    """Safely continue an Applications SAST-validation child run.
+    """Safely continue a System SAST-validation child run.
 
     The existing child run and imported leads are reused.  If an agent
     checkpoint exists, the normal resume path restores it; otherwise the
@@ -6282,14 +6446,21 @@ def _emit_thinking_status(run_id: int) -> None:
     )
 
 
-def _emit_reporting_handoff(run_id: int, probe_count: int, batch_count: int) -> None:
+def _emit_reporting_handoff(
+    run_id: int,
+    probe_count: int,
+    batch_count: int,
+    *,
+    agent_id: str = "scanner",
+    role: str = "Test Lead",
+) -> None:
     """Keep the scan active while the Test Lead delegates probe analysis."""
     events_svc.emit(
         run_id,
         {
             "type": "agent_status",
-            "agent_id": "scanner",
-            "role": "Test Lead",
+            "agent_id": agent_id,
+            "role": role,
             "status": "active",
             "current_task": "Testing complete - handed traffic to reporting agent for analysis...",
             "outcome": (
@@ -6423,17 +6594,18 @@ async def _thinking_scan_task(run_id: int) -> None:
     except llm_svc.LLMQuotaPauseError as exc:
         log.warning("Thinking scan paused for run_id=%s: %s", run_id, exc)
         _thinking_scan_status[run_id] = "paused"
-        _emit_thinking_status(run_id)
         from aespa.services import run_pause as run_pause_svc
 
+        kind = run_pause_svc.pause_kind(exc.reason)
         run_pause_svc.save_pause(
             "web",
             run_id,
-            provider="openai_codex",
+            provider=kind.provider,
             message=str(exc),
             reset_at=exc.reset_at,
             snapshot=exc.snapshot,
             resume_stage="thinking_scan",
+            reason=exc.reason,
         )
         with Session(get_engine()) as _s:
             _run = _s.get(TestRun, run_id)
@@ -6441,17 +6613,30 @@ async def _thinking_scan_task(run_id: int) -> None:
                 _run.status = "paused"
                 _run.phase = "scanning"
                 _run.outcome = "paused"
-                _run.terminal_reason = "provider_quota"
+                _run.terminal_reason = kind.terminal_reason
                 _run.error_message = str(exc)[:2000]
                 _s.add(_run)
                 _s.commit()
+        _emit_thinking_status(run_id)
         events_svc.emit(
             run_id,
             {
                 "type": "scan_paused",
-                "reason": "quota",
+                "reason": exc.reason,
                 "message": str(exc),
                 "reset_at": exc.reset_at.isoformat() if exc.reset_at else None,
+            },
+        )
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": "scanner",
+                "role": "Test Lead",
+                "status": "paused",
+                "current_task": "Scan paused",
+                "outcome": str(exc),
+                "_persist": True,
             },
         )
     except Exception as exc:
@@ -6460,7 +6645,7 @@ async def _thinking_scan_task(run_id: int) -> None:
         _emit_thinking_status(run_id)
         is_refusal = isinstance(exc, llm_svc.LLMRefusalError)
         failure_label = "LLM provider refusal" if is_refusal else "Scan failed"
-        failure_message = str(exc)[:2000]
+        failure_message = llm_svc.describe_exception(exc)[:2000]
         events_svc.emit(
             run_id,
             {
@@ -6480,7 +6665,10 @@ async def _thinking_scan_task(run_id: int) -> None:
                 "phase": "scan_failed",
                 "status": "error",
                 "message": f"{failure_label}: {failure_message}",
-                "data": {"reason": "provider_error" if is_refusal else "error"},
+                "data": {
+                    "reason": "provider_error" if is_refusal else "error",
+                    "error_type": type(exc).__name__,
+                },
             },
         )
         with Session(get_engine()) as _s:
@@ -6493,7 +6681,11 @@ async def _thinking_scan_task(run_id: int) -> None:
                 _s.add(_run)
                 _s.commit()
     finally:
+        llm_svc.set_budget_wrapup_allowed(False)
         _specialist_pending.pop(run_id, None)
+        for handoff_id, context in list(_deferred_specialist_contexts.items()):
+            if context.get("run_id") == run_id:
+                _deferred_specialist_contexts.pop(handoff_id, None)
         handoff_svc.recover_interrupted_handoffs(run_id, run_kind="web")
         _thinking_stop_requested.discard(run_id)
         _specialist_running.pop(run_id, None)
@@ -6526,11 +6718,15 @@ async def _run_post_scan_llm_review(
         )
         if baseline_max_id > 0:
             q = q.where(ScanFinding.id > baseline_max_id)
-        candidates = s.exec(q).all()
+        candidates = s.exec(q.order_by(ScanFinding.id)).all()
         reference_by_id = {}
         for candidate in candidates:
             ensure_finding_reference(s, candidate)
             reference_by_id[candidate.id] = candidate.reference
+        run = s.get(TestRun, run_id)
+        concurrency = max(
+            1, get_run_scanner_policy(s, run).dast_max_concurrent_llm_requests
+        )
         for f in candidates:
             s.expunge(f)
         s.commit()
@@ -6560,13 +6756,18 @@ async def _run_post_scan_llm_review(
         },
     )
 
-    BATCH = 10
-    low_confidence_ids: list[int] = []
-    reasons: dict[int, str] = {}
+    semaphore = asyncio.Semaphore(concurrency)
 
-    for batch_start in range(0, len(candidates), BATCH):
-        batch = candidates[batch_start : batch_start + BATCH]
-        turn_num = batch_start // BATCH + 1
+    class BatchReviewOutcome(NamedTuple):
+        turn: int
+        batch: list[ScanFinding]
+        verdicts: dict[int, tuple[str, str]]
+        error: str | None
+
+    async def review_batch(
+        batch: list[ScanFinding], turn_num: int
+    ) -> BatchReviewOutcome:
+        batch_reference_ids = {reference_by_id[f.id]: f.id for f in batch}
         batch_lines = []
         for f in batch:
             ep = f.affected_url or "(no URL)"
@@ -6592,116 +6793,162 @@ async def _run_post_scan_llm_review(
             "  <REF> | LOW_CONFIDENCE:<short reason>\n"
             "Do NOT include any other text."
         )
-        batch_low_confidence: list[int] = []
         try:
-            verdict_text = await llm_svc.plain_completion(llm_cfg, prompt)
+            async with semaphore:
+                verdict_text = await llm_svc.plain_completion(llm_cfg, prompt)
         except Exception as exc:
             log.warning("Post-scan review batch failed (non-fatal): %s", exc)
+            return BatchReviewOutcome(turn_num, batch, {}, str(exc))
+
+        verdicts: dict[int, tuple[str, str]] = {}
+        repeated_ids: set[int] = set()
+        for line in verdict_text.strip().splitlines():
+            parts = [p.strip() for p in line.split("|", 1)]
+            if len(parts) != 2:
+                continue
+            reference = parts[0].removeprefix("REF:").strip()
+            fid = batch_reference_ids.get(reference)
+            if fid is None or fid in repeated_ids:
+                continue
+            verdict = parts[1].strip()
+            if verdict.upper() == "ACCEPT":
+                parsed = ("ACCEPT", "")
+            elif verdict.upper() == "LOW_CONFIDENCE" or verdict.upper().startswith(
+                "LOW_CONFIDENCE:"
+            ):
+                reason = (
+                    verdict.split(":", 1)[1].strip()
+                    if ":" in verdict
+                    else "Pre-screen: low confidence"
+                )
+                parsed = ("LOW_CONFIDENCE", reason or "Pre-screen: low confidence")
+            else:
+                continue
+            if fid in verdicts:
+                verdicts.pop(fid)
+                repeated_ids.add(fid)
+            else:
+                verdicts[fid] = parsed
+        return BatchReviewOutcome(turn_num, batch, verdicts, None)
+
+    tasks: list[asyncio.Task[BatchReviewOutcome]] = []
+    outcomes: list[BatchReviewOutcome] = []
+    async with asyncio.TaskGroup() as group:
+        for batch_start in range(0, len(candidates), 10):
+            batch = candidates[batch_start : batch_start + 10]
+            turn_num = batch_start // 10 + 1
+            tasks.append(group.create_task(review_batch(batch, turn_num)))
+        for completed in asyncio.as_completed(tasks):
+            outcome = await completed
+            outcomes.append(outcome)
+            if outcome.error is not None:
+                events_svc.emit(
+                    run_id,
+                    {
+                        "type": "scanner_phase",
+                        "phase": "post_review_turn",
+                        "status": "error",
+                        "message": f"Turn {outcome.turn}/{total_review_batches}: review failed - {outcome.error}",
+                        "data": {
+                            "turn": outcome.turn,
+                            "total_turns": total_review_batches,
+                            "error": outcome.error,
+                        },
+                    },
+                )
+                continue
+
+            accepted_this_batch = sum(
+                verdict == "ACCEPT" for verdict, _ in outcome.verdicts.values()
+            )
+            low_confidence_this_batch = sum(
+                verdict == "LOW_CONFIDENCE" for verdict, _ in outcome.verdicts.values()
+            )
+            unreviewed_this_batch = len(outcome.batch) - len(outcome.verdicts)
+            batch_msg = (
+                f"Turn {outcome.turn}/{total_review_batches}: reviewed {len(outcome.verdicts)} finding(s)"
+                f" - {accepted_this_batch} accepted,"
+                f" {low_confidence_this_batch} flagged low confidence,"
+                f" {unreviewed_this_batch} unreviewed"
+            )
             events_svc.emit(
                 run_id,
                 {
                     "type": "scanner_phase",
                     "phase": "post_review_turn",
                     "status": "complete",
-                    "message": f"Turn {turn_num}/{total_review_batches}: review failed — {exc}",
+                    "message": batch_msg,
                     "data": {
-                        "turn": turn_num,
+                        "turn": outcome.turn,
                         "total_turns": total_review_batches,
-                        "error": str(exc),
+                        "batch_size": len(outcome.batch),
+                        "accepted": accepted_this_batch,
+                        "low_confidence": low_confidence_this_batch,
+                        "unreviewed": unreviewed_this_batch,
                     },
                 },
             )
-            continue
-
-        for line in verdict_text.strip().splitlines():
-            parts = [p.strip() for p in line.split("|", 1)]
-            if len(parts) != 2:
-                continue
-            try:
-                reference = parts[0].replace("REF:", "").strip()
-                fid = next(
-                    candidate_id
-                    for candidate_id, candidate_reference in reference_by_id.items()
-                    if candidate_reference == reference
-                )
-            except (StopIteration, ValueError):
-                continue
-            verdict = parts[1].strip()
-            if verdict.upper().startswith("LOW_CONFIDENCE"):
-                reason = (
-                    verdict.split(":", 1)[1].strip()
-                    if ":" in verdict
-                    else "Pre-screen: low confidence"
-                )
-                low_confidence_ids.append(fid)
-                batch_low_confidence.append(fid)
-                reasons[fid] = reason
-
-        accepted_this_batch = len(batch) - len(batch_low_confidence)
-        batch_msg = (
-            f"Turn {turn_num}/{total_review_batches}: reviewed {len(batch)} finding(s)"
-            f" → {accepted_this_batch} accepted"
-            + (
-                f", {len(batch_low_confidence)} flagged low confidence"
-                if batch_low_confidence
-                else ""
-            )
-        )
-        events_svc.emit(
-            run_id,
-            {
-                "type": "scanner_phase",
-                "phase": "post_review_turn",
-                "status": "complete",
-                "message": batch_msg,
-                "data": {
-                    "turn": turn_num,
-                    "total_turns": total_review_batches,
-                    "batch_size": len(batch),
-                    "accepted": accepted_this_batch,
-                    "low_confidence": len(batch_low_confidence),
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "agent_status",
+                    "agent_id": "reporting",
+                    "role": "Reporting",
+                    "status": "active",
+                    "current_task": batch_msg,
+                    "_persist": True,
                 },
-            },
-        )
-        events_svc.emit(
-            run_id,
-            {
-                "type": "agent_status",
-                "agent_id": "reporting",
-                "role": "Reporting",
-                "status": "active",
-                "current_task": batch_msg,
-                "_persist": True,
-            },
-        )
+            )
 
-    if low_confidence_ids:
+    verdicts_by_id = {
+        fid: verdict
+        for outcome in sorted(outcomes, key=lambda item: item.turn)
+        for fid, verdict in outcome.verdicts.items()
+    }
+    changed: list[tuple[int, str, str]] = []
+    accepted = 0
+    stale = 0
+    if verdicts_by_id:
         with Session(get_engine()) as s:
-            for fid in low_confidence_ids:
+            for fid, (verdict, reason) in verdicts_by_id.items():
                 row = s.get(ScanFinding, fid)
-                if row and row.validation_status == "unvalidated":
-                    row.validation_status = "low_confidence"
-                    row.validation_note = reasons.get(
-                        fid, "Pre-screen flagged as low confidence."
-                    )
-                    s.add(row)
+                if (
+                    row is None
+                    or row.test_run_id != run_id
+                    or row.validation_status != "unvalidated"
+                ):
+                    stale += 1
+                    continue
+                if verdict == "ACCEPT":
+                    accepted += 1
+                    continue
+                row.validation_status = "low_confidence"
+                row.validation_note = reason
+                s.add(row)
+                changed.append((fid, row.reference, reason))
             s.commit()
-        for fid in low_confidence_ids:
+        for fid, reference, reason in changed:
             events_svc.emit(
                 run_id,
                 {
                     "type": "finding_validation_update",
                     "finding_id": fid,
-                    "finding_reference": reference_by_id.get(fid),
+                    "finding_reference": reference,
                     "validation_status": "low_confidence",
-                    "validation_note": reasons.get(
-                        fid, "Pre-screen flagged as low confidence."
-                    ),
+                    "validation_note": reason,
                 },
             )
 
-    accepted = len(candidates) - len(low_confidence_ids)
-    review_complete_msg = f"Pre-screen complete: {accepted} accepted, {len(low_confidence_ids)} flagged as low confidence."
+    low_confidence = len(changed)
+    unreviewed = len(candidates) - accepted - low_confidence
+    review_complete_msg = (
+        f"Pre-screen complete: {accepted} accepted,"
+        f" {low_confidence} flagged as low confidence, {unreviewed} unreviewed."
+    )
+    if stale:
+        review_complete_msg += (
+            f" {stale} finding(s) changed or were removed during review."
+        )
     events_svc.emit(
         run_id,
         {
@@ -6724,17 +6971,45 @@ async def _run_post_scan_llm_review(
         },
     )
     log.info(
-        "Post-scan review run_id=%s: %d accepted, %d low_confidence",
+        "Post-scan review run_id=%s: %d accepted, %d low_confidence, %d unreviewed (%d changed or removed)",
         run_id,
         accepted,
-        len(low_confidence_ids),
+        low_confidence,
+        unreviewed,
+        stale,
     )
 
 
-async def _do_thinking_scan(run_id: int) -> None:
+async def _do_thinking_scan(
+    run_id: int,
+    *,
+    effective_coverage_mode: str | None = None,
+    team_assignment: dict | None = None,
+) -> None:
     """LLM-directed scan: the model decides each HTTP request to issue, observes
     the response, and adaptively chooses what to probe next — exactly like a human
     tester working through curl."""
+    # Deep is an opt-in queue-driven scan. Keep the established Quick, Standard,
+    # Full, and SAST Validate orchestration below unchanged.
+    with Session(get_engine()) as _mode_session:
+        _mode_run = _mode_session.get(TestRun, run_id)
+        _coverage_mode = getattr(_mode_run, "coverage_mode", "track")
+    if _coverage_mode == "deep" and effective_coverage_mode is None:
+        from aespa.services.deep_scan import run_deep_scan
+
+        await run_deep_scan(run_id)
+        return
+    if _coverage_mode == "team" and effective_coverage_mode is None:
+        from aespa.services.team_scan import run_team_scan
+
+        await run_team_scan(run_id)
+        return
+
+    test_lead_agent_id = (
+        f"team-{team_assignment['key']}" if team_assignment else "scanner"
+    )
+    test_lead_role = team_assignment["label"] if team_assignment else "Test Lead"
+
     # ── Load config ───────────────────────────────────────────────────────────
     with Session(get_engine()) as s:
         run = s.get(TestRun, run_id)
@@ -6747,7 +7022,9 @@ async def _do_thinking_scan(run_id: int) -> None:
         scanner_policy = get_run_scanner_policy(s, run)
         creds = list(site.credentials)
         guidance = (site.scan_guidance or "").strip()
-        coverage_mode = getattr(run, "coverage_mode", "track") or "track"
+        coverage_mode = effective_coverage_mode or (
+            getattr(run, "coverage_mode", "track") or "track"
+        )
         try:
             target_page_ids = {
                 int(value)
@@ -6823,9 +7100,11 @@ async def _do_thinking_scan(run_id: int) -> None:
 
         upstream_proxy = get_upstream_proxy_config(s)
         scanner_proxy_url = (
-            upstream_proxy.proxy_url if upstream_proxy.proxy_scanner else None
+            upstream_proxy.scanner_proxy_url if upstream_proxy.proxy_scanner else None
         )
-        llm_proxy_url = upstream_proxy.proxy_url if upstream_proxy.proxy_llm else None
+        llm_proxy_url = (
+            upstream_proxy.llm_proxy_url if upstream_proxy.proxy_llm else None
+        )
         specialist_cfg = get_specialist_agent_config(s)
         global_header_cfg = get_global_http_header_config(s)
         browser_debug_cfg = get_browser_debug_config(s)
@@ -6841,8 +7120,10 @@ async def _do_thinking_scan(run_id: int) -> None:
     browser_visible = bool(browser_debug_cfg.browser_visible)
 
     _scanner_proxy_var.set(scanner_proxy_url)
+    _scanner_ca_bundle_var.set(upstream_proxy.scanner_ca_bundle_path)
     _scanner_global_header_var.set(global_http_header)
     llm_svc.set_llm_proxy(llm_proxy_url)
+    llm_svc.set_llm_ca_bundle(upstream_proxy.llm_ca_bundle_path)
     llm_svc.set_run_context(run_id, lambda evt: events_svc.emit(run_id, evt))
 
     base_url = str(site.base_url or "").strip()
@@ -6881,8 +7162,8 @@ async def _do_thinking_scan(run_id: int) -> None:
             run_id,
             {
                 "type": "agent_status",
-                "agent_id": "scanner",
-                "role": "Test Lead",
+                "agent_id": test_lead_agent_id,
+                "role": test_lead_role,
                 "status": "active",
                 "current_task": f"Resuming from step {_resume_checkpoint.get('step_count', '?')}…",
                 "outcome": None,
@@ -6893,13 +7174,14 @@ async def _do_thinking_scan(run_id: int) -> None:
     if (
         not resuming
         and coverage_mode != "sast_validate"
-        and not scanner_policy.disable_deterministic_checks
+        and (team_assignment is None or team_assignment.get("run_preflight", False))
     ):
-        # Run JS sink analysis so xss_sink intel items exist in the DB before the LLM
-        # loop starts. The thinking-scan agent can then find them via target_inventory
-        # without re-fetching and re-parsing JS source itself.
+        # Passive source inventory runs even when automatic probes are disabled.
+        # It only creates leads; the agent must confirm execution before reporting.
         async with _make_scanner_client(
-            run_id=run_id, username="js_sink", verify=False, timeout=REQUEST_TIMEOUT
+            run_id=run_id,
+            timeout=REQUEST_TIMEOUT,
+            provenance={"purpose": "Test Lead: Analyze JavaScript sinks"},
         ) as _hx_sink:
             await _analyse_js_sinks(run_id, _hx_sink, scanner_policy=scanner_policy)
 
@@ -6928,6 +7210,15 @@ async def _do_thinking_scan(run_id: int) -> None:
         if intel_context:
             crawl_context = f"{crawl_context}\n\n{intel_context}"
 
+        if team_assignment:
+            crawl_context = (
+                f"TEAM TEST LEAD ASSIGNMENT\n"
+                f"You are {team_assignment['label']}. Your conversation and browser "
+                "state are independent from the other Team members. Saved findings "
+                "from earlier members are included only to prevent duplicate reports.\n\n"
+                f"{team_assignment['mission']}\n\n{crawl_context}"
+            )
+
         # Append any SAST leads imported into this web run so the Test Lead can
         # investigate them (mirrors the API scan's collection-keyed lead injection).
         try:
@@ -6951,6 +7242,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                 break
 
     # Select and inject WSTG skill reference blocks based on observed attack surface.
+    scoped_crawl_context = crawl_context
     if coverage_mode != "sast_validate":
         _selected_skills = llm_svc.select_wstg_skills(
             pages_snapshot,
@@ -6979,6 +7271,11 @@ async def _do_thinking_scan(run_id: int) -> None:
     )
 
     if coverage_mode != "sast_validate":
+        from aespa.services.workflow_workprogram import (
+            list_workflow_tests,
+            seed_workflow_tests,
+        )
+
         try:
             seed_web_workprogram(run_id)
         except Exception as _wp_exc:
@@ -6991,6 +7288,25 @@ async def _do_thinking_scan(run_id: int) -> None:
             )
         except Exception as _obligation_exc:
             log.warning("seed_scan_obligations failed (non-fatal): %s", _obligation_exc)
+        try:
+            seed_workflow_tests(run_id)
+            workflow_items = list_workflow_tests(run_id)["items"]
+            if workflow_items:
+                workflow_lines = [
+                    f"  id={item['id']} {item['owasp_category']} {item['name']} "
+                    f"({item['test_kind']}, {item['status']}): {item['goal']}"
+                    for item in workflow_items[:12]
+                ]
+                crawl_context += (
+                    "\n\nNamed workflow security checks:\n"
+                    + "\n".join(workflow_lines)
+                    + "\nUse context_tool workflow_list for the full current list and "
+                    "workflow_detail for the reached state. Call prepare_workflow_test "
+                    "before testing each workflow. Record a result only "
+                    "after a targeted security test, with scan traffic as evidence."
+                )
+        except Exception as workflow_exc:
+            log.warning("workflow coverage seed failed: %s", workflow_exc)
         if coverage_mode == "enforce":
             try:
                 reopen_unjustified_web_skips(run_id)
@@ -7009,20 +7325,23 @@ async def _do_thinking_scan(run_id: int) -> None:
         else _web_post_finding_fn  # covers specialists + all other paths
     )
 
-    _persist_execution_snapshot(
-        run_id,
-        llm_cfg=llm_cfg,
-        scanner_policy=scanner_policy,
-        pages_snapshot=pages_snapshot,
-        coverage_mode=coverage_mode,
-        enforce_coverage=bool(
-            coverage_mode == "enforce"
-            and (
-                scanner_policy is not None
-                and getattr(scanner_policy, "enforce_full_coverage_obligations", False)
-            )
-        ),
-    )
+    if team_assignment is None or team_assignment.get("key") == "primary":
+        _persist_execution_snapshot(
+            run_id,
+            llm_cfg=llm_cfg,
+            scanner_policy=scanner_policy,
+            pages_snapshot=pages_snapshot,
+            coverage_mode="team" if team_assignment else coverage_mode,
+            enforce_coverage=bool(
+                coverage_mode == "enforce"
+                and (
+                    scanner_policy is not None
+                    and getattr(
+                        scanner_policy, "enforce_full_coverage_obligations", False
+                    )
+                )
+            ),
+        )
 
     creds_for_llm = [
         {
@@ -7052,6 +7371,24 @@ async def _do_thinking_scan(run_id: int) -> None:
     history: list[dict] = []
     all_results: list[dict] = []
     progressive_findings_count = 0
+    budget_wrapup = False
+
+    def budget_stop_check() -> bool:
+        nonlocal budget_wrapup
+        if not budget_wrapup and llm_svc.run_budget_wrapup_due(run_id):
+            budget_wrapup = True
+            events_svc.emit(
+                run_id,
+                {
+                    "type": "scanner_phase",
+                    "phase": "budget_wrapup",
+                    "status": "warning",
+                    "message": "About $1 remains in the LLM budget. Stopping new tests and analysing saved results.",
+                    "_persist": True,
+                },
+            )
+        return budget_wrapup
+
     session_svc.ensure_anonymous_session(run_id, source="dynamic_scan")
     session_vault: dict[str, dict] = session_svc.load_session_vault(run_id)
     if "configured_primary" not in session_vault and creds:
@@ -7061,6 +7398,46 @@ async def _do_thinking_scan(run_id: int) -> None:
             if _sess.get("credential_id") == creds[0].id:
                 session_vault["configured_primary"] = _sess
                 break
+    if getattr(specialist_cfg, "enabled", True):
+        recovery_limit = int(getattr(specialist_cfg, "max_queued", 20) or 0) + int(
+            getattr(specialist_cfg, "max_concurrent", 5) or 0
+        )
+        recovered = handoff_svc.reclaim_interrupted_handoffs(
+            run_id, run_kind="web", limit=recovery_limit
+        )
+        with Session(get_engine()) as recovery_session:
+            waiting = recovery_session.exec(
+                select(SpecialistHandoff)
+                .where(SpecialistHandoff.run_kind == "web")
+                .where(SpecialistHandoff.run_id == run_id)
+                .where(SpecialistHandoff.status == "deferred")
+                .order_by(SpecialistHandoff.id)
+                .limit(recovery_limit)
+            ).all()
+        for handoff in [*recovered, *waiting]:
+            context = {
+                "run_id": run_id,
+                "agent_id": handoff.agent_id,
+                "attack_class": handoff.attack_class,
+                "target_url": handoff.target_url,
+                "rationale": handoff.rationale,
+                "session_vault": session_vault,
+                "llm_cfg": llm_cfg,
+                "base_url": base_url,
+                "scanner_policy": scanner_policy,
+                "max_steps": specialist_cfg.max_steps,
+                "site_id": site_id,
+                "is_api_run": False,
+                "target_page_id": handoff.page_id,
+                "target_session_label": handoff.session_label,
+                "handoff_id": handoff.id,
+                "_specialist_config": specialist_cfg,
+            }
+            if handoff.status == "deferred":
+                _deferred_specialist_contexts[handoff.id] = context
+            else:
+                _specialist_pending.setdefault(run_id, []).append(context)
+        _drain_specialist_queue(run_id)
     consecutive_context_tools = 0
     failed_url_counts: dict[
         str, int
@@ -7322,6 +7699,7 @@ async def _do_thinking_scan(run_id: int) -> None:
         if (
             run_id not in _thinking_stop_requested
             and not scanner_policy.disable_deterministic_checks
+            and (team_assignment is None or team_assignment.get("run_preflight", False))
         ):
             if coverage_mode == "sast_validate":
                 tls_findings = await _run_tls_posture_module(
@@ -7351,56 +7729,71 @@ async def _do_thinking_scan(run_id: int) -> None:
             if scanner_policy
             else REQUEST_TIMEOUT,
             follow_redirects=True,
-            verify=False,
             event_hooks=traffic_svc.make_httpx_hooks(
                 run_id, username=creds[0].username if creds else None
             ),
         ) as hx:
             # ── Continuous session path (Anthropic native tool use) ────────────
             if llm_cfg.provider in llm_svc.AGENTIC_LOOP_PROVIDERS:
-                progressive_findings_count = await _do_agentic_thinking_loop(
-                    run_id=run_id,
-                    llm_cfg=llm_cfg,
-                    base_url=base_url,
-                    crawl_context=crawl_context,
-                    creds_for_llm=creds_for_llm,
-                    session_vault=session_vault,
-                    pages_snapshot=pages_snapshot,
-                    findings_snapshot=findings_snapshot,
-                    first_page_id=first_page_id,
-                    scanner_policy=scanner_policy,
-                    hx=hx,
-                    browser_ctx=browser_ctx,
-                    pw_page=pw_page,
-                    primary_browser_cookies=_primary_browser_cookies,
-                    history=history,
-                    all_results=all_results,
-                    resume_from=_resume_checkpoint,
-                    specialist_config=specialist_cfg,
-                    site_id=site_id,
-                    creds=creds,
-                    login_url=login_url or "",
-                    guidance=guidance,
-                    system_message_override=(
-                        get_sast_validate_system(is_api_run=False)
-                        if coverage_mode == "sast_validate"
-                        else None
-                    ),
-                    tools_override=(
-                        get_sast_validate_tools(is_api_run=False)
-                        if coverage_mode == "sast_validate"
-                        else None
-                    ),
-                    post_probe_fn=(
-                        None if coverage_mode == "sast_validate" else _web_post_probe_fn
-                    ),
-                    post_finding_fn=(
-                        None
-                        if coverage_mode == "sast_validate"
-                        else _web_post_finding_fn
-                    ),
-                    coverage_mode=coverage_mode,
-                )
+                try:
+                    progressive_findings_count = await _do_agentic_thinking_loop(
+                        run_id=run_id,
+                        llm_cfg=llm_cfg,
+                        base_url=base_url,
+                        crawl_context=crawl_context,
+                        scoped_crawl_context=scoped_crawl_context,
+                        creds_for_llm=creds_for_llm,
+                        session_vault=session_vault,
+                        pages_snapshot=pages_snapshot,
+                        findings_snapshot=findings_snapshot,
+                        first_page_id=first_page_id,
+                        scanner_policy=scanner_policy,
+                        hx=hx,
+                        browser_ctx=browser_ctx,
+                        pw_page=pw_page,
+                        primary_browser_cookies=_primary_browser_cookies,
+                        history=history,
+                        all_results=all_results,
+                        resume_from=_resume_checkpoint,
+                        specialist_config=specialist_cfg,
+                        site_id=site_id,
+                        creds=creds,
+                        login_url=login_url or "",
+                        guidance=guidance,
+                        system_message_override=(
+                            get_sast_validate_system(is_api_run=False)
+                            if coverage_mode == "sast_validate"
+                            else (
+                                get_thinking_agent_system(False)
+                                + "\n\nTEAM MODE\n"
+                                + team_assignment["mission"]
+                                if team_assignment
+                                else None
+                            )
+                        ),
+                        tools_override=(
+                            get_sast_validate_tools(is_api_run=False)
+                            if coverage_mode == "sast_validate"
+                            else None
+                        ),
+                        post_probe_fn=(
+                            None
+                            if coverage_mode == "sast_validate"
+                            else _web_post_probe_fn
+                        ),
+                        post_finding_fn=(
+                            None
+                            if coverage_mode == "sast_validate"
+                            else _web_post_finding_fn
+                        ),
+                        coverage_mode=coverage_mode,
+                        display_agent_id=test_lead_agent_id,
+                        display_role=test_lead_role,
+                        stop_check=budget_stop_check,
+                    )
+                except llm_svc.LLMBudgetPauseError:
+                    budget_stop_check()
+                    budget_wrapup = True
             # ── Step-by-step path (fallback for non-agentic providers) ──────
             step = 0
             while True:
@@ -7408,6 +7801,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     break  # agentic loop already ran above
                 step += 1
                 if run_id in _thinking_stop_requested:
+                    break
+                if budget_stop_check():
                     break
 
                 events_svc.emit(
@@ -7424,8 +7819,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                     run_id,
                     {
                         "type": "agent_status",
-                        "agent_id": "scanner",
-                        "role": "Test Lead",
+                        "agent_id": test_lead_agent_id,
+                        "role": test_lead_role,
                         "status": "active",
                         "current_task": f"Step {step}: deciding next action…",
                         "outcome": None,
@@ -7460,6 +7855,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                         ],
                         emit_fn=lambda evt: events_svc.emit(run_id, evt),
                     )
+                except llm_svc.LLMBudgetPauseError:
+                    budget_wrapup = True
+                    break
                 except Exception as exc:
                     log.warning("thinking_next_action error at step %d: %s", step, exc)
                     break
@@ -7603,7 +8001,21 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "request_evidence": str(action.get("request_evidence") or ""),
                         "response_evidence": str(action.get("response_evidence") or ""),
                     }
-                    saved = await _persist_dynamic_finding(
+                    finding_rejection = _unauthenticated_finding_rejection(
+                        action, {str(affected): result}
+                    )
+                    if finding_rejection:
+                        history.append(
+                            _thinking_tool_result_record(
+                                step,
+                                "finding_write",
+                                action,
+                                finding_rejection,
+                                note,
+                            )
+                        )
+                        continue
+                    write_result = await _persist_dynamic_finding(
                         run_id=run_id,
                         llm_cfg=llm_cfg,
                         raw=action,
@@ -7613,6 +8025,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                         result_by_url={str(affected): result},
                         writeup_source="test_lead",
                     )
+                    saved = write_result.finding
                     if saved is not None:
                         progressive_findings_count += 1
                         findings_snapshot.append(
@@ -7640,13 +8053,18 @@ async def _do_thinking_scan(run_id: int) -> None:
                             "response_status": 200,
                             "response_headers": {"content-type": "application/json"},
                             "response_body": (
-                                f"{'Saved' if saved is not None else 'Skipped duplicate'} "
+                                f"{'Saved' if saved is not None else 'Skipped duplicate' if write_result.status == 'duplicate' else 'Rejected'} "
                                 f"finding: {action.get('title', 'Untitled finding')}. "
                                 + (
                                     "This finding already exists (recorded by a prior step). "
                                     "Do NOT write it again. Your next action MUST "
                                     "probe a completely different endpoint or attack category. "
-                                    if saved is None
+                                    if write_result.status == "duplicate"
+                                    else ""
+                                )
+                                + (
+                                    f"Reason: {write_result.reason}. "
+                                    if write_result.status == "rejected"
                                     else ""
                                 )
                                 + f"{str(action.get('evidence') or '')[:1200]}"
@@ -7657,7 +8075,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                         _emit_scan_update(run_id)
                         _emit_thinking_status(run_id)
                         if coverage_mode != "sast_validate":
-                            _schedule_burp_active_scan(run_id, saved, session_vault)
+                            external_scans.schedule_finding(
+                                run_id, saved, session_vault
+                            )
                     events_svc.emit(
                         run_id,
                         {
@@ -7666,7 +8086,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                             "status": "complete",
                             "message": (
                                 f"Step {step}: "
-                                f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
+                                f"{'recorded finding' if saved is not None else 'skipped duplicate finding' if write_result.status == 'duplicate' else 'rejected finding'} "
                                 f"{action.get('title', 'Untitled finding')}"
                             ),
                             "data": {
@@ -8566,6 +8986,10 @@ async def _do_thinking_scan(run_id: int) -> None:
                         "desc": note,
                         "url": url,
                         "status": resp_status,
+                        "sent_authenticated": bool(
+                            sent_headers.get("authorization")
+                            or sent_headers.get("cookie")
+                        ),
                         "duration_ms": duration_ms,
                         "headers": resp_headers,
                         "body": resp_body,
@@ -8686,6 +9110,8 @@ async def _do_thinking_scan(run_id: int) -> None:
 
                 await sleep_between_probes(scanner_policy)
 
+    # Wrap-up requests may use the reserved dollar and finish over budget.
+    llm_svc.set_budget_wrapup_allowed(budget_wrapup)
     # ── Analyse results ───────────────────────────────────────────────────────
     if all_results and coverage_mode != "sast_validate":
         _thinking_scan_status[run_id] = "analysing"
@@ -8699,7 +9125,9 @@ async def _do_thinking_scan(run_id: int) -> None:
                 first_page_id=first_page_id,
                 results=all_results,
             )
-        total_batches = len(llm_svc._chunk_probe_results(all_results, config=llm_cfg, url=base_url))
+        total_batches = len(
+            llm_svc._chunk_probe_results(all_results, config=llm_cfg, url=base_url)
+        )
         events_svc.emit(
             run_id,
             {
@@ -8713,7 +9141,13 @@ async def _do_thinking_scan(run_id: int) -> None:
                 ),
             },
         )
-        _emit_reporting_handoff(run_id, len(all_results), total_batches)
+        _emit_reporting_handoff(
+            run_id,
+            len(all_results),
+            total_batches,
+            agent_id=test_lead_agent_id,
+            role=test_lead_role,
+        )
         events_svc.emit(
             run_id,
             {
@@ -8779,16 +9213,17 @@ async def _do_thinking_scan(run_id: int) -> None:
                 )
 
             with Session(get_engine()) as _s:
-                reporting_cfg = get_reporting_debug_config(_s)
+                agent_policy = get_scanner_policy(_s)
             raw_findings = await llm_svc.analyse_probes(
                 llm_cfg,
                 base_url,
                 all_results,
                 on_batch_complete=_on_batch_complete,
-                max_concurrent_batches=reporting_cfg.batch_max_concurrent,
+                max_concurrent_batches=agent_policy.dast_max_concurrent_llm_requests,
             )
             # Normalise titles against existing findings so the same vulnerability
             # class gets a consistent title regardless of which step found it.
+            original_titles = [str(raw.get("title") or "") for raw in raw_findings]
             if raw_findings:
                 with Session(get_engine()) as _s:
                     _existing = _s.exec(
@@ -8800,6 +9235,8 @@ async def _do_thinking_scan(run_id: int) -> None:
                             "title": f.title,
                             "owasp_category": f.owasp_category,
                             "severity": f.severity,
+                            "affected_url": f.affected_url,
+                            "description": f.description,
                         }
                         for f in _existing
                     ]
@@ -8815,10 +9252,36 @@ async def _do_thinking_scan(run_id: int) -> None:
                 result_by_url = {r["url"]: r for r in all_results}
                 saved_count = 0
                 duplicate_count = 0
+                rejected_count = 0
                 saved_finding_ids: list[int] = []
 
-                for raw in raw_findings:
+                for index, raw in enumerate(raw_findings):
                     affected = (raw.get("affected_url") or base_url).strip()
+                    evidence_result_by_url = result_by_url
+                    if _finding_claims_unauthenticated(raw):
+                        anonymous_match = next(
+                            (
+                                result
+                                for result in reversed(all_results)
+                                if result.get("url") == affected
+                                and result.get("sent_authenticated") is False
+                            ),
+                            None,
+                        )
+                        evidence_result_by_url = {
+                            affected: anonymous_match or result_by_url.get(affected, {})
+                        }
+                    finding_rejection = _unauthenticated_finding_rejection(
+                        raw, evidence_result_by_url
+                    )
+                    if finding_rejection:
+                        rejected_count += 1
+                        log.warning(
+                            "Reporting finding rejected for run_id=%s: %s",
+                            run_id,
+                            finding_rejection,
+                        )
+                        continue
                     page_id = _dynamic_finding_page_id(
                         s,
                         run_id=run_id,
@@ -8827,13 +9290,31 @@ async def _do_thinking_scan(run_id: int) -> None:
                         pages_snapshot=pages_snapshot,
                         first_page_id=first_page_id,
                     )
-                    if _dynamic_finding_exists(
+                    duplicate = _find_dynamic_duplicate(
                         s,
                         run_id=run_id,
                         title=str(raw.get("title") or "Untitled finding"),
                         affected_url=affected,
                         owasp_category=str(raw.get("owasp_category") or "A00"),
-                    ):
+                    )
+                    if duplicate is not None:
+                        candidate = _finding_from_llm(
+                            run_id=run_id,
+                            page_id=page_id,
+                            page_url=affected,
+                            raw={**raw, "title": original_titles[index]},
+                            result_by_url=evidence_result_by_url,
+                            validation_status="unvalidated",
+                            validation_note=None,
+                        )
+                        if _upgrade_duplicate_finding(
+                            duplicate, candidate, original_title=original_titles[index]
+                        ):
+                            s.add(duplicate)
+                            if duplicate.id is not None:
+                                saved_finding_ids.append(duplicate.id)
+                            saved_count += 1
+                            continue
                         duplicate_count += 1
                         continue
                     finding = _finding_from_llm(
@@ -8841,7 +9322,7 @@ async def _do_thinking_scan(run_id: int) -> None:
                         page_id=page_id,
                         page_url=affected,
                         raw=raw,
-                        result_by_url=result_by_url,
+                        result_by_url=evidence_result_by_url,
                     )
                     s.add(finding)
                     s.flush()
@@ -8858,6 +9339,11 @@ async def _do_thinking_scan(run_id: int) -> None:
             message = f"Analysis complete — {saved_count} finding(s) recorded."
             if duplicate_count:
                 message += f" {duplicate_count} duplicate finding(s) skipped."
+            if rejected_count:
+                message += (
+                    f" {rejected_count} unsupported unauthenticated-access "
+                    "finding(s) rejected."
+                )
             events_svc.emit(
                 run_id,
                 {
@@ -8898,14 +9384,14 @@ async def _do_thinking_scan(run_id: int) -> None:
             and getattr(scanner_policy, "enforce_full_coverage_obligations", False)
         )
     )
-    if _enforce_full_coverage and not stopped:
+    if _enforce_full_coverage and not stopped and not budget_wrapup:
         try:
             events_svc.emit(
                 run_id,
                 {
                     "type": "agent_status",
-                    "agent_id": "scanner",
-                    "role": "Test Lead",
+                    "agent_id": test_lead_agent_id,
+                    "role": test_lead_role,
                     "status": "active",
                     "current_task": "Completing full web coverage — resolving remaining cells…",
                     "outcome": None,
@@ -8945,15 +9431,37 @@ async def _do_thinking_scan(run_id: int) -> None:
             await _run_post_scan_llm_review(run_id, llm_cfg, _pre_scan_max_id)
         except Exception as _rev_exc:
             log.warning("Post-scan review failed (non-fatal): %s", _rev_exc)
+    workflow_gaps_remaining: list[dict] = []
+    if not stopped and coverage_mode == "enforce":
+        from aespa.services.web_workprogram import web_completion
+        from aespa.services.workflow_workprogram import remaining_workflow_tests
+
+        workflow_gaps_remaining = remaining_workflow_tests(run_id)
+        if workflow_gaps_remaining:
+            has_unresolved_obligations = True
+        if web_completion(run_id)["unresolved_units"]:
+            has_unresolved_obligations = True
+    if (
+        team_assignment is not None
+        and not team_assignment.get("final", False)
+        and not budget_wrapup
+    ):
+        if stopped:
+            llm_svc.clear_run_context()
+            raise asyncio.CancelledError
+        llm_svc.clear_run_context()
+        return
     standard_progress = None
     standard_target_unmet = False
     if not stopped and coverage_mode == "standard":
         try:
-            from aespa.services.web_workprogram import get_web_coverage_matrix
+            from aespa.services.web_workprogram import web_completion
 
-            standard_progress = _exercised_coverage_progress(
-                get_web_coverage_matrix(run_id).get("column_totals", {}),
-                int(getattr(scanner_policy, "standard_coverage_percent", 60)),
+            standard_progress = web_completion(
+                run_id,
+                target_percent=int(
+                    getattr(scanner_policy, "standard_coverage_percent", 60)
+                ),
             )
             standard_target_unmet = not bool(standard_progress["target_met"])
         except Exception as _standard_exc:
@@ -8962,7 +9470,6 @@ async def _do_thinking_scan(run_id: int) -> None:
             )
             standard_target_unmet = True
     _thinking_scan_status[run_id] = "stopped" if stopped else "complete"
-    _emit_thinking_status(run_id)
     log.info(
         "=== Thinking scan %s: run_id=%s ===",
         "stopped" if stopped else "complete",
@@ -8978,29 +9485,50 @@ async def _do_thinking_scan(run_id: int) -> None:
             run_id,
             {
                 "type": "agent_status",
-                "agent_id": "scanner",
-                "role": "Test Lead",
+                "agent_id": test_lead_agent_id,
+                "role": test_lead_role,
                 "status": "complete",
                 "current_task": "Scan stopped",
                 "outcome": f"Stopped with {_finding_count} finding(s) recorded",
                 "_persist": True,
             },
         )
-    elif standard_target_unmet:
+    elif budget_wrapup:
         events_svc.emit(
             run_id,
             {
                 "type": "agent_status",
-                "agent_id": "scanner",
-                "role": "Test Lead",
+                "agent_id": test_lead_agent_id,
+                "role": test_lead_role,
+                "status": "complete",
+                "current_task": "Budget reached; scan wrap-up complete",
+                "outcome": f"Finished with {_finding_count} finding(s) recorded",
+                "_persist": True,
+            },
+        )
+    elif standard_target_unmet or workflow_gaps_remaining:
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": test_lead_agent_id,
+                "role": test_lead_role,
                 "status": "incomplete",
-                "current_task": "Standard coverage target not reached",
+                "current_task": (
+                    "Workflow checks remain"
+                    if workflow_gaps_remaining
+                    else "Standard coverage target not reached"
+                ),
                 "outcome": (
-                    f"Exercised {standard_progress['exercised']}/"
-                    f"{standard_progress['total']} applicable coverage cells "
-                    f"({standard_progress['percent']}%)"
-                    if standard_progress
-                    else "Coverage progress could not be verified"
+                    f"{len(workflow_gaps_remaining)} workflow check(s) remain"
+                    if workflow_gaps_remaining
+                    else (
+                        f"Exercised {standard_progress['exercised']}/"
+                        f"{standard_progress['total']} applicable coverage cells "
+                        f"({standard_progress['percent']}%)"
+                        if standard_progress
+                        else "Coverage progress could not be verified"
+                    )
                 ),
                 "_persist": True,
             },
@@ -9015,10 +9543,18 @@ async def _do_thinking_scan(run_id: int) -> None:
                 _run.status = "stopped"
                 _run.outcome = "stopped"
                 _run.terminal_reason = "user_stop"
+            elif budget_wrapup:
+                _run.status = "incomplete"
+                _run.outcome = "incomplete"
+                _run.terminal_reason = "budget_reached"
             elif has_unresolved_obligations:
                 _run.status = "incomplete"
                 _run.outcome = "incomplete"
-                _run.terminal_reason = "coverage_budget_exhausted"
+                _run.terminal_reason = (
+                    "workflow_coverage_incomplete"
+                    if workflow_gaps_remaining
+                    else "coverage_budget_exhausted"
+                )
             elif coverage_mode in {"track", "standard", "sast_validate"}:
                 from aespa.services.scan_leads import get_all_leads_for_run
 
@@ -9048,10 +9584,36 @@ async def _do_thinking_scan(run_id: int) -> None:
             _run.completed_at = datetime.now(timezone.utc)
             _s.add(_run)
             _s.commit()
+    _emit_thinking_status(run_id)
     llm_svc.clear_run_context()
+    llm_svc.set_budget_wrapup_allowed(False)
 
 
 # ── Agentic loop helper ───────────────────────────────────────────────────────
+
+
+def _http_request_coverage_error(tool_input: dict, *, is_api_run: bool) -> str | None:
+    """Validate the coverage fields for a Test Lead HTTP request."""
+    request_role = str(tool_input.get("request_role") or "").strip().lower()
+    expected = "API1–API10" if is_api_run else "A01–A10"
+    if not request_role:
+        return (
+            "http_request: missing request_role. Set it to setup, recon, or test. "
+            "Use test for baselines, controls, and probes that evaluate a security "
+            "hypothesis."
+        )
+    if request_role not in {"setup", "recon", "test"}:
+        return "http_request: request_role must be setup, recon, or test."
+    if (
+        request_role == "test"
+        and not str(tool_input.get("owasp_category") or "").strip()
+    ):
+        return (
+            "http_request: test requests require owasp_category. Set it to the "
+            f"category this request is testing ({expected}) so the Work Program "
+            "can record it."
+        )
+    return None
 
 
 async def _do_agentic_thinking_loop(
@@ -9079,6 +9641,7 @@ async def _do_agentic_thinking_loop(
     creds: list | None = None,
     login_url: str = "",
     guidance: str = "",
+    scoped_crawl_context: str | None = None,
     # API-mode overrides — when provided these replace the web-scan defaults
     is_api_run: bool = False,  # run_id is an ApiTestRun id; key findings on api_test_run_id
     system_message_override: str | None = None,
@@ -9089,6 +9652,9 @@ async def _do_agentic_thinking_loop(
     post_probe_fn=None,  # callable(url, method, owasp_category) -> None; called after every http_request
     persist_credential_fn=None,  # callable(username, password, login_url) -> None; replaces site-credential persistence
     coverage_mode: str = "track",
+    display_agent_id: str = "scanner",
+    display_role: str = "Test Lead",
+    stop_check=None,
 ) -> int:
     """Run the continuous tool-use agentic scan (Anthropic native tool use path).
 
@@ -9269,7 +9835,55 @@ async def _do_agentic_thinking_loop(
         _blocked: set[str] = set()
         _failed: dict[str, int] = {}
 
-    if coverage_mode in {"track", "standard", "sast_validate"} and resume_messages is not None:
+    if (
+        is_api_run
+        and specialist_config is not None
+        and getattr(specialist_config, "enabled", True)
+    ):
+        recovery_limit = int(getattr(specialist_config, "max_queued", 20) or 0) + int(
+            getattr(specialist_config, "max_concurrent", 5) or 0
+        )
+        recovered = handoff_svc.reclaim_interrupted_handoffs(
+            run_id, run_kind="api", limit=recovery_limit
+        )
+        with Session(get_engine()) as recovery_session:
+            waiting = recovery_session.exec(
+                select(SpecialistHandoff)
+                .where(SpecialistHandoff.run_kind == "api")
+                .where(SpecialistHandoff.run_id == run_id)
+                .where(SpecialistHandoff.status == "deferred")
+                .order_by(SpecialistHandoff.id)
+                .limit(recovery_limit)
+            ).all()
+        for handoff in [*recovered, *waiting]:
+            context = {
+                "run_id": run_id,
+                "agent_id": handoff.agent_id,
+                "attack_class": handoff.attack_class,
+                "target_url": handoff.target_url,
+                "rationale": handoff.rationale,
+                "session_vault": session_vault,
+                "llm_cfg": llm_cfg,
+                "base_url": base_url,
+                "scanner_policy": scanner_policy,
+                "max_steps": specialist_config.max_steps,
+                "site_id": site_id,
+                "is_api_run": True,
+                "target_page_id": handoff.page_id,
+                "target_session_label": handoff.session_label,
+                "handoff_id": handoff.id,
+                "_specialist_config": specialist_config,
+            }
+            if handoff.status == "deferred":
+                _deferred_specialist_contexts[handoff.id] = context
+            else:
+                _specialist_pending.setdefault(run_id, []).append(context)
+        _drain_specialist_queue(run_id, run_kind="api")
+
+    if (
+        coverage_mode in {"track", "standard", "sast_validate"}
+        and resume_messages is not None
+    ):
         from aespa.services.scan_leads import format_lead_index_for_validation
 
         current_lead_index = format_lead_index_for_validation(
@@ -9367,6 +9981,19 @@ async def _do_agentic_thinking_loop(
         )
 
     def _agentic_done_check(tool_input: dict, step: int) -> tuple[bool, str]:
+        summary = str(tool_input.get("summary") or "").strip()
+        events_svc.emit(
+            run_id,
+            {
+                "type": "agent_status",
+                "agent_id": display_agent_id,
+                "role": display_role,
+                "status": "active",
+                "current_task": f"Step {step}: Called done",
+                "outcome": summary[:2000] or None,
+                "_persist": True,
+            },
+        )
         if coverage_mode in {"track", "standard", "sast_validate"}:
             from aespa.services.scan_leads import get_all_leads_for_run
 
@@ -9421,18 +10048,18 @@ async def _do_agentic_thinking_loop(
             else:
                 from aespa.services.web_workprogram import (
                     get_web_coverage_gaps,
-                    get_web_coverage_matrix,
+                    web_completion,
                 )
 
-                matrix = get_web_coverage_matrix(run_id)
-                totals = matrix.get("column_totals", {})
+                progress = web_completion(run_id, target_percent=target)
                 gaps = get_web_coverage_gaps(run_id, limit=6)
                 next_actions = [
                     f"{item.get('method')} {item.get('url')} "
                     f"({item.get('owasp_category')})"
                     for item in gaps.get("next_actions", [])
                 ]
-            progress = _exercised_coverage_progress(totals, target)
+            if is_api_run:
+                progress = _exercised_coverage_progress(totals, target)
             if not progress["target_met"]:
                 message = (
                     "Standard mode has exercised "
@@ -9448,6 +10075,31 @@ async def _do_agentic_thinking_loop(
                 f"Step {step}: Standard coverage target met at "
                 f"{progress['percent']}% ({progress['exercised']}/{progress['total']} cells)."
             )
+
+        if not is_api_run and coverage_mode == "enforce":
+            from aespa.services.web_workprogram import web_completion
+            from aespa.services.workflow_workprogram import remaining_workflow_tests
+
+            unresolved_units = web_completion(run_id)["unresolved_units"]
+            if unresolved_units:
+                message = (
+                    f"{len(unresolved_units)} exact coverage checks remain unresolved."
+                )
+                _emit_completion_log(f"Step {step}: {message}", status="warning")
+                return False, message
+
+            workflow_gaps = remaining_workflow_tests(run_id)
+            if workflow_gaps:
+                names = "; ".join(
+                    f"{item['name']} ({item['owasp_category']} {item['test_kind']})"
+                    for item in workflow_gaps[:6]
+                )
+                message = (
+                    f"{len(workflow_gaps)} workflow security check(s) remain. "
+                    f"Test them or record a concrete blocker: {names}."
+                )
+                _emit_completion_log(f"Step {step}: {message}", status="warning")
+                return False, message
 
         def _get_coverage_gaps() -> dict[str, Any]:
             if is_api_run:
@@ -9532,20 +10184,27 @@ async def _do_agentic_thinking_loop(
             "a probe for that endpoint or page and OWASP category, or record a finding."
         )
 
-    initial_message = "\n\n".join(
-        filter(
-            None,
-            [
-                f"Target: {base_url}",
-                f"Application context:\n{crawl_context}",
-                creds_text,
-                sessions_text,
-                guidance_text,
-                standard_coverage_text,
-                "Begin the assessment.",
-            ],
-        )
+    initial_sections = [
+        f"Target: {base_url}",
+        f"Application context:\n{crawl_context}",
+        creds_text,
+        sessions_text,
+        guidance_text,
+        standard_coverage_text,
+        "Begin the assessment.",
+    ]
+    initial_message = "\n\n".join(filter(None, initial_sections))
+    scoped_sections = list(initial_sections)
+    scoped_sections[1] = (
+        f"Application context:\n{scoped_crawl_context or crawl_context}"
     )
+    scoped_sections[-1] = (
+        "The provider declined the previous planning request. Continue this authorized "
+        "assessment from the inventory above. Choose one useful in-scope route and one "
+        "test class for the next bounded check. Use context_tool to inspect saved scan "
+        "data if needed. Do not mark coverage complete until a tool result supports it."
+    )
+    scoped_initial_message = "\n\n".join(filter(None, scoped_sections))
 
     # ── Tool executor closure ─────────────────────────────────────────────────
     async def _tool_executor(tool_name: str, tool_input: dict, step: int) -> str:
@@ -9572,8 +10231,8 @@ async def _do_agentic_thinking_loop(
             run_id,
             {
                 "type": "agent_status",
-                "agent_id": "scanner",
-                "role": "Test Lead",
+                "agent_id": display_agent_id,
+                "role": display_role,
                 "status": "active",
                 "current_task": f"Step {step}: {note}",
                 "outcome": None,
@@ -9674,6 +10333,45 @@ async def _do_agentic_thinking_loop(
                 requested_timeout_s=tool_input.get("timeout_s"),
             )
 
+        if tool_name == "prepare_workflow_test":
+            if is_api_run or coverage_mode == "sast_validate":
+                return "Workflow tests are available only in web coverage scans."
+            from aespa.services.workflow_workprogram import prepare_workflow_test
+
+            try:
+                target = prepare_workflow_test(
+                    run_id,
+                    int(tool_input.get("item_id")),
+                    preferred_url=tool_input.get("target_url"),
+                )
+            except (TypeError, ValueError) as exc:
+                return f"prepare_workflow_test rejected: {exc}"
+            return json.dumps(target, separators=(",", ":"))
+
+        if tool_name == "record_workflow_test":
+            if is_api_run or coverage_mode == "sast_validate":
+                return "Workflow tests are available only in web coverage scans."
+            from aespa.services.workflow_workprogram import record_workflow_test
+
+            try:
+                result = record_workflow_test(
+                    run_id,
+                    int(tool_input.get("item_id")),
+                    status=str(tool_input.get("status") or ""),
+                    attempted_sequence=tool_input.get("attempted_sequence") or [],
+                    expected_behavior=str(tool_input.get("expected_behavior") or ""),
+                    observed_behavior=str(tool_input.get("observed_behavior") or ""),
+                    evidence_traffic_ids=tool_input.get("evidence_traffic_ids") or [],
+                    finding_id=tool_input.get("finding_id"),
+                    blocked_reason=tool_input.get("blocked_reason"),
+                )
+            except (TypeError, ValueError) as exc:
+                return f"record_workflow_test rejected: {exc}"
+            completion_policy.record_progress(
+                f"workflow:{result['id']}:{result['status']}"
+            )
+            return json.dumps(result, separators=(",", ":"))
+
         # ── skip_coverage ─────────────────────────────────────────────────────
         if tool_name == "skip_coverage":
             if is_api_run or coverage_mode != "enforce":
@@ -9706,6 +10404,9 @@ async def _do_agentic_thinking_loop(
             lead_id = tool_input.get("lead_id")
             lead_reference = str(tool_input.get("lead_reference") or "").strip()
             outcome = str(tool_input.get("outcome") or "")
+            outcome_reason = str(tool_input.get("outcome_reason") or "").strip()
+            baseline_evidence = tool_input.get("baseline_evidence")
+            mutated_evidence = tool_input.get("mutated_evidence")
             lead_note = str(tool_input.get("note") or "")
             finding_id = tool_input.get("finding_id")
             finding_reference = str(tool_input.get("finding_reference") or "").strip()
@@ -9751,6 +10452,29 @@ async def _do_agentic_thinking_loop(
                 resolved_lead_id = (
                     int(lead_detail["id"]) if lead_detail else int(lead_id)
                 )
+                attack_path = lead_detail.get("attack_path", {}) if lead_detail else {}
+                is_compiled_case = (
+                    isinstance(attack_path, dict)
+                    and attack_path.get("schema_version") == 3
+                    and attack_path.get("validation_case_id") is not None
+                )
+                if is_compiled_case and outcome == "confirmed":
+                    if outcome_reason != "confirmed":
+                        return (
+                            "A confirmed validation case requires "
+                            "outcome_reason=confirmed."
+                        )
+                    if not baseline_evidence or not mutated_evidence:
+                        return (
+                            "A confirmed validation case requires both baseline_evidence "
+                            "and mutated_evidence."
+                        )
+                if (
+                    is_compiled_case
+                    and outcome != "confirmed"
+                    and outcome_reason == "confirmed"
+                ):
+                    return "outcome_reason=confirmed requires outcome=confirmed."
                 if finding_reference and not finding_id:
                     from aespa.services.references import find_finding_by_reference
 
@@ -9772,6 +10496,9 @@ async def _do_agentic_thinking_loop(
                     investigated_by_run_id=run_id,
                     linked_finding_id=int(finding_id) if finding_id else None,
                     link_coverage=coverage_mode != "sast_validate",
+                    outcome_reason=outcome_reason or None,
+                    baseline_evidence=baseline_evidence,
+                    mutated_evidence=mutated_evidence,
                 )
                 if updated is None:
                     return f"Lead {lead_reference or f'#{lead_id}'} not found."
@@ -9803,15 +10530,49 @@ async def _do_agentic_thinking_loop(
         if tool_name == "write_finding":
             affected = str(tool_input.get("affected_url") or base_url)
             finding_attack_class = handoff_svc.infer_attack_class(tool_input)
+            finding_body = tool_input.get("body")
+            finding_actor = _principal_scope_actor(
+                session_vault, str(tool_input.get("use_session") or "") or None
+            )
+            finding_method = str(tool_input.get("method") or "GET")
+            finding_state = tool_input.get("state_key")
+            finding_comparison = tool_input.get("comparison_actor_key")
+            finding_body_identity = _handoff_body_identity(finding_body)
+            selected_check_id = _coerce_object_check_id(
+                tool_input.get("object_check_id")
+            )
+            if selected_check_id is not None and not is_api_run:
+                with Session(get_engine()) as scope_session:
+                    selected = scope_session.get(ScanObligation, selected_check_id)
+                    if (
+                        selected is not None
+                        and selected.run_id == run_id
+                        and selected.scope_kind == "object"
+                    ):
+                        selected_target = scope_session.get(
+                            DiscoveredTarget, selected.target_id
+                        )
+                        if selected_target is not None:
+                            affected = selected_target.url
+                            finding_method = selected.http_method
+                            finding_state = selected_target.state_key
+                            finding_body_identity = selected.body_identity
+                            finding_actor = selected.baseline_actor_key
+                            finding_comparison = selected.comparison_actor_key
             owned = handoff_svc.find_active_conflict(
                 run_id,
                 run_kind="api" if is_api_run else "web",
                 attack_class=finding_attack_class,
                 target_url=affected,
                 parameter=handoff_svc.infer_parameter(
-                    affected, None, tool_input.get("parameter")
+                    affected, finding_body, tool_input.get("parameter")
                 ),
                 session_label=str(tool_input.get("use_session") or "") or None,
+                method=finding_method,
+                state_key=finding_state,
+                body_identity=finding_body_identity,
+                actor_key=finding_actor,
+                comparison_actor_key=finding_comparison,
             )
             if owned is not None:
                 return (
@@ -9843,7 +10604,12 @@ async def _do_agentic_thinking_loop(
                 "request_evidence": str(tool_input.get("request_evidence") or ""),
                 "response_evidence": str(tool_input.get("response_evidence") or ""),
             }
-            saved = await _persist_dynamic_finding(
+            finding_rejection = _unauthenticated_finding_rejection(
+                tool_input, {affected: fw_result}
+            )
+            if finding_rejection:
+                return finding_rejection
+            write_result = await _persist_dynamic_finding(
                 run_id=run_id,
                 llm_cfg=llm_cfg,
                 raw=tool_input,
@@ -9853,6 +10619,12 @@ async def _do_agentic_thinking_loop(
                 result_by_url={affected: fw_result},
                 writeup_source="test_lead",
                 is_api_run=is_api_run,
+            )
+            saved = write_result.finding
+            write_outcome = (
+                "Duplicate skipped"
+                if write_result.status == "duplicate"
+                else f"Finding rejected: {write_result.reason}"
             )
             if saved is not None:
                 progressive_findings_count += 1
@@ -9883,12 +10655,17 @@ async def _do_agentic_thinking_loop(
                     "response_status": 200,
                     "response_headers": {"content-type": "application/json"},
                     "response_body": (
-                        f"{'Saved' if saved is not None else 'Skipped duplicate'} "
+                        f"{'Saved' if saved is not None else 'Skipped duplicate' if write_result.status == 'duplicate' else 'Rejected'} "
                         f"finding: {tool_input.get('title', 'Untitled')}. "
                         + (
                             "This finding already exists. Do NOT write it again. "
                             "Move to a completely different endpoint or attack category. "
-                            if saved is None
+                            if write_result.status == "duplicate"
+                            else ""
+                        )
+                        + (
+                            f"Reason: {write_result.reason}. "
+                            if write_result.status == "rejected"
                             else ""
                         )
                         + str(tool_input.get("evidence") or "")[:600]
@@ -9899,7 +10676,7 @@ async def _do_agentic_thinking_loop(
                 _emit_scan_update(run_id)
                 _emit_thinking_status(run_id)
                 if coverage_mode != "sast_validate":
-                    _schedule_burp_active_scan(run_id, saved, session_vault)
+                    external_scans.schedule_finding(run_id, saved, session_vault)
                     from aespa.services import validator as _validator_svc
 
                     asyncio.create_task(
@@ -9922,7 +10699,7 @@ async def _do_agentic_thinking_loop(
                     "outcome": (
                         f"Saved [{tool_input.get('severity', '?')}] {_fw_title} ({saved.reference or f'#{saved.id}'})"
                         if saved is not None
-                        else f"Duplicate skipped: {_fw_title}"
+                        else f"{write_outcome}: {_fw_title}"
                     ),
                     "_persist": True,
                 },
@@ -9935,7 +10712,7 @@ async def _do_agentic_thinking_loop(
                     "status": "complete",
                     "message": (
                         f"Step {step}: "
-                        f"{'recorded finding' if saved is not None else 'skipped duplicate finding'} "
+                        f"{'recorded finding' if saved is not None else 'skipped duplicate finding' if write_result.status == 'duplicate' else 'rejected finding'} "
                         f"{_fw_title}"
                     ),
                     "data": {
@@ -9955,6 +10732,8 @@ async def _do_agentic_thinking_loop(
                     f"(severity: {tool_input.get('severity')}, "
                     f"OWASP: {tool_input.get('owasp_category')}, reference: {saved.reference or f'#{saved.id}'})"
                 )
+            if write_result.status == "rejected":
+                return f"Finding rejected: {write_result.reason}"
             return (
                 f'Duplicate skipped: "{tool_input.get("title")}" already exists. '
                 "Do NOT write it again. Move to a different attack surface."
@@ -10051,6 +10830,12 @@ async def _do_agentic_thinking_loop(
                     br_url, None, tool_input.get("parameter")
                 ),
                 session_label=str(tool_input.get("use_session") or "") or None,
+                method=str(tool_input.get("method") or "GET"),
+                state_key=tool_input.get("state_key"),
+                comparison_actor_key=tool_input.get("comparison_actor_key"),
+                actor_key=_principal_scope_actor(
+                    session_vault, str(tool_input.get("use_session") or "") or None
+                ),
             )
             if owned is not None:
                 return (
@@ -10062,20 +10847,43 @@ async def _do_agentic_thinking_loop(
             if _scope_err:
                 return f"[SCOPE BLOCK] {_scope_err}"
             steps_list = (br_action.get("steps") or []) + br_followup_steps
+            login_as = str(tool_input.get("login_as") or "").strip()
+            if login_as and tool_input.get("use_session"):
+                return "Browser: set either login_as or use_session, not both."
+            alternate_credential = (
+                _alternate_configured_credential(creds or [], login_as)
+                if login_as
+                else None
+            )
+            if login_as and alternate_credential is None:
+                return (
+                    "Browser: login_as must name one configured account different "
+                    "from the primary account. Cross-user viewing was not checked."
+                )
+            if alternate_credential is not None:
+                alternate_login_url = (
+                    _login_url_for_credential(login_url, alternate_credential)
+                    or base_url
+                )
+                login_scope_error = _active_scope_check(alternate_login_url)
+                if login_scope_error:
+                    return f"[SCOPE BLOCK] Login URL: {login_scope_error}"
             use_session_label = (
                 tool_input.get("use_session")
                 if isinstance(tool_input.get("use_session"), str)
                 else None
             )
             if (
-                use_session_label is None
+                not login_as
+                and use_session_label is None
                 and br_replay_requested
                 and br_target_page
                 and br_target_page.get("target_session_label")
             ):
                 use_session_label = str(br_target_page["target_session_label"])
             if (
-                use_session_label is None
+                not login_as
+                and use_session_label is None
                 and br_replay_requested
                 and br_target_page
                 and br_target_page.get("replay_credential_id") is not None
@@ -10096,6 +10904,12 @@ async def _do_agentic_thinking_loop(
             use_session_label, selected_session, _br_session_resolution_note = (
                 _resolve_requested_scan_session(session_vault, use_session_label)
             )
+            if alternate_credential is not None:
+                use_session_label = f"configured_credential_{alternate_credential.id}"
+                selected_session = {
+                    "username": alternate_credential.username,
+                    "credential_id": alternate_credential.id,
+                }
             payload_summary = _thinking_browser_payload_summary(steps_list)
             action_message = _thinking_action_log_message(
                 step, "BROWSER", br_url, tool_input
@@ -10120,65 +10934,109 @@ async def _do_agentic_thinking_loop(
                     },
                 },
             )
-            try:
-                _br_waf_strategy = _waf_strategy_for_run(run_id) or {}
-                # Isolate the browser session per step: clear the shared context's
-                # cookies first so a prior authenticated step can't leak into an
-                # anonymous/other-user navigation, then install exactly the selected
-                # session (default → restore the primary session).
-                cookie_list: list[dict] = []
-                with contextlib.suppress(Exception):
-                    await browser_ctx.clear_cookies()
-                if selected_session is not None:
-                    cookie_list = [
-                        {"name": k, "value": v, "url": br_url}
-                        for k, v in (selected_session.get("cookies") or {}).items()
-                    ]
-                    if _br_waf_strategy.get("transport") == "browser_page":
-                        cookie_list = _merge_browser_cookies(
-                            [
-                                cookie
-                                for cookie in _primary_browser_cookies
-                                if any(
-                                    str(cookie.get("name") or "")
-                                    .lower()
-                                    .startswith(prefix)
-                                    for prefix in _br_waf_strategy.get(
-                                        "preserve_cookie_prefixes", []
+            active_browser_ctx = browser_ctx
+            active_browser_page = pw_page
+            alternate_browser_ctx = None
+            cookie_list: list[dict] = []
+            if alternate_credential is not None:
+                try:
+                    (
+                        alternate_browser_ctx,
+                        active_browser_page,
+                    ) = await _open_browser_as_configured_account(
+                        browser_ctx.browser,
+                        alternate_credential,
+                        base_url=base_url,
+                        login_url=alternate_login_url,
+                        run_id=run_id,
+                        llm_cfg=llm_cfg,
+                        request_headers=tool_input.get("headers"),
+                    )
+                    active_browser_ctx = alternate_browser_ctx
+                    cookie_list = await active_browser_ctx.cookies()
+                except Exception as exc:
+                    if alternate_browser_ctx is not None:
+                        await alternate_browser_ctx.close()
+                    return f"Browser: alternate account login failed: {exc}"
+            else:
+                try:
+                    _br_waf_strategy = _waf_strategy_for_run(run_id) or {}
+                    # Isolate the browser session per step: clear the shared context's
+                    # cookies first so a prior authenticated step can't leak into an
+                    # anonymous/other-user navigation, then install exactly the selected
+                    # session (default → restore the primary session).
+                    cookie_list: list[dict] = []
+                    with contextlib.suppress(Exception):
+                        await browser_ctx.clear_cookies()
+                    if selected_session is not None:
+                        cookie_list = [
+                            {"name": k, "value": v, "url": br_url}
+                            for k, v in (selected_session.get("cookies") or {}).items()
+                        ]
+                        if _br_waf_strategy.get("transport") == "browser_page":
+                            cookie_list = _merge_browser_cookies(
+                                [
+                                    cookie
+                                    for cookie in _primary_browser_cookies
+                                    if any(
+                                        str(cookie.get("name") or "")
+                                        .lower()
+                                        .startswith(prefix)
+                                        for prefix in _br_waf_strategy.get(
+                                            "preserve_cookie_prefixes", []
+                                        )
                                     )
-                                )
-                            ],
-                            cookie_list,
-                            br_url,
-                            tuple(_br_waf_strategy.get("preserve_cookie_prefixes", [])),
-                        )
-                else:
-                    cookie_list = _primary_browser_cookies
-                if cookie_list:
-                    await browser_ctx.add_cookies(cookie_list)
-                _br_call_headers = (
-                    tool_input.get("headers")
-                    if isinstance(tool_input.get("headers"), dict)
-                    else {}
-                )
-                await browser_ctx.set_extra_http_headers(
-                    {
-                        **_playwright_global_headers(
-                            (selected_session.get("extra_headers") or {})
-                            if selected_session
-                            else {}
-                        ),
-                        **_br_call_headers,
-                    }
-                )
-            except Exception:
-                pass
+                                ],
+                                cookie_list,
+                                br_url,
+                                tuple(
+                                    _br_waf_strategy.get("preserve_cookie_prefixes", [])
+                                ),
+                            )
+                    else:
+                        cookie_list = _primary_browser_cookies
+                    if cookie_list:
+                        await browser_ctx.add_cookies(cookie_list)
+                    _br_call_headers = (
+                        tool_input.get("headers")
+                        if isinstance(tool_input.get("headers"), dict)
+                        else {}
+                    )
+                    await browser_ctx.set_extra_http_headers(
+                        {
+                            **_playwright_global_headers(
+                                (selected_session.get("extra_headers") or {})
+                                if selected_session
+                                else {}
+                            ),
+                            **_br_call_headers,
+                        }
+                    )
+                except Exception:
+                    pass
             traffic_svc.set_browser_context_tag(
-                browser_ctx, br_page_id, use_session_label
+                active_browser_ctx,
+                br_page_id,
+                use_session_label,
+                username=(
+                    (selected_session or {}).get("username")
+                    if selected_session is not None
+                    else (creds[0].username if creds else None)
+                ),
+                purpose=traffic_svc.request_purpose(
+                    tool_input,
+                    "Browser probe",
+                    agent_name="Test Lead",
+                    owasp_category=br_owasp or None,
+                    test_class=br_test_class or None,
+                ),
+                owasp_category=br_owasp or None,
+                test_class=br_test_class or None,
+                obligation_id=tool_input.get("obligation_id"),
             )
             try:
                 br_result = await _run_thinking_browser_action(
-                    pw_page,
+                    active_browser_page,
                     br_action,
                     default_url=base_url,
                     scanner_policy=scanner_policy,
@@ -10202,7 +11060,7 @@ async def _do_agentic_thinking_loop(
                         if isinstance(step, dict)
                     ]
                     br_result = await _run_thinking_browser_action(
-                        pw_page,
+                        active_browser_page,
                         fallback_action,
                         default_url=base_url,
                         scanner_policy=scanner_policy,
@@ -10212,13 +11070,15 @@ async def _do_agentic_thinking_loop(
                     followup_action = dict(br_action)
                     followup_action["steps"] = br_followup_steps
                     br_result = await _run_thinking_browser_action(
-                        pw_page,
+                        active_browser_page,
                         followup_action,
                         default_url=base_url,
                         scanner_policy=scanner_policy,
                     )
             finally:
-                traffic_svc.clear_browser_context_tag(browser_ctx)
+                traffic_svc.clear_browser_context_tag(active_browser_ctx)
+                if alternate_browser_ctx is not None:
+                    await alternate_browser_ctx.close()
             _persist_browser_object_references(
                 run_id,
                 br_page_id,
@@ -10226,6 +11086,11 @@ async def _do_agentic_thinking_loop(
                 use_session_label,
             )
             resp_body = str(br_result.get("body") or "")[:BODY_READ_LIMIT]
+            if alternate_credential is not None:
+                resp_body = (
+                    f"Logged in as configured account {alternate_credential.username} "
+                    f"for this browser visit.\n\n{resp_body}"
+                )
             if _br_session_resolution_note:
                 resp_body = f"{_br_session_resolution_note}\n\n{resp_body}"
             resp_status = br_result.get("status") or 0
@@ -10340,8 +11205,9 @@ async def _do_agentic_thinking_loop(
                         response_status=resp_status,
                         response_headers=resp_headers,
                         response_body=resp_body,
-                        authenticated=bool(cookie_list),
+                        authenticated=bool(cookie_list or alternate_credential),
                         browser_observation=True,
+                        source_page_id=br_page_id,
                     )
                 except Exception as _route_exc:
                     log.debug("Dynamic browser route enrichment failed: %s", _route_exc)
@@ -11156,6 +12022,29 @@ async def _do_agentic_thinking_loop(
                 )
                 return f"Specialist dispatch dropped ({drop_reason}). Continue investigating directly."
 
+        if tool_name == "select_object_check":
+            if is_api_run:
+                return "select_object_check is available only for web runs."
+            from aespa.services.web_workprogram import select_object_access_check
+
+            try:
+                check = select_object_access_check(
+                    run_id,
+                    int(tool_input["target_id"]),
+                    baseline_observation_id=int(tool_input["baseline_observation_id"]),
+                    comparison_actor_key=str(tool_input["comparison_actor_key"]),
+                    method=str(tool_input.get("method") or "GET"),
+                    technique=str(tool_input.get("technique") or "idor"),
+                    parameter=tool_input.get("parameter"),
+                )
+                return (
+                    f"Selected object check {check.id} for target {check.target_id}. "
+                    f"Compare {check.baseline_actor_key} with {check.comparison_actor_key} "
+                    f"using {check.http_method}; send the comparison with object_check_id={check.id}."
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                return f"select_object_check rejected: {exc}"
+
         # ── http_request (default) ────────────────────────────────────────────
         hr_method = str(tool_input.get("method") or "GET").upper()
         hr_url = str(tool_input.get("url") or "").strip()
@@ -11169,9 +12058,33 @@ async def _do_agentic_thinking_loop(
             hr_page_id = None
         if not hr_url:
             return "http_request: missing URL"
+        if not is_api_run and hr_page_id is not None:
+            with Session(get_engine()) as _hint_session:
+                _hint_page = _hint_session.get(CrawledPage, hr_page_id)
+                if (
+                    _hint_page is None
+                    or _hint_page.test_run_id != run_id
+                    or _hint_page.url != hr_url
+                ):
+                    return "http_request: page_id must identify this exact target URL"
+        _coverage_error = _http_request_coverage_error(
+            tool_input, is_api_run=is_api_run
+        )
+        if _coverage_error:
+            return _coverage_error
         _scope_err = _active_scope_check(hr_url)
         if _scope_err:
             return f"[SCOPE BLOCK] {_scope_err}"
+        if not is_api_run and hr_page_id is None:
+            from aespa.services.web_workprogram import resolve_web_page_id
+
+            with Session(get_engine()) as _page_session:
+                hr_page_id = resolve_web_page_id(
+                    _page_session,
+                    run_id=run_id,
+                    url=hr_url,
+                    create=False,
+                )
         hr_headers = tool_input.get("headers") or {}
         hr_body = tool_input.get("body")
         hr_use_session = (
@@ -11202,6 +12115,11 @@ async def _do_agentic_thinking_loop(
                 hr_url, hr_body, tool_input.get("parameter")
             ),
             session_label=hr_use_session,
+            method=hr_method,
+            state_key=tool_input.get("state_key"),
+            body_identity=_handoff_body_identity(hr_body),
+            actor_key=_principal_scope_actor(session_vault, hr_use_session),
+            comparison_actor_key=tool_input.get("comparison_actor_key"),
         )
         if owned is not None:
             return (
@@ -11236,8 +12154,23 @@ async def _do_agentic_thinking_loop(
             _resolve_requested_scan_session(session_vault, hr_use_session)
         )
         if isinstance(hx, traffic_svc.LoggingAsyncClient):
+            hx.username = (hr_sel_session or {}).get("username")
             hx.page_id = hr_page_id
             hx.session_label = hr_use_session
+            hx.provenance = {
+                "agent_id": "scanner",
+                "agent_step": step,
+                "purpose": traffic_svc.request_purpose(
+                    tool_input,
+                    "Probe target",
+                    agent_name="Test Lead",
+                    owasp_category=_hr_owasp or None,
+                    test_class=_hr_test_class or None,
+                ),
+                "owasp_category": _hr_owasp or None,
+                "test_class": _hr_test_class or None,
+                "obligation_id": tool_input.get("obligation_id"),
+            }
         events_svc.emit(
             run_id,
             {
@@ -11261,9 +12194,7 @@ async def _do_agentic_thinking_loop(
                 },
             },
         )
-        _schedule_burp_active_scan_for_investigation(
-            run_id, tool_input, note, session_vault
-        )
+        external_scans.schedule_investigation(run_id, tool_input, note, session_vault)
         hr_resp_status = 0
         hr_resp_headers: dict = {}
         hr_resp_body = ""
@@ -11414,8 +12345,10 @@ async def _do_agentic_thinking_loop(
             hr_resp_body = f"Request failed: {exc}"
         finally:
             if isinstance(hx, traffic_svc.LoggingAsyncClient):
+                hx.username = creds[0].username if creds else None
                 hx.page_id = None
                 hx.session_label = None
+                hx.provenance = {}
 
         hr_sent_headers = hr_r.request.headers if hr_resp_status else {}
         hr_req_ev = _request_evidence(
@@ -11438,6 +12371,9 @@ async def _do_agentic_thinking_loop(
             "desc": note,
             "url": hr_url,
             "status": hr_resp_status,
+            "sent_authenticated": bool(
+                hr_sent_headers.get("authorization") or hr_sent_headers.get("cookie")
+            ),
             "duration_ms": hr_duration_ms,
             "headers": hr_resp_headers,
             "body": hr_resp_body,
@@ -11490,6 +12426,78 @@ async def _do_agentic_thinking_loop(
         )
         all_results.append(hr_result)
         _mark_session_used(hr_use_session, hr_resp_status, hr_url)
+        _target_observation_note = ""
+        _object_check_note = ""
+        _handoff_evidence_id = None
+        if (
+            not is_api_run
+            and hr_resp_status
+            and isinstance(hx, traffic_svc.LoggingAsyncClient)
+            and hx.last_traffic_id
+        ):
+            from aespa.services import target_catalog
+
+            _credential_id = (hr_sel_session or {}).get("credential_id")
+            _actor_key = (
+                target_catalog.actor_key(int(_credential_id))
+                if _credential_id is not None
+                else "anonymous"
+                if hr_use_session == "anonymous" and not hr_sent_cookies
+                else target_catalog.actor_key(
+                    unknown=str(hr_use_session or "unresolved")
+                )
+            )
+            try:
+                observation = target_catalog.record_traffic_response(
+                    run_id,
+                    hx.last_traffic_id,
+                    actor=_actor_key,
+                    verified_credential_id=(
+                        int(_credential_id) if _credential_id is not None else None
+                    ),
+                )
+                _handoff_evidence_id = observation.id
+                _target_observation_note = (
+                    f"Target observation ID: {observation.id} "
+                    f"(target {observation.target_id}, {observation.result}, {_actor_key}).\n\n"
+                )
+                _check_id = _coerce_object_check_id(tool_input.get("object_check_id"))
+                if _check_id is not None:
+                    from aespa.services.web_workprogram import (
+                        evaluate_coverage_evidence,
+                        record_object_check_result,
+                        record_probe_execution,
+                    )
+
+                    execution_id = record_probe_execution(
+                        run_id,
+                        _check_id,
+                        traffic_id=hx.last_traffic_id,
+                        session_identity=hr_use_session,
+                        payload=hr_req_body_str,
+                        status_code=hr_resp_status,
+                        run_kind="web",
+                        method=hr_method,
+                        url=hr_url,
+                        target_id=observation.target_id,
+                        acting_actor_key=_actor_key,
+                    )
+                    evidence_id = evaluate_coverage_evidence(
+                        execution_id,
+                        expected_behavior="Compare this exact object across accounts",
+                        observed_behavior=f"HTTP {hr_resp_status}; further access evaluation needed",
+                        evaluation_oracle="object_access_comparison",
+                        outcome="inconclusive",
+                    )
+                    record_object_check_result(
+                        run_id,
+                        _check_id,
+                        traffic_id=hx.last_traffic_id,
+                        evaluation_id=evidence_id,
+                    )
+                    _object_check_note = f"Object check {_check_id}: comparison recorded as inconclusive.\n\n"
+            except (TypeError, ValueError) as exc:
+                _object_check_note = f"[OBJECT ATTRIBUTION REJECTED] {exc}\n\n"
         _obligation_id = tool_input.get("obligation_id")
         if _obligation_id is not None and not is_api_run:
             try:
@@ -11541,6 +12549,7 @@ async def _do_agentic_thinking_loop(
                             for key in hr_headers
                         )
                     ),
+                    source_page_id=hr_page_id,
                 )
             except Exception as _route_exc:
                 log.debug("Dynamic HTTP route enrichment failed: %s", _route_exc)
@@ -11551,7 +12560,7 @@ async def _do_agentic_thinking_loop(
                     if is_api_run:
                         post_probe_fn(hr_url, hr_method, _hr_owasp)
                     else:
-                        post_probe_fn(
+                        resolved_page_id = post_probe_fn(
                             hr_url,
                             hr_method,
                             _hr_owasp,
@@ -11559,6 +12568,16 @@ async def _do_agentic_thinking_loop(
                             hr_resp_status,
                             hr_page_id,
                         )
+                        if resolved_page_id is not None:
+                            if hr_page_id is None and isinstance(
+                                hx, traffic_svc.LoggingAsyncClient
+                            ):
+                                traffic_svc.assign_web_traffic_page(
+                                    hx.last_traffic_id,
+                                    run_id,
+                                    resolved_page_id,
+                                )
+                            hr_page_id = resolved_page_id
                 except Exception as _pp_exc:
                     log.debug("post_probe_fn error: %s", _pp_exc)
         _auto_dispatch_note = ""
@@ -11581,6 +12600,17 @@ async def _do_agentic_thinking_loop(
                         "target_url": hr_url,
                         "page_id": hr_page_id,
                         "use_session": hr_use_session,
+                        "method": hr_method,
+                        "body": hr_body,
+                        "evidence_observation_ids": (
+                            [_handoff_evidence_id]
+                            if _handoff_evidence_id is not None
+                            else [hx.last_traffic_id]
+                            if is_api_run
+                            and isinstance(hx, traffic_svc.LoggingAsyncClient)
+                            and hx.last_traffic_id is not None
+                            else []
+                        ),
                         "dispatch_source": "automatic",
                     },
                     session_vault=session_vault,
@@ -11727,6 +12757,8 @@ async def _do_agentic_thinking_loop(
         )
         return (
             _obligation_note
+            + _target_observation_note
+            + _object_check_note
             + _auto_dispatch_note
             + _canary_alert
             + _eviction_note
@@ -11753,7 +12785,7 @@ async def _do_agentic_thinking_loop(
 
     # ── Run the loop ──────────────────────────────────────────────────────────
     async def _on_checkpoint_callback(
-        messages: list[dict], step_count_value: int = 0
+        messages: list[dict], step_count_value: int = 0, *, strict: bool = False
     ) -> None:
         """Persist the full loop state after each completed LLM turn."""
         context_chars = len(json.dumps(messages, default=str))
@@ -11771,7 +12803,13 @@ async def _do_agentic_thinking_loop(
             progressive_findings_count=progressive_findings_count,
             consecutive_context_tools=_consecutive_ctx_tools[0],
             completion_state=completion_policy.to_state(),
+            strict=strict,
         )
+
+    async def _on_recovery_checkpoint_callback(
+        messages: list[dict], step_count_value: int = 0
+    ) -> None:
+        await _on_checkpoint_callback(messages, step_count_value, strict=True)
 
     def _on_context_compaction(stats: dict[str, int]) -> None:
         _context_metrics["context_compactions"] += 1
@@ -11958,17 +12996,34 @@ async def _do_agentic_thinking_loop(
         )
     )
 
+    initial_system_message = (
+        system_message_override
+        if system_message_override is not None
+        else get_thinking_agent_system(enforce_coverage)
+    )
+    recovery_prompt = None
+    if coverage_mode != "sast_validate" and getattr(
+        scanner_policy, "openai_refusal_recovery_enabled", False
+    ):
+        from aespa.services.prompts.refusal_recovery import test_lead_recovery_prompt
+
+        recovery_prompt = test_lead_recovery_prompt(
+            original_system=initial_system_message,
+            scoped_initial_user=scoped_initial_message,
+            is_api_run=is_api_run,
+        )
+
     try:
         await llm_svc.thinking_agentic_loop(
             llm_cfg,
-            system_message=system_message_override
-            if system_message_override is not None
-            else get_thinking_agent_system(enforce_coverage),
+            system_message=initial_system_message,
             initial_user_message=initial_message,
             tool_executor=_tool_executor,
             before_tool_execution=_before_tool_execution,
             emit_fn=lambda evt: events_svc.emit(run_id, evt),
-            stop_check=lambda: run_id in _thinking_stop_requested,
+            stop_check=lambda: (
+                run_id in _thinking_stop_requested or (stop_check and stop_check())
+            ),
             done_check=_agentic_done_check,
             after_tool_result=_after_tool_execution,
             after_tool_rejection=lambda _name, _input, result, _step: (
@@ -11978,6 +13033,8 @@ async def _do_agentic_thinking_loop(
             resume_messages=resume_messages,
             resume_step_count=resume_step_count,
             on_checkpoint=_on_checkpoint_callback,
+            refusal_recovery_prompt=recovery_prompt,
+            on_recovery_checkpoint=_on_recovery_checkpoint_callback,
             tools=tools_override,
             execution_monitor_enabled=exec_mon_enabled,
             max_consecutive_text_turns=max_text_turns,
@@ -12199,6 +13256,289 @@ async def _run_tls_posture_module(
     return [finding] if finding else []
 
 
+_OUTDATED_JS_MAX_REFETCH = 40
+_OUTDATED_JS_MAX_BYTES = 3_000_000
+_OUTDATED_JS_TIME_BUDGET_S = 120.0
+_SEVERITY_CVSS = {"low": 3.7, "medium": 6.1, "high": 7.5, "critical": 9.0}
+
+
+def _captured_scripts(run_id: int) -> tuple[dict[str, dict], dict[str, str]]:
+    """Return captured script responses keyed by URL, plus script→page links."""
+    scripts: dict[str, dict] = {}
+    loaded_by: dict[str, str] = {}
+    with Session(get_engine()) as s:
+        rows = s.exec(
+            select(
+                TrafficEntry.url,
+                TrafficEntry.status,
+                TrafficEntry.response_headers,
+                TrafficEntry.response_body,
+                TrafficEntry.response_body_size,
+            ).where(
+                TrafficEntry.test_run_id == run_id,
+                TrafficEntry.method == "GET",
+            )
+        ).all()
+        for url, status, headers, body, size in rows:
+            if not url or (status is not None and not 200 <= status < 300):
+                continue
+            path = urlparse(url).path.lower()
+            if (
+                not path.endswith((".js", ".mjs"))
+                and "javascript" not in (headers or "").lower()
+            ):
+                continue
+            text = (
+                body if isinstance(body, str) and not body.startswith("[binary") else ""
+            )
+            current = scripts.get(url)
+            if current is None or len(text) > len(current["body"]):
+                scripts[url] = {
+                    "body": text,
+                    "truncated": bool(size and size > len(text.encode())),
+                }
+        intel = s.exec(
+            select(TargetIntelItem.value, TargetIntelItem.url).where(
+                TargetIntelItem.test_run_id == run_id,
+                TargetIntelItem.kind == "script",
+            )
+        ).all()
+        for script_url, page_url in intel:
+            if not script_url:
+                continue
+            scripts.setdefault(script_url, {"body": "", "truncated": True})
+            if page_url:
+                loaded_by.setdefault(script_url, page_url)
+    return scripts, loaded_by
+
+
+async def _runtime_library_detections(browser_page) -> list[js_libraries.Detection]:
+    if browser_page is None:
+        return []
+    try:
+        page_url = browser_page.url
+    except Exception:
+        return []
+    detections: list[js_libraries.Detection] = []
+    for library, expr in js_libraries.runtime_probes():
+        try:
+            value = await browser_page.evaluate(
+                f"() => {{ try {{ const v = ({expr}); "
+                "return v ? String(v) : null; } catch (e) { return null; } }"
+            )
+        except Exception:
+            continue
+        version = js_libraries.clean_version(value)
+        if version:
+            detections.append(
+                js_libraries.Detection(
+                    library,
+                    version,
+                    js_libraries.METHOD_RUNTIME,
+                    page_url,
+                    f"{expr} → {value}"[:200],
+                )
+            )
+    return detections
+
+
+def _outdated_js_finding(
+    run_id: int,
+    report: js_libraries.LibraryReport,
+    loaded_by: dict[str, str],
+    list_label: str = "",
+) -> ScanFinding:
+    issue_lines = js_libraries.describe_vulnerabilities(report)
+    detection_lines = [
+        f"- {det.source} ({det.method}): {det.evidence}" for det in report.detections
+    ]
+    pages = sorted({loaded_by[src] for src in report.sources if src in loaded_by})
+    fixed = report.fixed_version
+    if fixed:
+        recommendation = (
+            f"Upgrade {report.display} to {fixed} or later, then retest the pages "
+            "that load it. If the library is no longer needed, remove it."
+        )
+    else:
+        recommendation = (
+            f"{report.display} {report.version} has issues with no fixed release in "
+            "this version line. Move to a supported release or replacement, or "
+            "remove the library if it is no longer needed."
+        )
+    description = (
+        f"The application loads {report.display} {report.version}, which is affected "
+        f"by {len(report.vulnerabilities)} known issue(s) (OWASP A06, Vulnerable and "
+        "Outdated Components):\n\n"
+        + "\n".join(f"- {line}" for line in issue_lines)
+        + "\n\nWhere the version was found:\n"
+        + "\n".join(detection_lines)
+    )
+    if pages:
+        description += "\n\nLoaded by:\n" + "\n".join(f"- {p}" for p in pages[:20])
+    if list_label:
+        description += f"\n\nMatched against the {list_label}."
+    summary = (
+        f"{report.display} {report.version} detected by "
+        f"{', '.join(report.methods)}; matches {', '.join(report.identifiers) or 'known issues'}."
+    )
+    detail = "\n".join(detection_lines)
+    cvss = _SEVERITY_CVSS.get(report.severity, 5.0)
+    affected = report.sources[0] if report.sources else ""
+    return ScanFinding(
+        test_run_id=run_id,
+        page_id=None,
+        owasp_category="A06",
+        severity=report.severity if report.severity in _SEVERITY_CVSS else "medium",
+        title=f"Outdated {report.display} {report.version} with known vulnerabilities",
+        description=description,
+        impact=(
+            "Known vulnerabilities in client-side libraries can let attackers run "
+            "script in users' browsers, pollute object prototypes, or slow pages down, "
+            "depending on which library features the application uses."
+        ),
+        likelihood=(
+            "The version is confirmed. Whether each issue can be exploited depends on "
+            "how the application uses the affected library features."
+        ),
+        recommendation=recommendation,
+        cvss_score=cvss,
+        cvss_vector="",
+        affected_url=affected,
+        evidence=_full_evidence(f"GET {affected}", detail, summary),
+        request_evidence=_request_evidence(f"GET {affected}"),
+        response_evidence=_response_evidence(detail),
+        evidence_json=_http_evidence_items_json(
+            f"GET {affected}", detail, summary=summary
+        ),
+        finding_source="deterministic_probe",
+        validation_status="confirmed",
+        validation_note=(
+            f"Library version confirmed from {', '.join(report.methods)}. "
+            "Exploitability of the listed issues was not tested."
+            + (f" Matched against the {list_label}." if list_label else "")
+        ),
+        created_at=_utcnow(),
+    )
+
+
+async def _run_outdated_js_module(
+    *,
+    run_id: int,
+    base_url: str,
+    site_id: int = 0,
+    browser_page=None,
+    auto_update: bool = True,
+) -> list[ScanFinding]:
+    """Check captured JavaScript files for library versions with known issues.
+
+    Uses script responses already recorded during the crawl. In-scope scripts
+    whose stored body was truncated are fetched again in full so libraries
+    bundled deeper in a file are still found. Out-of-scope scripts (CDNs) are
+    judged from their URL and stored body only. Versions are matched against
+    the Retire.js list, refreshed first when ``auto_update`` is on.
+    """
+    refresh = await retire_repository.ensure_fresh(enabled=auto_update)
+    list_label = js_libraries.source_label()
+    deadline = time.monotonic() + _OUTDATED_JS_TIME_BUDGET_S
+    stopped_early = False
+    events_svc.emit(
+        run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "outdated_js",
+            "status": "start",
+            "message": "Checking JavaScript libraries for known vulnerable versions…",
+        },
+    )
+    scripts, loaded_by = _captured_scripts(run_id)
+    detections: list[js_libraries.Detection] = []
+    refetch: list[str] = []
+    for url, info in scripts.items():
+        if time.monotonic() > deadline:
+            stopped_early = True
+            break
+        found = js_libraries.detect(url, info["body"])
+        detections.extend(found)
+        has_content_match = any(d.method == js_libraries.METHOD_CONTENT for d in found)
+        if info["truncated"] and not has_content_match:
+            refetch.append(url)
+
+    fetched = 0
+    if refetch:
+        async with _make_scanner_client(
+            run_id=run_id,
+            headers={"User-Agent": _UA},
+            timeout=REQUEST_TIMEOUT,
+            follow_redirects=True,
+        ) as hx:
+            for url in refetch:
+                if fetched >= _OUTDATED_JS_MAX_REFETCH:
+                    break
+                if time.monotonic() > deadline:
+                    stopped_early = True
+                    break
+                if site_id and check_scope(url, site_id, run_id):
+                    continue
+                if not site_id and urlparse(url).netloc != urlparse(base_url).netloc:
+                    continue
+                fetched += 1
+                try:
+                    resp = await hx.get(url)
+                except Exception:
+                    continue
+                if not 200 <= resp.status_code < 300:
+                    continue
+                raw = resp.content
+                complete = len(raw) <= _OUTDATED_JS_MAX_BYTES
+                raw = raw[:_OUTDATED_JS_MAX_BYTES]
+                content_matches = js_libraries.detect_in_content(
+                    raw.decode(errors="replace"),
+                    url,
+                    raw=raw if complete else None,
+                )
+                if content_matches:
+                    libraries = {d.library for d in content_matches}
+                    detections = [
+                        d
+                        for d in detections
+                        if not (d.source == url and d.library in libraries)
+                    ]
+                    detections.extend(content_matches)
+
+    detections.extend(await _runtime_library_detections(browser_page))
+    reports = js_libraries.vulnerable_reports(detections)
+    findings = [_outdated_js_finding(run_id, r, loaded_by, list_label) for r in reports]
+    message = (
+        f"JavaScript library check complete — {len(scripts)} script(s) checked "
+        f"against the {list_label}, {len(findings)} outdated library version(s) found."
+    )
+    if refresh.get("status") == "failed":
+        message += " The latest Retire.js list could not be downloaded."
+    if stopped_early:
+        message += " The check stopped early because it hit its time limit."
+    events_svc.emit(
+        run_id,
+        {
+            "type": "scanner_phase",
+            "phase": "outdated_js",
+            "status": "complete",
+            "message": message,
+            "data": {
+                "scripts": len(scripts),
+                "retire_list": refresh,
+                "stopped_early": stopped_early,
+                "refetched": fetched,
+                "libraries": [
+                    {"library": r.display, "version": r.version}
+                    for r in js_libraries.build_reports(detections)
+                ],
+                "finding_count": len(findings),
+            },
+        },
+    )
+    return findings
+
+
 async def _run_deterministic_site_modules(
     *,
     run_id: int,
@@ -12216,6 +13556,20 @@ async def _run_deterministic_site_modules(
     # TLS handshake probe is non-intrusive. Records at most one consolidated finding.
     tls_findings = await _run_tls_posture_module(run_id=run_id, base_url=base_url)
     if tls_findings and _save_deterministic_findings(run_id, tls_findings):
+        _emit_scan_update(run_id)
+
+    try:
+        js_findings = await _run_outdated_js_module(
+            run_id=run_id,
+            base_url=base_url,
+            site_id=site_id,
+            browser_page=browser_page,
+            auto_update=getattr(scanner_policy, "retire_auto_update", True),
+        )
+    except Exception:
+        log.exception("Outdated JavaScript library check failed for run %s", run_id)
+        js_findings = []
+    if js_findings and _save_deterministic_findings(run_id, js_findings):
         _emit_scan_update(run_id)
 
     if scanner_policy and scanner_policy.scan_mode == "passive":
@@ -12284,14 +13638,16 @@ async def _run_auth_matrix_module(
     scanner_policy=None,
 ) -> list[ScanFinding]:
     """Check high-value endpoints anonymously and across available sessions."""
-    targets = _auth_matrix_targets(run_id, base_url)
+    from aespa.services import target_catalog
+
+    targets = _spread_auth_targets(_auth_matrix_targets(run_id, base_url), 80)
     if not targets:
         return []
     timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
     follow_redirects = scanner_policy.follow_redirects if scanner_policy else True
     findings: list[ScanFinding] = []
 
-    for target in targets[:80]:
+    for target in targets:
         if run_id in _thinking_stop_requested:
             break
         url = target["url"]
@@ -12316,10 +13672,21 @@ async def _run_auth_matrix_module(
         )
         if not anon_result:
             continue
+        if anon_result.get("traffic_id"):
+            try:
+                target_catalog.record_traffic_response(
+                    run_id,
+                    anon_result["traffic_id"],
+                    actor="anonymous",
+                    state_key=target.get("state_key"),
+                )
+            except ValueError:
+                pass
         if (
             _is_successful_access(anon_result)
             and not anon_result.get("sent_authenticated")
             and _target_requires_auth_or_sensitive(target)
+            and target.get("source") != "discovered_target"
         ):
             findings.append(
                 _auth_matrix_finding(
@@ -12370,6 +13737,17 @@ async def _run_auth_matrix_module(
                 browser_page=browser_page,
                 primary_browser_cookies=primary_browser_cookies,
             )
+            if result and result.get("traffic_id"):
+                try:
+                    target_catalog.record_traffic_response(
+                        run_id,
+                        result["traffic_id"],
+                        actor=target_catalog.actor_key(cred_id),
+                        verified_credential_id=cred_id,
+                        state_key=target.get("state_key"),
+                    )
+                except ValueError:
+                    pass
             if (
                 result
                 and _is_successful_access(result)
@@ -12405,7 +13783,17 @@ async def _run_idor_matrix_module(
     primary_browser_cookies: list[dict] | None = None,
     scanner_policy=None,
 ) -> list[ScanFinding]:
-    """Compare object-reference pages across users using crawled ground truth."""
+    from types import SimpleNamespace
+
+    from aespa.models import DiscoveredTarget, TargetAccessObservation
+    from aespa.services import target_catalog
+    from aespa.services.web_workprogram import (
+        evaluate_coverage_evidence,
+        record_object_check_result,
+        record_probe_execution,
+        select_object_access_check,
+    )
+
     identified_sessions = {
         cred_id: session
         for cred_id, session in (cred_sessions or {}).items()
@@ -12425,28 +13813,119 @@ async def _run_idor_matrix_module(
                 .where(CrawledPage.status == "crawled")
             )
         )
+        known_targets = {(page.url, page.state_key) for page in pages}
+        prior_observations = list(
+            s.exec(
+                select(TargetAccessObservation)
+                .where(TargetAccessObservation.test_run_id == run_id)
+                .where(TargetAccessObservation.result == "reached")
+                .where(TargetAccessObservation.method == "GET")
+                .where(TargetAccessObservation.source_kind == "traffic")
+                .order_by(TargetAccessObservation.id)
+            )
+        )
+        exact_baselines = []
+        for observation in prior_observations:
+            target = s.get(DiscoveredTarget, observation.target_id)
+            if (
+                target is None
+                or target.state_key is not None
+                or (target.url, target.state_key) in known_targets
+                or not _url_has_object_reference(target.url)
+                or not observation.actor_key.startswith("credential:")
+            ):
+                continue
+            try:
+                credential_id = int(observation.actor_key.partition(":")[2])
+            except ValueError:
+                continue
+            if (
+                credential_id not in identified_sessions
+                or credential_id not in valid_credential_ids
+            ):
+                continue
+            exact_baselines.append((target.url, credential_id, observation.id))
+            known_targets.add((target.url, target.state_key))
 
-    findings: list[ScanFinding] = []
-    id_pages = [
-        page
+    candidates = [
+        (
+            page,
+            _canonical_page_accessible_by(page, valid_credential_ids, views_by_page),
+            None,
+        )
         for page in pages
         if _url_has_object_reference(page.url)
         and _canonical_page_accessible_by(page, valid_credential_ids, views_by_page)
     ]
-    for page in id_pages[:80]:
+    candidates.extend(
+        (
+            SimpleNamespace(id=None, url=url, state_key=None),
+            {credential_id},
+            observation_id,
+        )
+        for url, credential_id, observation_id in exact_baselines
+    )
+    for page, accessible, existing_baseline_id in candidates[:80]:
         if run_id in _thinking_stop_requested:
             break
-        accessible = _canonical_page_accessible_by(
-            page, valid_credential_ids, views_by_page
-        )
-        unauthorized = [
+        baseline_candidates = [
             (cred_id, session)
             for cred_id, session in identified_sessions.items()
-            if cred_id not in accessible
+            if cred_id in accessible
         ]
-        if not unauthorized:
+        if not baseline_candidates:
             continue
-        for cred_id, session in unauthorized[:3]:
+        baseline_id, baseline_session = baseline_candidates[0]
+        if existing_baseline_id is not None:
+            with Session(get_engine()) as s:
+                baseline_observation = s.get(
+                    TargetAccessObservation, existing_baseline_id
+                )
+        else:
+            baseline_result = await _fetch_matrix_url(
+                run_id,
+                page.url,
+                method="GET",
+                site_id=site_id,
+                session=baseline_session,
+                timeout=timeout,
+                follow_redirects=follow_redirects,
+                primary_session=primary_session,
+                browser_ctx=browser_ctx,
+                browser_page=browser_page,
+                primary_browser_cookies=primary_browser_cookies,
+                page_id=page.id,
+            )
+            if not baseline_result or not baseline_result.get("traffic_id"):
+                continue
+            try:
+                baseline_observation = target_catalog.record_traffic_response(
+                    run_id,
+                    baseline_result["traffic_id"],
+                    actor=target_catalog.actor_key(baseline_id),
+                    state_key=page.state_key,
+                    verified_credential_id=baseline_id,
+                )
+            except ValueError:
+                continue
+        if baseline_observation is None or baseline_observation.result != "reached":
+            continue
+        comparison_sessions = [
+            (cred_id, session)
+            for cred_id, session in identified_sessions.items()
+            if cred_id != baseline_id
+        ]
+        for cred_id, session in comparison_sessions[:3]:
+            try:
+                check = select_object_access_check(
+                    run_id,
+                    baseline_observation.target_id,
+                    baseline_observation_id=baseline_observation.id,
+                    comparison_actor_key=target_catalog.actor_key(cred_id),
+                    method="GET",
+                )
+            except ValueError:
+                continue
             result = await _fetch_matrix_url(
                 run_id,
                 page.url,
@@ -12459,28 +13938,53 @@ async def _run_idor_matrix_module(
                 browser_ctx=browser_ctx,
                 browser_page=browser_page,
                 primary_browser_cookies=primary_browser_cookies,
+                page_id=page.id,
             )
-            if not result or not _is_successful_access(result):
+            if not result or not result.get("traffic_id"):
                 continue
-            if _looks_like_denial(result["body"]) or _looks_like_spa_shell(
-                result["body"], result["headers"].get("content-type", "")
-            ):
-                continue
-            if not _body_contains_original_page_evidence(
-                result["body"], page.title or "", page.page_text or ""
-            ):
-                continue
-            findings.append(
-                _idor_matrix_finding(
-                    run_id=run_id,
-                    page=page,
-                    result=result,
-                    actor=session.get("username") or f"credential {cred_id}",
+            try:
+                comparison_observation = target_catalog.record_traffic_response(
+                    run_id,
+                    result["traffic_id"],
+                    actor=target_catalog.actor_key(cred_id),
+                    state_key=page.state_key,
+                    verified_credential_id=cred_id,
                 )
+            except ValueError:
+                continue
+            execution_id = record_probe_execution(
+                run_id,
+                check.id,
+                traffic_id=result["traffic_id"],
+                session_identity=session.get("label"),
+                status_code=result["status"],
+                run_kind="web",
+                method="GET",
+                url=page.url,
+                target_id=comparison_observation.target_id,
+                acting_actor_key=target_catalog.actor_key(cred_id),
             )
-            break
+            evidence_id = evaluate_coverage_evidence(
+                execution_id,
+                expected_behavior="Only entitled actors should reach this exact object",
+                observed_behavior=(
+                    f"HTTP {result['status']} denied access"
+                    if comparison_observation.result == "denied"
+                    else f"HTTP {result['status']} returned; entitlement has not been established"
+                ),
+                evaluation_oracle="same_object_access_comparison",
+                outcome="passed"
+                if comparison_observation.result == "denied"
+                else "inconclusive",
+            )
+            record_object_check_result(
+                run_id,
+                check.id,
+                traffic_id=result["traffic_id"],
+                evaluation_id=evidence_id,
+            )
         await sleep_between_probes(scanner_policy)
-    return findings
+    return []
 
 
 def _canonical_credential_access(
@@ -12528,6 +14032,8 @@ def _canonical_page_accessible_by(
 
 
 def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
+    from aespa.models import DiscoveredTarget, TargetAccessObservation
+
     targets: dict[str, dict] = {}
     with Session(get_engine()) as s:
         valid_credential_ids, views_by_page = _canonical_credential_access(s, run_id)
@@ -12545,6 +14051,29 @@ def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
                 .where(TargetIntelItem.kind.in_(["endpoint", "script"]))
             )
         )
+        discovered = list(
+            s.exec(
+                select(DiscoveredTarget).where(DiscoveredTarget.test_run_id == run_id)
+            )
+        )
+        direct_access = list(
+            s.exec(
+                select(TargetAccessObservation)
+                .where(TargetAccessObservation.test_run_id == run_id)
+                .where(TargetAccessObservation.result == "reached")
+                .where(TargetAccessObservation.source_kind == "traffic")
+            )
+        )
+    access_by_target: dict[int, set[int]] = {}
+    for observation in direct_access:
+        if not observation.actor_key.startswith("credential:"):
+            continue
+        try:
+            credential_id = int(observation.actor_key.partition(":")[2])
+        except ValueError:
+            continue
+        if credential_id in valid_credential_ids:
+            access_by_target.setdefault(observation.target_id, set()).add(credential_id)
 
     for page in pages:
         accessible_by = _canonical_page_accessible_by(
@@ -12559,6 +14088,26 @@ def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
             "has_business_logic": page.has_business_logic,
             "accessible_by": sorted(accessible_by),
             "page_id": page.id,
+            "route_pattern": page.url,
+        }
+    for target in discovered:
+        if target.url in targets:
+            targets[target.url]["accessible_by"] = sorted(
+                set(targets[target.url]["accessible_by"])
+                | access_by_target.get(target.id, set())
+            )
+            continue
+        targets[target.url] = {
+            "url": target.url,
+            "method": "GET",
+            "source": "discovered_target",
+            "route_pattern": target.route_pattern,
+            "state_key": target.state_key,
+            "req_auth": None,
+            "has_object_ref": _url_has_object_reference(target.url),
+            "has_business_logic": False,
+            "accessible_by": sorted(access_by_target.get(target.id, set())),
+            "page_id": None,
         }
     for item in intel:
         raw_url = item.value or item.url or item.key
@@ -12588,6 +14137,23 @@ def _auth_matrix_targets(run_id: int, base_url: str) -> list[dict]:
     )
 
 
+def _spread_auth_targets(targets: list[dict], limit: int) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for target in targets:
+        grouped.setdefault(
+            str(target.get("route_pattern") or target["url"]), []
+        ).append(target)
+    selected: list[dict] = []
+    while grouped and len(selected) < limit:
+        for route in list(grouped):
+            selected.append(grouped[route].pop(0))
+            if not grouped[route]:
+                del grouped[route]
+            if len(selected) >= limit:
+                break
+    return selected
+
+
 async def _fetch_matrix_url(
     run_id: int,
     url: str,
@@ -12602,6 +14168,7 @@ async def _fetch_matrix_url(
     primary_browser_cookies: list[dict] | None = None,
     timeout: float = REQUEST_TIMEOUT,
     follow_redirects: bool = True,
+    page_id: int | None = None,
 ) -> dict | None:
     headers = {"User-Agent": _UA}
     cookies = None
@@ -12613,12 +14180,12 @@ async def _fetch_matrix_url(
     try:
         async with _make_scanner_client(
             run_id=run_id,
-            username=actor,
+            username=actor if session else None,
             cookies=cookies,
             headers=headers,
             follow_redirects=follow_redirects,
-            verify=False,
             timeout=timeout,
+            page_id=page_id,
         ) as client:
             if (
                 (_waf_strategy_for_run(run_id) or {}).get("transport") == "browser_page"
@@ -12686,6 +14253,9 @@ async def _fetch_matrix_url(
             "sent_authenticated": bool(
                 _sent_cookie_hdr or _sent_hdrs.get("authorization")
             ),
+            "traffic_id": client.last_traffic_id
+            if isinstance(client, traffic_svc.LoggingAsyncClient)
+            else None,
         }
     except Exception as exc:
         log.debug("Deterministic matrix request failed for %s: %s", url, exc)
@@ -13147,21 +14717,6 @@ def _deterministic_findings_from_results(
                 "Use parameterized queries, strict input validation, and generic error handling.",
             )
 
-        reflected_payload = _reflected_payload_from_result(result)
-        if (
-            reflected_payload
-            and reflected_payload in body
-            and _looks_xss_payload(reflected_payload)
-        ):
-            add(
-                "Reflected cross-site scripting",
-                "A03",
-                6.1,
-                "A script-capable payload was reflected in the response body without being removed or encoded.",
-                "Attackers could execute JavaScript in a victim browser if they can deliver a crafted URL or form submission.",
-                "Apply context-aware output encoding and reject dangerous HTML/JavaScript input where it is not expected.",
-            )
-
         if (
             "ssti" in desc.lower()
             and "49" in body
@@ -13216,40 +14771,6 @@ def _deterministic_findings_from_results(
             )
 
     return findings
-
-
-def _reflected_payload_from_result(result: dict) -> str:
-    desc = str(result.get("desc") or "")
-    if ":" in desc:
-        candidate = desc.split(":", 1)[1].strip()
-        if candidate:
-            return candidate[:200]
-    parsed = urlparse(str(result.get("url") or ""))
-    qs = parse_qs(parsed.query, keep_blank_values=True)
-    for values in qs.values():
-        for value in values:
-            if _looks_xss_payload(value):
-                return value
-    payload = str(result.get("payload") or "")
-    return payload if _looks_xss_payload(payload) else ""
-
-
-def _looks_xss_payload(value: str) -> bool:
-    lower = (value or "").lower()
-    return any(
-        marker in lower
-        for marker in (
-            "<script",
-            "onerror=",
-            "onload=",
-            "ontoggle=",
-            "javascript:alert",
-            "<svg",
-            "autofocus",
-            "<details",
-            "alert(",
-        )
-    )
 
 
 def _looks_like_json_or_api(result: dict) -> bool:
@@ -13329,6 +14850,67 @@ def _browser_page_target_matches(result: dict, page: dict) -> bool:
 
 
 # ── Passive checks ────────────────────────────────────────────────────────────
+
+
+def _alternate_configured_credential(creds: list, username: str):
+    """Select a configured account other than the scan's primary account."""
+    requested = username.strip().casefold()
+    if not requested or not creds:
+        return None
+    matches = [c for c in creds if str(c.username).casefold() == requested]
+    if len(matches) != 1 or matches[0].id == creds[0].id:
+        return None
+    return matches[0]
+
+
+async def _open_browser_as_configured_account(
+    browser,
+    credential,
+    *,
+    base_url: str,
+    login_url: str,
+    run_id: int,
+    llm_cfg,
+    request_headers: dict | None = None,
+):
+    """Log in to an isolated browser context using an alternate site account."""
+    from aespa.services.crawler import _authenticate
+
+    context = await browser.new_context(
+        user_agent=playwright_user_agent(browser),
+        ignore_https_errors=True,
+        **_playwright_proxy(),
+    )
+    try:
+        protect_playwright_context(browser, context)
+        headers = {
+            key: value
+            for key, value in _playwright_global_headers(request_headers).items()
+            if key.lower() not in {"authorization", "cookie"}
+        }
+        if headers:
+            await context.set_extra_http_headers(headers)
+        traffic_svc.setup_playwright_logging(context, run_id)
+        page = await context.new_page()
+        try:
+            await page.goto(base_url, wait_until="domcontentloaded", timeout=20_000)
+        except Exception:
+            pass
+        await _authenticate(page, login_url, credential, run_id, llm_cfg=llm_cfg)
+        cookies = await context.cookies()
+        token, _ = await _read_browser_auth_token(page)
+        if not cookies and not token:
+            raise RuntimeError(
+                "The configured account did not produce a browser session"
+            )
+        if token:
+            await context.set_extra_http_headers(
+                {**headers, "Authorization": f"Bearer {token}"}
+            )
+        return context, page
+    except Exception:
+        await context.close()
+        raise
 
 
 async def _run_thinking_browser_action(
@@ -13678,6 +15260,93 @@ async def _run_thinking_browser_action(
                         + " actual="
                         + _compact_log_value(str(actual or ""), 160)
                     )
+                elif op == "set_field":
+                    # Set a form control's value directly in the DOM, bypassing the
+                    # visibility/editability gates that fill/type enforce, so the
+                    # agent can tamper hidden, disabled, or not-rendered fields
+                    # (price/total/object-id tampering) and then submit the real
+                    # form. Browser-driven submission lets the framework build a
+                    # valid request from the live FormData — React server actions,
+                    # classic HTML forms, and most SPAs serialize the DOM form, so
+                    # the tampered value is what the server receives. With
+                    # create=true a missing field is appended to the target form,
+                    # for values the UI never offers (e.g. another user's id).
+                    field_name = str(raw_step.get("name") or "").strip()
+                    selector = raw_step.get("selector")
+                    if not selector and not field_name:
+                        action_log.append(
+                            "set_field skipped: requires selector or name"
+                        )
+                        continue
+                    value = str(raw_step.get("value") or "")
+                    form_selector = raw_step.get("form")
+                    create = bool(raw_step.get("create"))
+                    try:
+                        result = await pw_page.evaluate(
+                            """(arg) => {
+                                const { selector, name, formSelector, value, create } = arg;
+                                let el = null;
+                                if (selector) {
+                                    el = document.querySelector(selector);
+                                } else if (name) {
+                                    const scope = formSelector
+                                        ? document.querySelector(formSelector)
+                                        : document;
+                                    if (formSelector && !scope) return "form-not-found";
+                                    el = scope.querySelector(
+                                        `[name="${name.replace(/"/g, '\\\\"')}"]`
+                                    );
+                                }
+                                let outcome;
+                                if (!el) {
+                                    if (!create || !name) return "not-found";
+                                    const form = formSelector
+                                        ? document.querySelector(formSelector)
+                                        : (document.querySelector("form"));
+                                    if (!form) return "form-not-found";
+                                    el = document.createElement("input");
+                                    el.type = "hidden";
+                                    el.name = name;
+                                    form.appendChild(el);
+                                    outcome = "created";
+                                } else {
+                                    outcome = "set";
+                                }
+                                const proto = el.tagName === "TEXTAREA"
+                                    ? HTMLTextAreaElement.prototype
+                                    : el.tagName === "SELECT"
+                                    ? HTMLSelectElement.prototype
+                                    : HTMLInputElement.prototype;
+                                const setter = Object.getOwnPropertyDescriptor(
+                                    proto, "value"
+                                )?.set;
+                                if (setter) setter.call(el, value);
+                                else el.value = value;
+                                el.dispatchEvent(new Event("input", { bubbles: true }));
+                                el.dispatchEvent(new Event("change", { bubbles: true }));
+                                return outcome;
+                            }""",
+                            {
+                                "selector": selector,
+                                "name": field_name or None,
+                                "formSelector": form_selector,
+                                "value": value,
+                                "create": create,
+                            },
+                        )
+                    except Exception as exc:
+                        action_log.append(
+                            f"set_field failed: {_compact_log_value(str(exc), 120)}"
+                        )
+                        continue
+                    target = selector or (
+                        f"[name={field_name}]"
+                        + (f" in {form_selector}" if form_selector else "")
+                    )
+                    action_log.append(
+                        f"set_field {target}={_compact_log_value(value, 120)} "
+                        f"-> {result}"
+                    )
                 else:
                     action_log.append(f"unsupported op: {op or '(missing)'}")
             except Exception as exc:
@@ -13823,21 +15492,7 @@ async def _analyse_js_sinks(
     hx: httpx.AsyncClient,
     scanner_policy=None,
 ) -> list[dict]:
-    """Fetch every JS file discovered during crawling and grep for unsanitized innerHTML sinks.
-
-    For each match where no sanitizer call (escapeHtml, DOMPurify, etc.) wraps the value:
-    - Saves a TargetIntelItem(kind='xss_sink') so the thinking-scan agent can find it
-      and dynamically confirm it.
-    - Emits scanner_phase events at start and completion.
-
-    These static matches seed leads for the dynamic scan only — they are deliberately
-    NOT written as findings. A regex match on `innerHTML` is not a confirmed
-    vulnerability, and emitting one info-level "Potential stored XSS sink" row per
-    match (often dozens of near-duplicates) buried the high-value confirmed findings.
-    The agentic loop promotes a sink to a real finding only after dynamic confirmation.
-
-    Returns a list of sink dicts (field, js_file, snippet) for the completion event payload.
-    """
+    """Read discovered scripts and save source-based XSS leads, never findings."""
     timeout = scanner_policy.request_timeout_s if scanner_policy else REQUEST_TIMEOUT
 
     with Session(get_engine()) as s:
@@ -13850,15 +15505,14 @@ async def _analyse_js_sinks(
     if not script_items:
         return []
 
-    unique_script_urls = sorted(
-        list(
-            {
-                item.value or item.url or item.key
-                for item in script_items
-                if (item.value or item.url or item.key)
-            }
-        )
-    )
+    observed_pages: dict[str, set[str]] = {}
+    for item in script_items:
+        script_url = item.value or item.url or item.key
+        if script_url:
+            observed_pages.setdefault(script_url, set())
+            if item.url and item.url != script_url:
+                observed_pages[script_url].add(item.url)
+    unique_script_urls = sorted(observed_pages)
 
     if not unique_script_urls:
         return []
@@ -13869,27 +15523,16 @@ async def _analyse_js_sinks(
             "type": "scanner_phase",
             "phase": "js_sink_analysis",
             "status": "start",
-            "message": f"JS sink analysis: scanning {len(unique_script_urls)} script file(s) for unsanitized innerHTML sinks…",
+            "message": f"JS sink analysis: scanning {len(unique_script_urls)} script file(s) for possible XSS rendering paths…",
         },
-    )
-
-    _SINK_RE = re.compile(
-        r"(\.innerHTML\s*[+=]|\.outerHTML\s*[+=]|document\.write\s*\(|insertAdjacentHTML\s*\()",
-        re.MULTILINE,
-    )
-    _SANITIZER_RE = re.compile(
-        r"escapeHtml|DOMPurify|sanitize|htmlEncode|encodeHtml|\.escape\(",
-        re.IGNORECASE,
-    )
-    # Extract a dotted field name from the sink context, e.g. "tx.description"
-    _FIELD_RE = re.compile(
-        r"\b(?:tx|item|entry|row|data|msg|rec|obj|comment|result)\s*\.\s*([a-zA-Z_]\w*)"
     )
 
     from aespa.services.crawler import _save_intel_item as _si
 
     found_sinks: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
+    fetched = 0
+    failed = 0
 
     for js_url in unique_script_urls:
         if not js_url:
@@ -13897,34 +15540,26 @@ async def _analyse_js_sinks(
         try:
             resp = await hx.get(js_url, timeout=timeout)
             if resp.status_code != 200:
+                failed += 1
                 continue
             body = resp.text
+            fetched += 1
         except Exception as exc:
             log.debug("JS sink analysis: failed to fetch %s: %s", js_url, exc)
+            failed += 1
             continue
 
-        for m in _SINK_RE.finditer(body):
-            ctx_start = max(0, m.start() - 200)
-            ctx_end = min(len(body), m.end() + 200)
-            context = body[ctx_start:ctx_end]
-
-            if _SANITIZER_RE.search(context):
-                continue
-
-            field_m = _FIELD_RE.search(context)
-            field_name = (
-                field_m.group(1) if field_m else m.group(1).strip().rstrip("(= ")
-            )
-
-            dedup = (js_url, field_name)
+        for candidate in find_js_xss_sinks(body):
+            field_name = candidate["field"]
+            context = candidate["context"]
+            dedup = (js_url, field_name, context)
             if dedup in seen:
                 continue
             seen.add(dedup)
-
-            snippet = context.replace("\n", " ").strip()[:400]
+            snippet = candidate["evidence"]
             log.info(
-                "JS sink analysis: unsanitized %s for field '%s' in %s",
-                m.group(1).strip(),
+                "JS sink analysis: possible %s rendering of field '%s' in %s",
+                context,
                 field_name,
                 js_url,
             )
@@ -13937,12 +15572,22 @@ async def _analyse_js_sinks(
                 url=js_url,
                 method="GET",
                 source="js_sink_analysis",
-                confidence=0.85,
+                confidence=candidate["confidence"],
                 evidence=snippet,
-                metadata={"js_file": js_url, "pattern": m.group(1).strip()},
+                metadata={
+                    "js_file": js_url,
+                    "context": context,
+                    "sink": candidate["sink"],
+                    "observed_pages": sorted(observed_pages[js_url])[:5],
+                },
             )
             found_sinks.append(
-                {"field": field_name, "js_file": js_url, "snippet": snippet[:200]}
+                {
+                    "field": field_name,
+                    "context": context,
+                    "js_file": js_url,
+                    "snippet": snippet[:200],
+                }
             )
 
     events_svc.emit(
@@ -13952,11 +15597,13 @@ async def _analyse_js_sinks(
             "phase": "js_sink_analysis",
             "status": "complete",
             "message": (
-                f"JS sink analysis: found {len(found_sinks)} unsanitized innerHTML sink(s)"
+                f"JS sink analysis: found {len(found_sinks)} possible XSS rendering path(s)"
                 if found_sinks
-                else "JS sink analysis: no unsanitized innerHTML sinks found"
+                else "JS sink analysis: no possible XSS rendering paths found"
             ),
             "sinks": found_sinks,
+            "scripts_fetched": fetched,
+            "scripts_failed": failed,
         },
     )
     return found_sinks

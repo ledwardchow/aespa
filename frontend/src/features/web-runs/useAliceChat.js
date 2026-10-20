@@ -1,4 +1,5 @@
 import * as webRunsApi from "../../shared/api/webRuns.js";
+import { parseDate } from "../../shared/lib/dates.js";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 import {
@@ -19,7 +20,7 @@ import {
 export function useAliceChat(runId, { onActivate } = {}) {
   const identity = useMemo(() => ({ runKind: "web", runId }), [runId]);
   const ALICE_WELCOME_MESSAGE =
-    "Hello! I am A.L.I.C.E, your interactive pentesting partner. To start a test, click Start Pentest at the top right, or you can tell me to work on something specific!";
+    "Hello! I'm A.L.I.C.E., your pentesting partner. Start a scan from the top right, or tell me what to test.";
   const _aliceDefaultChats = () => [
     {
       id: "tab-default",
@@ -123,7 +124,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
           _aliceServerLoaded.current = true;
           return;
         }
-        const serverUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0;
+        const serverUpdatedAt = data.updated_at ? parseDate(data.updated_at).getTime() : 0;
         const localSavedAt = parseInt(
           localStorage.getItem(`alice_chats_${runId}_savedAt`) || "0",
           10,
@@ -164,9 +165,21 @@ export function useAliceChat(runId, { onActivate } = {}) {
   }, [runId, identity]);
   const [aliceInputText, setAliceInputText] = useState("");
   const [aliceChatHeight, setAliceChatHeight] = useState(300);
-  const [aliceThinkingTabId, setAliceThinkingTabId] = useState(null);
-  const aliceIsThinking = aliceThinkingTabId !== null;
-  const [aliceGlobalRunning, setAliceGlobalRunning] = useState(false);
+  // Chat tabs with an ALICE turn in progress. Each tab runs independently, so
+  // one busy tab never blocks sending in another.
+  const [aliceThinkingTabIds, setAliceThinkingTabIds] = useState(() => new Set());
+  const markAliceTabThinking = useCallback((tabId, thinking) => {
+    setAliceThinkingTabIds((prev) => {
+      if (prev.has(tabId) === thinking) return prev;
+      const next = new Set(prev);
+      if (thinking) next.add(tabId);
+      else next.delete(tabId);
+      return next;
+    });
+  }, []);
+  const aliceIsThinking = aliceThinkingTabIds.has(activeAliceTabId);
+  const aliceThinkingTabId = aliceIsThinking ? activeAliceTabId : null;
+  const aliceGlobalRunning = aliceThinkingTabIds.size > 0;
   const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
 
   // On mount: check whether a background ALICE task is already running (e.g.
@@ -177,168 +190,188 @@ export function useAliceChat(runId, { onActivate } = {}) {
       .getAliceStatus(runId)
       .then((st) => {
         if (cancelled) return;
-        if (st.goal?.tab_id) {
+        const runningTabs =
+          st.running_tabs || (st.running && st.tab_id ? [{ ...st, goal: st.goal }] : []);
+        const goals = [st.goal, ...runningTabs.map((t) => t.goal)].filter((g) => g?.tab_id);
+        if (goals.length) {
           setAliceChats((prev) =>
-            prev.map((tab) => (tab.id === st.goal.tab_id ? { ...tab, goal: st.goal } : tab)),
+            prev.map((tab) => {
+              const goal = goals.find((g) => g.tab_id === tab.id);
+              return goal ? { ...tab, goal } : tab;
+            }),
           );
         }
-        if (!st.running) return;
-        const { tab_id, think_msg_id, reply_msg_id } = st;
-        setAliceGlobalRunning(true);
-        setAliceThinkingTabId(tab_id);
-        // Pre-populate session so the subscriber can find the right messages.
-        const sess = getAliceSession(identity, tab_id);
-        sess.thinkMsgId = think_msg_id;
-        sess.replyMsgId = reply_msg_id;
-        const done = () => {
-          setAliceThinkingTabId(null);
-          setAliceGlobalRunning(false);
-        };
-        aliceSessionConnect(identity, tab_id, {
-          thinkMsgId: think_msg_id,
-          replyMsgId: reply_msg_id,
-          cursor: 0,
-          onFinish: done,
-          onFail: done,
-        });
+        for (const { tab_id, think_msg_id, reply_msg_id } of runningTabs) {
+          markAliceTabThinking(tab_id, true);
+          // Pre-populate session so the subscriber can find the right messages.
+          const sess = getAliceSession(identity, tab_id);
+          sess.thinkMsgId = think_msg_id;
+          sess.replyMsgId = reply_msg_id;
+          const done = () => markAliceTabThinking(tab_id, false);
+          aliceSessionConnect(identity, tab_id, {
+            thinkMsgId: think_msg_id,
+            replyMsgId: reply_msg_id,
+            cursor: 0,
+            onFinish: done,
+            onFail: done,
+          });
+        }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [runId, identity]);
-  // Subscribe to in-flight stream on mount/tab-switch so navigating back
-  // shows the spinner and receives live chunks from the singleton reader loop.
+  }, [runId, identity, markAliceTabThinking]);
+  // Subscribe to every tab's in-flight stream so tabs keep receiving live
+  // chunks from the singleton reader loop while another tab is open, and so
+  // navigating back shows the spinner.
+  const aliceTabIdsKey = aliceChats.map((t) => t.id).join("\u0000");
   useEffect(() => {
-    const session = getAliceSession(identity, activeAliceTabId);
-    if (session.active) {
-      setAliceThinkingTabId(activeAliceTabId);
-    }
+    function subscribeAliceTab(activeAliceTabId) {
+      const session = getAliceSession(identity, activeAliceTabId);
+      if (session.active) {
+        markAliceTabThinking(activeAliceTabId, true);
+      }
 
-    // Resolve the best available accumulated text: prefer the in-memory session
-    // (same page load), fall back to the localStorage recovery key written
-    // directly by aliceSessionStart (survives navigation + module resets).
-    let recThinkId = session.thinkMsgId;
-    let recReplyId = session.replyMsgId;
-    let recThought = session.accumulatedThought;
-    let recMessage = session.accumulatedMessage;
-    let recStepData = session.stepData;
-    if (!recThinkId || (!recThought && !recMessage)) {
-      try {
-        const saved = JSON.parse(
-          localStorage.getItem(`alice_recover_web:${runId}:${activeAliceTabId}`) || "null",
-        );
-        if (saved && saved.thinkMsgId) {
-          recThinkId = recThinkId || saved.thinkMsgId;
-          recReplyId = recReplyId || saved.replyMsgId;
-          recThought = recThought || saved.thought;
-          recMessage = recMessage || saved.message;
-          recStepData = Object.keys(recStepData || {}).length ? recStepData : saved.stepData || {};
-        }
-      } catch {}
-    }
-    if (recThinkId && (recThought || recMessage)) {
-      setAliceChats((prev) =>
-        prev.map((tab) => {
-          if (tab.id !== activeAliceTabId) return tab;
-          return {
-            ...tab,
-            messages: tab.messages.map((m) => {
-              if (m.id === recThinkId && recThought)
-                return {
-                  ...m,
-                  text: recThought,
-                  stepData: recStepData || m.stepData || {},
-                };
-              if (m.id === recReplyId && recMessage)
-                return {
-                  ...m,
-                  text: recMessage,
-                };
-              return m;
-            }),
-          };
-        }),
-      );
-    }
-    const unsub = aliceSessionSubscribe(identity, activeAliceTabId, {
-      onChunk: (event) => {
-        const { thinkMsgId, replyMsgId } = session;
-        if (event.goal?.tab_id) {
-          setAliceChats((prev) =>
-            prev.map((tab) => (tab.id === event.goal.tab_id ? { ...tab, goal: event.goal } : tab)),
+      // Resolve the best available accumulated text: prefer the in-memory session
+      // (same page load), fall back to the localStorage recovery key written
+      // directly by aliceSessionStart (survives navigation + module resets).
+      let recThinkId = session.thinkMsgId;
+      let recReplyId = session.replyMsgId;
+      let recThought = session.accumulatedThought;
+      let recMessage = session.accumulatedMessage;
+      let recStepData = session.stepData;
+      if (!recThinkId || (!recThought && !recMessage)) {
+        try {
+          const saved = JSON.parse(
+            localStorage.getItem(`alice_recover_web:${runId}:${activeAliceTabId}`) || "null",
           );
-        }
-        // Use session's running totals (not m.text + delta) so every render
-        // sees the complete accumulated text — identical to the catch-up sync
-        // on navigation-back, which ensures blocks parse and render graphically
-        // rather than as an in-progress incremental string.
+          if (saved && saved.thinkMsgId) {
+            recThinkId = recThinkId || saved.thinkMsgId;
+            recReplyId = recReplyId || saved.replyMsgId;
+            recThought = recThought || saved.thought;
+            recMessage = recMessage || saved.message;
+            recStepData = Object.keys(recStepData || {}).length
+              ? recStepData
+              : saved.stepData || {};
+          }
+        } catch {}
+      }
+      if (recThinkId && (recThought || recMessage)) {
         setAliceChats((prev) =>
           prev.map((tab) => {
             if (tab.id !== activeAliceTabId) return tab;
             return {
               ...tab,
               messages: tab.messages.map((m) => {
-                if (event.type === "thinking_chunk" && m.id === thinkMsgId)
+                if (m.id === recThinkId && recThought)
                   return {
                     ...m,
-                    text: session.accumulatedThought,
-                    stepData: session.stepData,
+                    text: recThought,
+                    stepData: recStepData || m.stepData || {},
                   };
-                if (event.type === "message_chunk" && m.id === replyMsgId)
+                if (m.id === recReplyId && recMessage)
                   return {
                     ...m,
-                    text: session.accumulatedMessage,
+                    text: recMessage,
                   };
-                if (event.type === "warning" && m.id === replyMsgId)
-                  return {
-                    ...m,
-                    text: event.message,
-                  };
-                if (
-                  ["step_llm_call", "step_tool_call", "step_tool_result"].includes(event.type) &&
-                  m.id === thinkMsgId
-                )
-                  return {
-                    ...m,
-                    stepData: {
-                      ...session.stepData,
-                    },
-                  };
-                if (event.type === "done") {
-                  if (m.id === thinkMsgId) {
-                    const upd = {
-                      stepData: session.stepData,
-                    };
-                    if (event.thought) upd.text = event.thought;
-                    return {
-                      ...m,
-                      ...upd,
-                    };
-                  }
-                  if (m.id === replyMsgId && event.message)
-                    return {
-                      ...m,
-                      text: event.message,
-                    };
-                }
                 return m;
               }),
             };
           }),
         );
-      },
-      onDone: () => {
-        setAliceThinkingTabId(null);
-        setAliceGlobalRunning(false);
-      },
-      onError: () => {
-        setAliceThinkingTabId(null);
-        setAliceGlobalRunning(false);
-      },
-    });
-    return unsub;
-  }, [runId, activeAliceTabId, identity]);
+      }
+      const unsub = aliceSessionSubscribe(identity, activeAliceTabId, {
+        onChunk: (event) => {
+          const { thinkMsgId, replyMsgId } = session;
+          if (event.goal?.tab_id) {
+            setAliceChats((prev) =>
+              prev.map((tab) =>
+                tab.id === event.goal.tab_id ? { ...tab, goal: event.goal } : tab,
+              ),
+            );
+          }
+          // Use session's running totals (not m.text + delta) so every render
+          // sees the complete accumulated text — identical to the catch-up sync
+          // on navigation-back, which ensures blocks parse and render graphically
+          // rather than as an in-progress incremental string.
+          setAliceChats((prev) =>
+            prev.map((tab) => {
+              if (tab.id !== activeAliceTabId) return tab;
+              return {
+                ...tab,
+                messages: tab.messages.map((m) => {
+                  if (event.type === "state_snapshot" && m.id === thinkMsgId)
+                    return {
+                      ...m,
+                      text: session.accumulatedThought,
+                      stepData: session.stepData,
+                    };
+                  if (event.type === "state_snapshot" && m.id === replyMsgId)
+                    return { ...m, text: session.accumulatedMessage };
+                  if (event.type === "thinking_chunk" && m.id === thinkMsgId)
+                    return {
+                      ...m,
+                      text: session.accumulatedThought,
+                      stepData: session.stepData,
+                    };
+                  if (
+                    (event.type === "message_chunk" || event.type === "message_retract") &&
+                    m.id === replyMsgId
+                  )
+                    return {
+                      ...m,
+                      text: session.accumulatedMessage,
+                    };
+                  if (event.type === "warning" && m.id === replyMsgId)
+                    return {
+                      ...m,
+                      text: event.message,
+                    };
+                  if (
+                    ["step_llm_call", "step_tool_call", "step_tool_result"].includes(event.type) &&
+                    m.id === thinkMsgId
+                  )
+                    return {
+                      ...m,
+                      stepData: {
+                        ...session.stepData,
+                      },
+                    };
+                  if (event.type === "done") {
+                    if (m.id === thinkMsgId) {
+                      const upd = {
+                        stepData: session.stepData,
+                      };
+                      if (event.thought) upd.text = event.thought;
+                      return {
+                        ...m,
+                        ...upd,
+                      };
+                    }
+                    if (m.id === replyMsgId && event.message)
+                      return {
+                        ...m,
+                        text: event.message,
+                      };
+                  }
+                  return m;
+                }),
+              };
+            }),
+          );
+        },
+        onDone: () => markAliceTabThinking(activeAliceTabId, false),
+        onError: () => markAliceTabThinking(activeAliceTabId, false),
+      });
+      return unsub;
+    }
+    const unsubs = aliceTabIdsKey
+      .split("\u0000")
+      .filter(Boolean)
+      .map((tabId) => subscribeAliceTab(tabId));
+    return () => unsubs.forEach((unsub) => unsub());
+  }, [runId, aliceTabIdsKey, identity, markAliceTabThinking]);
   const _aliceSaveTimer = useRef(null);
   const _aliceServerLoaded = useRef(false);
   useEffect(() => {
@@ -462,12 +495,28 @@ export function useAliceChat(runId, { onActivate } = {}) {
   );
   const handleAliceStop = () => {
     aliceSessionAbort(identity, activeAliceTabId);
-    webRunsApi.stopAliceRun(runId).catch(() => {});
-    setAliceThinkingTabId(null);
-    setAliceGlobalRunning(false);
+    webRunsApi.stopAliceRun(runId, activeAliceTabId).catch(() => {});
+    markAliceTabThinking(activeAliceTabId, false);
     setAliceChats((prev) =>
       prev.map((tab) =>
         tab.id === activeAliceTabId && tab.goal
+          ? {
+              ...tab,
+              goal: { ...tab.goal, status: "paused", pause_reason: "Paused by user." },
+            }
+          : tab,
+      ),
+    );
+  };
+  // Stop ALICE work in every chat tab on this run (used by the run header).
+  const handleAliceStopAll = () => {
+    const busy = new Set(aliceThinkingTabIds);
+    busy.forEach((tabId) => aliceSessionAbort(identity, tabId));
+    webRunsApi.stopAliceRun(runId).catch(() => {});
+    setAliceThinkingTabIds(new Set());
+    setAliceChats((prev) =>
+      prev.map((tab) =>
+        busy.has(tab.id) && tab.goal
           ? {
               ...tab,
               goal: { ...tab.goal, status: "paused", pause_reason: "Paused by user." },
@@ -503,7 +552,9 @@ export function useAliceChat(runId, { onActivate } = {}) {
         ),
       );
       if (fromInput) setAliceInputText("");
-      webRunsApi.steerAliceGoal(runId, { message: userText }).catch(() => {});
+      webRunsApi
+        .steerAliceGoal(runId, { message: userText, tab_id: activeAliceTabId })
+        .catch(() => {});
       return;
     }
     if (fromInput) setAliceInputText("");
@@ -577,8 +628,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
         return tab;
       }),
     );
-    setAliceThinkingTabId(currentTabId);
-    setAliceGlobalRunning(true);
+    markAliceTabThinking(currentTabId, true);
     const historyPayload = aliceMessages.map((m) => ({
       sender: m.sender,
       text: m.text,
@@ -593,8 +643,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
       thinkMsgId,
       replyMsgId,
       onFinish: () => {
-        setAliceThinkingTabId(null);
-        setAliceGlobalRunning(false);
+        markAliceTabThinking(currentTabId, false);
         if (onComplete) onComplete(null);
       },
       onFail: (err) => {
@@ -638,8 +687,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
             }),
           );
         }
-        setAliceThinkingTabId(null);
-        setAliceGlobalRunning(false);
+        markAliceTabThinking(currentTabId, false);
         if (onComplete) onComplete(err);
       },
     });
@@ -658,6 +706,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
     setAliceInputText,
     aliceChatHeight,
     aliceThinkingTabId,
+    aliceThinkingTabIds,
     aliceIsThinking,
     aliceGlobalRunning,
     aliceExpandedThinkIds,
@@ -667,6 +716,7 @@ export function useAliceChat(runId, { onActivate } = {}) {
     deleteAliceTab,
     startAliceResize,
     handleAliceStop,
+    handleAliceStopAll,
     handleAliceSend,
     submitAliceDirective,
   };

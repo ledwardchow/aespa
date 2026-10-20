@@ -1,0 +1,329 @@
+.page:global(.content) {
+  padding: 0;
+}
+.page > :global(.tab-bar) {
+  margin: 0;
+}
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 20px 28px 28px;
+}
+.panel {
+  max-width: 980px;
+}
+.panel[hidden],
+.accountEditor[hidden],
+.workflowBody[hidden] {
+  display: none;
+}
+.panelBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.twoCol {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 28px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  flex-shrink: 0;
+}
+.footer > :last-child {
+  margin-left: auto;
+}
+.footerError {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.count {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text-2);
+  font-size: 11px;
+}
+.failedCount {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: 11px;
+}
+.tabError {
+  margin-left: 6px;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.accounts {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.accountList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.accountList > :global(.btn) {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+.listHeading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.accountItem {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  border-radius: 7px;
+  cursor: pointer;
+  font: inherit;
+}
+.accountItem:hover {
+  border-color: var(--accent);
+}
+.selected {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+.accountName {
+  font-size: 13px;
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.accountMeta {
+  font-size: 11px;
+  color: var(--muted);
+}
+.accountEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+}
+.loginFields {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.loginFields > :global(.btn) {
+  align-self: flex-start;
+}
+.loginFieldRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.3fr) 52px minmax(0, 1.1fr) 32px;
+  gap: 8px;
+  align-items: center;
+}
+.hideToggle {
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+  cursor: pointer;
+}
+.hideToggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.hideToggle span {
+  display: none;
+}
+.loginFieldHead {
+  font-size: 11px;
+  color: var(--muted);
+}
+.loginFieldHead > :nth-child(3) {
+  text-align: center;
+}
+@container (max-width: 520px) {
+  .loginFieldRow {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 32px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .loginFieldRow > :nth-child(3) {
+    grid-row: 2;
+    grid-column: 1;
+    justify-self: start;
+  }
+  .loginFieldRow > :nth-child(4) {
+    grid-row: 2;
+    grid-column: 2;
+  }
+  .loginFieldRow > :nth-child(5) {
+    grid-row: 1;
+    grid-column: 3;
+  }
+  .loginFieldHead {
+    display: none;
+  }
+  .hideToggle span {
+    display: inline;
+  }
+}
+.note {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.override summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.override[open] summary {
+  margin-bottom: 8px;
+}
+.editorActions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.loginToggleRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.loginToggleRow > :global(.toggle-row) {
+  flex: 1;
+}
+.muted {
+  color: var(--muted);
+}
+.ok {
+  color: var(--ok);
+}
+.bad {
+  color: var(--danger);
+}
+.testResult {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.testPassed {
+  border-color: var(--ok);
+}
+.testFailed {
+  border-color: var(--danger);
+}
+.testTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.testResult summary {
+  cursor: pointer;
+}
+.testShot {
+  display: block;
+  margin-top: 8px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.workflowList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.workflowItem {
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.workflowHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.workflowHeader > :last-child {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workflowBody {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 14px 14px;
+}
+
+@media (max-width: 760px) {
+  .scroll {
+    padding: 16px;
+  }
+  .footer {
+    padding: 12px 16px;
+  }
+  .twoCol,
+  .accounts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.accountEditor select {
+  width: 100%;
+  padding: 8px 30px 8px 11px;
+}

@@ -79,6 +79,88 @@ def test_scan_guidance_round_trips(client):
     assert upd.json()["scan_guidance"] == "Updated steps."
 
 
+def test_site_workflow_data_can_be_edited_without_a_run(client):
+    workflow = {
+        "name": "Checkout",
+        "goal": "Open checkout form",
+        "start_url": "https://juice.local/cart",
+        "instructions": "Add the sample product",
+    }
+    created = make_site(client, name="With workflow", workflow_data=[workflow])
+    assert created.status_code == 201
+    site_id = created.json()["id"]
+    assert created.json()["workflow_data"][0] == workflow
+
+    detail = client.get(f"/api/sites/{site_id}")
+    assert detail.json()["workflow_data"] == [workflow]
+    updated = client.put(
+        f"/api/sites/{site_id}",
+        json={
+            "name": "With workflow",
+            "base_url": "https://juice.local",
+            "requires_auth": False,
+            "workflow_data": [{**workflow, "instructions": "Use a sample keyboard"}],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["workflow_data"][0]["instructions"] == "Use a sample keyboard"
+
+    unchanged = client.put(
+        f"/api/sites/{site_id}",
+        json={"name": "With workflow", "base_url": "https://juice.local"},
+    )
+    assert unchanged.status_code == 200
+    assert (
+        unchanged.json()["workflow_data"][0]["instructions"] == "Use a sample keyboard"
+    )
+
+    blank = client.put(
+        f"/api/sites/{site_id}",
+        json={
+            "name": "With workflow",
+            "base_url": "https://juice.local",
+            "workflow_data": [{**workflow, "instructions": ""}],
+        },
+    )
+    assert blank.status_code == 200
+    assert blank.json()["workflow_data"][0]["instructions"] == ""
+
+
+def test_site_export_keeps_saved_workflow_data(session):
+    workflow = {
+        "name": "Checkout",
+        "goal": "Open checkout form",
+        "start_url": "https://juice.local/cart",
+        "instructions": "Add a sample keyboard",
+    }
+    site = Site(
+        name="With workflow",
+        base_url="https://juice.local",
+        workflow_data_json=json.dumps([workflow]),
+    )
+    session.add(site)
+    session.commit()
+    imported = sites_service.import_site(
+        session, sites_service.export_site(session, site.id)
+    )
+    assert sites_service.workflow_data_for_site(imported) == [workflow]
+
+
+def test_site_rejects_workflow_data_for_another_host(client):
+    response = make_site(
+        client,
+        workflow_data=[
+            {
+                "name": "Other",
+                "goal": "Open external form",
+                "start_url": "https://other.test/form",
+                "instructions": "Use test data",
+            }
+        ],
+    )
+    assert response.status_code == 422
+
+
 def test_create_site_with_auth_and_credentials(client):
     r = make_site(
         client,
@@ -334,6 +416,93 @@ def test_update_site_replaces_credentials(client):
     assert usernames == {"x", "y"}
 
 
+def test_update_site_keeps_existing_credential_ids(client, session):
+    created = make_site(
+        client,
+        name="Stable credentials",
+        requires_auth=True,
+        login_url="https://auth.local/login",
+        credentials=[
+            {
+                "username": "same-user",
+                "password": "old-1",
+                "label": "first",
+                "totp_seed": "JBSWY3DPEHPK3PXP",
+            },
+            {"username": "same-user", "password": "old-2", "label": "second"},
+        ],
+    ).json()
+    first, second = created["credentials"]
+    updated = client.put(
+        f"/api/sites/{created['id']}",
+        json={
+            "name": "Stable credentials",
+            "base_url": "https://auth.local",
+            "requires_auth": True,
+            "login_url": "https://auth.local/login",
+            "credentials": [
+                {
+                    "id": first["id"],
+                    "username": "renamed",
+                    "password": "new-1",
+                    "label": "first",
+                },
+                {
+                    "id": second["id"],
+                    "username": "same-user",
+                    "password": "old-2",
+                    "label": "second",
+                },
+            ],
+        },
+    )
+    assert updated.status_code == 200
+    assert {c["id"] for c in updated.json()["credentials"]} == {
+        first["id"],
+        second["id"],
+    }
+    assert session.get(Credential, first["id"]).password == "new-1"
+    assert session.get(Credential, first["id"]).totp_seed == "JBSWY3DPEHPK3PXP"
+
+    invalid = client.put(
+        f"/api/sites/{created['id']}",
+        json={
+            "name": "Stable credentials",
+            "base_url": "https://auth.local",
+            "requires_auth": True,
+            "login_url": "https://auth.local/login",
+            "credentials": [{"id": 99999, "username": "bad", "password": "bad"}],
+        },
+    )
+    assert invalid.status_code == 400
+    assert {
+        c["id"] for c in client.get(f"/api/sites/{created['id']}").json()["credentials"]
+    } == {first["id"], second["id"]}
+
+
+def test_update_site_matches_unique_username_without_id(client):
+    created = make_site(
+        client,
+        name="Older API client",
+        requires_auth=True,
+        login_url="https://auth.local/login",
+        credentials=[{"username": "a", "password": "old"}],
+    ).json()
+    old_id = created["credentials"][0]["id"]
+    updated = client.put(
+        f"/api/sites/{created['id']}",
+        json={
+            "name": "Older API client",
+            "base_url": "https://auth.local",
+            "requires_auth": True,
+            "login_url": "https://auth.local/login",
+            "credentials": [{"username": "a", "password": "new"}],
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["credentials"][0]["id"] == old_id
+
+
 def test_update_site_not_found(client):
     r = client.put(
         "/api/sites/9999",
@@ -398,29 +567,15 @@ def test_add_credential(client):
     ).json()
     r = client.post(
         f"/api/sites/{site['id']}/credentials",
-        json={"username": "newuser", "password": "newpass", "label": "tester"},
-    )
-    assert r.status_code == 201
-    assert r.json()["username"] == "newuser"
-
-
-def test_add_credential_accepts_login_url(client):
-    site = make_site(
-        client,
-        name="Auth Site",
-        requires_auth=True,
-        login_url="https://auth.local/login",
-    ).json()
-    r = client.post(
-        f"/api/sites/{site['id']}/credentials",
         json={
-            "username": "admin",
+            "username": "newuser",
             "password": "newpass",
+            "label": "tester",
             "login_url": "https://auth.local/admin/login",
         },
     )
-
     assert r.status_code == 201
+    assert r.json()["username"] == "newuser"
     assert r.json()["login_url"] == "https://auth.local/admin/login"
 
 
@@ -468,6 +623,40 @@ def test_delete_credential_wrong_site(client):
 
 
 # --- Merged from test_sites_export_import.py ---
+
+
+@pytest.mark.parametrize("instructions", ["", "   ", None])
+def test_import_config_only_with_unfilled_workflow_instructions(client, instructions):
+    workflow = {
+        "name": "Checkout",
+        "goal": "Open checkout form",
+        "start_url": "https://juice.local/cart",
+    }
+    if instructions is not None:
+        workflow["instructions"] = instructions
+    bundle = {
+        "export_version": 1,
+        "site": {
+            "name": "Imported config",
+            "base_url": "https://juice.local",
+            "workflow_data_json": json.dumps([workflow]),
+        },
+        "credentials": [],
+        "test_runs": [],
+    }
+
+    response = client.post("/api/sites/import", json=bundle)
+    assert response.status_code == 201
+    imported = response.json()
+    assert imported["workflow_data"] == [{**workflow, "instructions": ""}]
+    detail = client.get(f"/api/sites/{imported['id']}")
+    assert detail.status_code == 200
+    assert detail.json() == imported
+    exported = client.get(f"/api/sites/{imported['id']}/export")
+    assert exported.status_code == 200
+    assert json.loads(exported.json()["site"]["workflow_data_json"]) == [workflow]
+
+
 @pytest.fixture
 def session(db_session):
     return db_session
@@ -558,6 +747,58 @@ def test_roundtrip_includes_run_children(session):
         select(AliceChatMessage).where(AliceChatMessage.session_id == new_alice.id)
     ).all()
     assert len(msgs) == 1 and msgs[0].text == "hi"
+
+
+def test_configuration_export_omits_runs_and_imports_site_settings(client, db_session):
+    created = make_site(
+        client,
+        name="Portable site",
+        requires_auth=True,
+        login_url="https://juice.local/login",
+        scan_guidance="Check the account page.",
+        scope_hosts=["juice.local"],
+        workflow_data=[
+            {
+                "name": "Checkout",
+                "goal": "Open checkout",
+                "start_url": "https://juice.local/cart",
+                "instructions": "Use the sample account",
+            }
+        ],
+        credentials=[{"username": "tester", "password": "sample-pass"}],
+    )
+    assert created.status_code == 201
+    site_id = created.json()["id"]
+    db_session.add(TestRun(site_id=site_id, name="private run", status="scanned"))
+    db_session.commit()
+
+    full = client.get(f"/api/sites/{site_id}/export")
+    assert full.status_code == 200
+    assert len(full.json()["test_runs"]) == 1
+
+    response = client.get(f"/api/sites/{site_id}/export?configuration_only=true")
+    assert response.status_code == 200
+    assert (
+        "Portable_site.aespa-site-config.json"
+        in response.headers["content-disposition"]
+    )
+    bundle = response.json()
+    assert bundle["test_runs"] == []
+    assert bundle["site"]["scan_guidance"] == "Check the account page."
+    assert bundle["credentials"][0]["username"] == "tester"
+
+    imported = client.post("/api/sites/import", json=bundle)
+    assert imported.status_code == 201
+    data = imported.json()
+    assert data["name"] == "Portable site (2)"
+    assert data["scan_guidance"] == "Check the account page."
+    assert data["scope_hosts"] == ["juice.local:443"]
+    assert data["workflow_data"][0]["name"] == "Checkout"
+    assert data["credentials"][0]["username"] == "tester"
+    assert (
+        db_session.exec(select(TestRun).where(TestRun.site_id == data["id"])).all()
+        == []
+    )
 
 
 def test_import_remaps_crawled_page_accessible_by_credentials(session):

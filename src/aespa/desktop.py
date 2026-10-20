@@ -177,6 +177,7 @@ class Controller(NSObject):
         self._url = url
         self._console_server = console_server
         self._window = None
+        self._webview = None
         self._quitting = False
         self._dl_item = None
         self._dl_sep = None
@@ -287,6 +288,7 @@ class Controller(NSObject):
             web.setAutoresizingMask_(_VIEW_SIZABLE)
             win.contentView().addSubview_(web)
             web.loadRequest_(NSURLRequest.requestWithURL_(self._url))
+            self._webview = web
             win.center()
             self._window = win
 
@@ -303,6 +305,15 @@ class Controller(NSObject):
 
     def showWindow_(self, _sender):
         self._presentWindow()
+
+        def recover_session(authenticated, error):
+            if error is None and authenticated == "false":
+                url = NSURL.URLWithString_(self._console_server.login_url())
+                self._webview.loadRequest_(NSURLRequest.requestWithURL_(url))
+
+        self._webview.evaluateJavaScript_completionHandler_(
+            "document.documentElement.dataset.aespaAuthenticated", recover_session
+        )
 
     def openConsole_(self, _sender):
         self._console_server.open()
@@ -487,8 +498,8 @@ def main() -> None:
 
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
-    url = NSURL.URLWithString_(f"http://127.0.0.1:{port}/")
     console_server = DesktopConsoleServer(host="127.0.0.1", port=port)
+    url = NSURL.URLWithString_(console_server.login_url())
     controller = Controller.alloc().initWithURL_consoleServer_(url, console_server)
     app.setDelegate_(controller)
     app.run()

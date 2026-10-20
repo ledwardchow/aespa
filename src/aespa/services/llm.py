@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import itertools
 import json
@@ -13,19 +14,24 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
+from collections import OrderedDict
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 from urllib.parse import quote
 
 import httpx
+import httpx2
 
 from aespa.models import LLMConfig
 from aespa.services.prompts.login_action import LOGIN_ACTION_PROMPT
+from aespa.services.prompts.refusal_recovery import RefusalRecoveryPrompt
 from aespa.services.prompts.reporting import (
     _ANALYSE_PROMPT,
     _NORMALIZE_TITLES_PROMPT,
@@ -56,15 +62,36 @@ from aespa.services.prompts.validator import (
     _VALIDATION_VERDICT_PROMPT,
     VALIDATOR_AGENT_TOOLS,  # noqa: F401 — re-exported via aespa.services.llm
 )
+from aespa.services.tls import httpx_verify
 
 log = logging.getLogger("aespa.llm")
 traffic_log = logging.getLogger("aespa.llm.traffic")
 
+
+def describe_exception(exc: Exception) -> str:
+    """Keep errors with no message useful in saved scan events."""
+    return str(exc).strip() or type(exc).__name__
+
+
+_tool_text_delta_var: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar(
+    "llm_tool_text_delta", default=None
+)
+
 REPORTING_REPLAY_SCHEMA = "aespa.reporting.replay.v1"
+
+# Bedrock can spend several minutes reasoning before it emits the first stream
+# event.  Botocore's default read timeout is too short for those requests.  The
+# stream keeps this timeout as an idle limit once output starts.
+BEDROCK_CONNECT_TIMEOUT_S = 30
+BEDROCK_READ_TIMEOUT_S = 3600
 
 
 class LLMRefusalError(RuntimeError):
     """The provider refused to process an agentic scan request."""
+
+
+class LLMContentFilteredError(LLMRefusalError):
+    """A completed provider response ended with a content-filter stop reason."""
 
 
 class LLMQuotaPauseError(RuntimeError):
@@ -80,6 +107,120 @@ class LLMQuotaPauseError(RuntimeError):
         super().__init__(message)
         self.reset_at = reset_at
         self.snapshot = snapshot or {}
+
+    reason = "quota"
+
+
+class LLMNetworkPauseError(LLMQuotaPauseError):
+    """The LLM provider stayed unreachable after retries; the run should pause."""
+
+    reason = "network"
+
+
+class LLMBudgetPauseError(LLMQuotaPauseError):
+    """The run's estimated LLM spend reached its budget; the run should pause."""
+
+    reason = "budget"
+
+
+# Seconds to wait before each retry of an LLM call that failed with a temporary
+# network or credential-refresh error. Together they ride out a few minutes of
+# lost connectivity (Wi-Fi drop, sleep/wake, DNS hiccup) before pausing.
+AGENTIC_NETWORK_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0, 60.0, 120.0)
+
+# Seconds to wait before each retry of an LLM call the provider rejected because
+# it was overloaded (for example OpenAI's "Our servers are currently overloaded"
+# or Anthropic's 529 overloaded_error). Overload clears on its own timescale, so
+# wait about a minute each time rather than retrying within seconds.
+AGENTIC_OVERLOAD_RETRY_DELAY: float = 60.0
+
+# Text and status markers that identify a provider-overload error. These are a
+# temporary busy signal, not a dropped connection, so they are retried on their
+# own slower schedule (see AGENTIC_OVERLOAD_RETRY_DELAY).
+_OVERLOAD_PROVIDER_ERROR_MARKERS = (
+    "overloaded",
+    "currently overloaded",
+    "server is overloaded",
+    "please try again later",
+)
+
+_TRANSIENT_PROVIDER_ERROR_MARKERS = (
+    "connectionerror",
+    "connecterror",
+    "apiconnectionerror",
+    "endpointconnectionerror",
+    "could not connect to the endpoint",
+    "timeout",
+    "temporarily unavailable",
+    "connection reset",
+    "connection refused",
+    "network is unreachable",
+    "name resolution",
+    "no such host",
+    "dns",
+    # AWS SDK credential refresh (for example IAM Roles Anywhere through a
+    # credential_process helper) fails this way when the network is down.
+    "credentialretrievalerror",
+    "error when retrieving credentials",
+)
+
+
+def is_transient_provider_error(exc: BaseException) -> bool:
+    """Return whether an LLM call failed for a reason a later retry may fix."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if _is_transient_provider_error_once(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _is_transient_provider_error_once(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    status_code = status_code or getattr(response, "status_code", None)
+    if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+        return True
+    if _is_overloaded_provider_error_once(exc):
+        return True
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return any(
+        marker in name or marker in text for marker in _TRANSIENT_PROVIDER_ERROR_MARKERS
+    )
+
+
+def is_overloaded_provider_error(exc: BaseException) -> bool:
+    """Return whether an LLM call failed because the provider was overloaded.
+
+    Overload is a transient error (``is_transient_provider_error`` is also True),
+    but callers retry it on a slower, roughly one-minute schedule because the
+    busy signal clears on its own timescale rather than on reconnection.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if _is_overloaded_provider_error_once(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _is_overloaded_provider_error_once(exc: BaseException) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    status_code = status_code or getattr(response, "status_code", None)
+    if status_code == 529:
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _OVERLOAD_PROVIDER_ERROR_MARKERS)
 
 
 class LLMContextLimitError(RuntimeError):
@@ -120,17 +261,75 @@ def _is_llm_refusal(exc: BaseException) -> bool:
     return any(marker in text for marker in _REFUSAL_MARKERS)
 
 
+def _is_explicit_openai_cyber_refusal(provider: str, exc: BaseException) -> bool:
+    if provider == "openai_codex":
+        from aespa.services.codex_provider import CodexCyberPolicyError
+
+        return isinstance(exc, CodexCyberPolicyError)
+    if provider != "openai_chatgpt_plan":
+        return False
+
+    if getattr(exc, "code", None) == "cyber_policy":
+        return True
+    body = getattr(exc, "body", None)
+    response = getattr(exc, "response", None)
+    if body is None and response is not None:
+        try:
+            body = response.json()
+        except Exception:
+            return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error", body)
+    return isinstance(error, dict) and error.get("code") == "cyber_policy"
+
+
+def _scoped_opening_with_journal(original: Any, scoped: str) -> Any:
+    if isinstance(original, str):
+        marker = original.find("[CONTEXT JOURNAL:")
+        return scoped if marker < 0 else scoped + "\n\n" + original[marker:]
+    if isinstance(original, list):
+        retained = []
+        for block in original:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = str(block.get("text") or "")
+                marker = text.find("[CONTEXT JOURNAL:")
+                if marker >= 0:
+                    retained.append({"type": "text", "text": text[marker:]})
+            else:
+                retained.append(copy.deepcopy(block))
+        return [{"type": "text", "text": scoped}, *retained]
+    return scoped
+
+
 _llm_proxy_var: ContextVar[str | None] = ContextVar("_llm_proxy", default=None)
+_llm_ca_bundle_var: ContextVar[str | None] = ContextVar("_llm_ca_bundle", default=None)
 _run_id_var: ContextVar[int | None] = ContextVar("_run_id", default=None)
 _run_kind_var: ContextVar[str] = ContextVar("_run_kind", default="web")
+_budget_wrapup_var: ContextVar[int | None] = ContextVar("_budget_wrapup", default=None)
 _emit_fn_var: ContextVar[Any | None] = ContextVar("_emit_fn", default=None)
 _provider_var: ContextVar[str | None] = ContextVar("_provider", default=None)
 _base_url_var: ContextVar[str | None] = ContextVar("_base_url", default=None)
+_service_tier_var: ContextVar[str] = ContextVar("_service_tier", default="")
 _last_call_tokens_var: ContextVar[Optional[dict[str, int]]] = ContextVar(
     "last_call_tokens", default=None
 )
+_last_response_cache_telemetry_var: ContextVar[dict[str, Any] | None] = ContextVar(
+    "last_response_cache_telemetry", default=None
+)
+_traffic_call_id_var: ContextVar[int | None] = ContextVar(
+    "llm_traffic_call_id", default=None
+)
+_traffic_operation_var: ContextVar[str | None] = ContextVar(
+    "llm_traffic_operation", default=None
+)
 _operation_var: ContextVar[str | None] = ContextVar("llm_operation", default=None)
 _traffic_call_ids = itertools.count(1)
+_traffic_prefixes: OrderedDict[str, int] = OrderedDict()
+_TRAFFIC_PREFIX_LIMIT = 4096
+_traffic_prefix_lock = threading.Lock()
 
 
 def _usage_provider(config: LLMConfig) -> str:
@@ -164,14 +363,136 @@ def _usage_base_url(config: LLMConfig) -> str | None:
 # Per-run usage accumulator. Copilot entries also carry AI-credit/request data.
 _run_token_usage: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
 
+# Requests currently waiting for a provider response. These estimates are kept
+# separate from billed usage and disappear when the call finishes or fails.
+_pending_run_calls: dict[tuple[str, int], dict[int, dict[str, Any]]] = {}
+
 # Tracks which (run_kind, run_id) tuples have already been seeded from DB this process lifetime.
 _run_token_seeded: set[tuple[str, int]] = set()
+
+
+def _bucket_key(model: str, service_tier: str) -> str:
+    """Key run usage so a faster, pricier speed tier gets its own entry."""
+    return f"{model}#{service_tier}" if service_tier else model
+
+
+def _bucket_model(key: str, counts: dict[str, Any]) -> str:
+    return str(counts.get("model") or key)
 
 
 # ── Rate Limiting Core ────────────────────────────────────────────────────────
 
 
 LLM_PACING_NOTICE_THRESHOLD_S = 1.0
+
+
+class _RunConcurrencyGate:
+    """Bound in-flight provider calls for one run."""
+
+    def __init__(self) -> None:
+        self._active = 0
+        self._condition = asyncio.Condition()
+
+    async def acquire(self, limit: int) -> None:
+        async with self._condition:
+            while self._active >= limit:
+                await self._condition.wait()
+            self._active += 1
+
+    async def release(self) -> None:
+        async with self._condition:
+            self._active = max(0, self._active - 1)
+            self._condition.notify_all()
+
+
+_run_concurrency_gates: dict[tuple[int, str, int], _RunConcurrencyGate] = {}
+
+
+def _read_run_concurrency_limit(run_kind: str) -> int:
+    """Read the DAST or SAST LLM concurrency setting."""
+    try:
+        from sqlmodel import Session
+
+        from aespa.db import get_engine
+        from aespa.models import ScannerPolicy
+
+        with Session(get_engine()) as session:
+            policy = session.get(ScannerPolicy, 1)
+            if run_kind == "sast":
+                value = getattr(policy, "sast_max_concurrent_llm_requests", 4)
+            else:
+                value = getattr(policy, "dast_max_concurrent_llm_requests", 4)
+        return max(1, int(value or 4))
+    except Exception:
+        return 4
+
+
+def _read_run_budget(run_id: int, run_kind: str) -> float | None:
+    if run_kind != "web":
+        return None
+    from sqlmodel import Session
+
+    from aespa.db import get_engine
+    from aespa.models import TestRun
+
+    with Session(get_engine()) as session:
+        run = session.get(TestRun, run_id)
+        return run.llm_budget_usd if run is not None else None
+
+
+def run_llm_spend_usd(run_id: int, run_kind: str = "web") -> float:
+    """Estimated spend recorded so far for a run, from the live usage bucket."""
+    bucket = _run_token_usage.get((run_kind, run_id))
+    if bucket is None:
+        bucket = _load_bucket_from_db(run_id, run_kind)
+    return _cost_total(bucket, "estimated_total_cost_usd") or 0.0
+
+
+def check_run_budget(run_id: int, run_kind: str = "web") -> None:
+    if run_kind == "web" and _budget_wrapup_var.get() == run_id:
+        return
+    budget = _read_run_budget(run_id, run_kind)
+    if budget is None:
+        return
+    spend = run_llm_spend_usd(run_id, run_kind)
+    if spend >= budget:
+        raise LLMBudgetPauseError(
+            f"LLM budget reached: ${spend:.2f} spent of ${budget:.2f}.",
+            snapshot={"spend_usd": spend, "budget_usd": budget},
+        )
+
+
+def run_budget_wrapup_due(run_id: int, reserve_usd: float = 1.0) -> bool:
+    budget = _read_run_budget(run_id, "web")
+    return budget is not None and run_llm_spend_usd(run_id) >= max(
+        0.0, budget - reserve_usd
+    )
+
+
+def set_budget_wrapup_allowed(allowed: bool) -> None:
+    _budget_wrapup_var.set(_run_id_var.get() if allowed else None)
+
+
+@asynccontextmanager
+async def _run_concurrency_slot():
+    """Limit live provider requests for the current DAST or SAST run."""
+    run_id = _run_id_var.get()
+    run_kind = _run_kind_var.get()
+    if run_id is None or run_kind not in {"web", "api", "sast"}:
+        yield
+        return
+
+    loop = asyncio.get_running_loop()
+    key = (id(loop), run_kind, run_id)
+    gate = _run_concurrency_gates.setdefault(key, _RunConcurrencyGate())
+    await gate.acquire(_read_run_concurrency_limit(run_kind))
+    try:
+        # Checked after the slot is acquired so a queued call sees the cost of
+        # the call that finished ahead of it.
+        check_run_budget(run_id, run_kind)
+        yield
+    finally:
+        await gate.release()
 
 
 class AsyncTokenBucketLimiter:
@@ -386,6 +707,7 @@ def estimate_tokens(
             vision_tokens = 1600
         elif provider_name in (
             "openai",
+            "openai_chatgpt_plan",
             "azure_openai",
             "openrouter",
             "github_copilot",
@@ -406,43 +728,29 @@ def get_limiter_for_config(config: LLMConfig) -> Optional[AsyncTokenBucketLimite
     if config.provider_id is None:
         return None
 
-    key = f"{config.provider}:{config.model}"
-    try:
-        from sqlmodel import Session
+    key = f"{config.provider_id}:{config.model}"
+    if not config.max_tpm and not config.max_rpm:
+        _limiters.pop(key, None)
+        return None
 
-        from aespa.db import get_engine
-        from aespa.models import LLMProviderConfig
-
-        with Session(get_engine()) as session:
-            provider = session.get(LLMProviderConfig, config.provider_id)
-            if not provider or (not provider.max_tpm and not provider.max_rpm):
-                _limiters.pop(key, None)
-                return None
-
-            tpm = provider.max_tpm or 10_000_000
-            rpm = provider.max_rpm
-
-            limiter = _limiters.get(key)
-            burst_seconds = 0.0 if config.provider == "openai_codex" else 60.0
-            burst_requests = 1 if config.provider == "openai_codex" else None
-            if (
-                not limiter
-                or limiter.tpm != tpm
-                or limiter.rpm != rpm
-                or limiter.burst_seconds != burst_seconds
-                or (
-                    config.provider == "openai_codex"
-                    and limiter.request_capacity != 1.0
-                )
-            ):
-                _limiters[key] = AsyncTokenBucketLimiter(
-                    tpm=tpm,
-                    rpm=rpm,
-                    burst_seconds=burst_seconds,
-                    burst_requests=burst_requests,
-                )
-    except Exception as e:
-        log.warning(f"Failed to lookup rate limit for provider: {e}")
+    tpm = config.max_tpm or 10_000_000
+    rpm = config.max_rpm
+    limiter = _limiters.get(key)
+    burst_seconds = 0.0 if config.provider == "openai_codex" else 60.0
+    burst_requests = 1 if config.provider == "openai_codex" else None
+    if (
+        not limiter
+        or limiter.tpm != tpm
+        or limiter.rpm != rpm
+        or limiter.burst_seconds != burst_seconds
+        or (config.provider == "openai_codex" and limiter.request_capacity != 1.0)
+    ):
+        _limiters[key] = AsyncTokenBucketLimiter(
+            tpm=tpm,
+            rpm=rpm,
+            burst_seconds=burst_seconds,
+            burst_requests=burst_requests,
+        )
 
     return _limiters.get(key)
 
@@ -473,9 +781,10 @@ def _load_bucket_from_db(
                 if not isinstance(bucket, dict):
                     return {}
                 changed = False
-                for model, counts in bucket.items():
+                for key, counts in bucket.items():
                     if not isinstance(counts, dict):
                         continue
+                    model = _bucket_model(key, counts)
                     explicit_provider = str(counts.get("provider") or "").strip()
                     provider = (
                         explicit_provider if explicit_provider != "unknown" else ""
@@ -497,7 +806,19 @@ def _load_bucket_from_db(
                         changed = True
                     if not provider:
                         continue
-                    rates = statistics_service._rates_for(s, provider, model)
+                    if provider == "bedrock" and not counts.get(
+                        "bedrock_input_inclusive"
+                    ):
+                        counts["input"] = (
+                            counts.get("input", 0)
+                            + counts.get("cache_read", 0)
+                            + counts.get("cache_write", 0)
+                        )
+                        counts["bedrock_input_inclusive"] = True
+                        changed = True
+                    rates = statistics_service._rates_for(
+                        s, provider, model, counts.get("service_tier") or ""
+                    )
                     cost = statistics_service.estimate_usage_cost(
                         provider,
                         input_tokens=counts.get("input", 0),
@@ -508,9 +829,9 @@ def _load_bucket_from_db(
                         factory_credits=counts.get("factory_credits", 0),
                         rates=rates,
                     )
-                    for key, value in cost.items():
-                        if counts.get(key) != value:
-                            counts[key] = value
+                    for cost_key, value in cost.items():
+                        if counts.get(cost_key) != value:
+                            counts[cost_key] = value
                             changed = True
                 if changed:
                     run.token_usage_json = json.dumps(bucket)
@@ -532,13 +853,18 @@ def _reprice_bucket(bucket: dict[str, dict[str, Any]]) -> bool:
         from aespa.services import statistics as statistics_service
 
         with _Session(get_engine()) as session:
-            for model, counts in bucket.items():
+            for key, counts in bucket.items():
                 if not isinstance(counts, dict):
                     continue
                 provider = str(counts.get("provider") or "").strip()
                 if not provider or provider == "unknown":
                     continue
-                rates = statistics_service._rates_for(session, provider, model)
+                rates = statistics_service._rates_for(
+                    session,
+                    provider,
+                    _bucket_model(key, counts),
+                    counts.get("service_tier") or "",
+                )
                 cost = statistics_service.estimate_usage_cost(
                     provider,
                     input_tokens=counts.get("input", 0),
@@ -549,9 +875,9 @@ def _reprice_bucket(bucket: dict[str, dict[str, Any]]) -> bool:
                     factory_credits=counts.get("factory_credits", 0),
                     rates=rates,
                 )
-                for key, value in cost.items():
-                    if counts.get(key) != value:
-                        counts[key] = value
+                for cost_key, value in cost.items():
+                    if counts.get(cost_key) != value:
+                        counts[cost_key] = value
                         changed = True
     except Exception:
         log.debug("Failed to reprice accumulated run usage", exc_info=True)
@@ -643,9 +969,17 @@ def set_run_context(run_id: int, emit_fn: Any, run_kind: str = "web") -> None:
                     "requests",
                 ):
                     bucket[model][k] = max(bucket[model].get(k, 0), counts.get(k, 0))
-                for k in ("provider", "copilot_quota"):
+                for k in ("provider", "copilot_quota", "model", "service_tier"):
                     if counts.get(k) is not None:
                         bucket[model][k] = counts[k]
+                programs = counts.get("daybreak_programs")
+                if isinstance(programs, list):
+                    bucket[model]["daybreak_programs"] = sorted(
+                        set(bucket[model].get("daybreak_programs", []))
+                        | (set(programs) & {"daybreak_blue", "daybreak_red"})
+                    )
+                if counts.get("bedrock_input_inclusive"):
+                    bucket[model]["bedrock_input_inclusive"] = True
         _run_token_seeded.add(key)
 
 
@@ -680,7 +1014,37 @@ def _cost_total(bucket: dict[str, dict[str, Any]], key: str) -> float | None:
     return sum(values) if values else None
 
 
-def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _uncached_run_input(model: str, counts: dict[str, Any]) -> int:
+    """Convert recorded input to the uncached count used for display."""
+    provider = counts.get("provider")
+    includes_cache = provider in {
+        "openai",
+        "openai_compatible",
+        "openrouter",
+        "azure_openai",
+        "azure_foundry",
+        "azure_foundry_openai",
+        "google",
+        "google_vertex",
+        "openai_codex",
+        "openai_chatgpt_plan",
+        "google_antigravity",
+    }
+    if provider == "bedrock":
+        includes_cache = bool(counts.get("bedrock_input_inclusive"))
+    elif provider == "bedrock_mantle":
+        # Mantle Claude uses Messages, whose input count excludes cache tokens.
+        includes_cache = not model.lower().startswith(("anthropic.", "claude-"))
+    input_tokens = counts.get("input", 0)
+    if includes_cache:
+        input_tokens -= counts.get("cache_read", 0) + counts.get("cache_write", 0)
+    return max(0, input_tokens)
+
+
+def _usage_totals(
+    bucket: dict[str, dict[str, Any]],
+    pending_calls: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     def latest_quota(key: str) -> dict[str, Any] | None:
         quotas = [value[key] for value in bucket.values() if value.get(key)]
         return max(
@@ -689,7 +1053,19 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
             default=None,
         )
 
+    pending = pending_calls or {}
+    by_model: dict[str, dict[str, Any]] = {}
+    by_model_fast: dict[str, dict[str, Any]] = {}
+    for key, counts in bucket.items():
+        model = _bucket_model(key, counts)
+        target = by_model_fast if counts.get("service_tier") else by_model
+        target[model] = {
+            **counts,
+            "uncached_input": _uncached_run_input(model, counts),
+        }
+    entries = [*by_model.values(), *by_model_fast.values()]
     return {
+        "total_uncached_input": sum(v["uncached_input"] for v in entries),
         "total_input": sum(v.get("input", 0) for v in bucket.values()),
         "total_output": sum(v.get("output", 0) for v in bucket.values()),
         "total_cache_read": sum(v.get("cache_read", 0) for v in bucket.values()),
@@ -702,6 +1078,10 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
             v.get("premium_requests", 0) for v in bucket.values()
         ),
         "total_requests": sum(v.get("requests", 0) for v in bucket.values()),
+        "pending_requests": len(pending),
+        "pending_input_tokens": sum(
+            max(0, int(call.get("input_tokens", 0) or 0)) for call in pending.values()
+        ),
         "estimated_token_cost_usd": _cost_total(bucket, "estimated_token_cost_usd"),
         "estimated_credit_cost_usd": _cost_total(bucket, "estimated_credit_cost_usd"),
         "estimated_total_cost_usd": _cost_total(bucket, "estimated_total_cost_usd"),
@@ -710,8 +1090,54 @@ def _usage_totals(bucket: dict[str, dict[str, Any]]) -> dict[str, Any]:
         ),
         "copilot_quota": latest_quota("copilot_quota"),
         "codex_quota": latest_quota("codex_quota"),
-        "by_model": {m: dict(v) for m, v in bucket.items()},
+        "by_model": by_model,
+        "by_model_fast": by_model_fast,
     }
+
+
+def _emit_pending_usage_update(context: _UsageContext, key: tuple[str, int]) -> None:
+    if context.emit_fn is None:
+        return
+    try:
+        context.emit_fn(
+            {
+                "type": "token_usage_update",
+                "totals": _usage_totals(
+                    _run_token_usage.get(key, {}), _pending_run_calls.get(key)
+                ),
+            }
+        )
+    except Exception:
+        pass
+
+
+def _begin_pending_usage(
+    config: LLMConfig, call_id: int, input_tokens: int
+) -> tuple[_UsageContext, tuple[str, int], int] | None:
+    context = _capture_usage_context()
+    if context.run_id is None:
+        return None
+    key = (context.run_kind, context.run_id)
+    _pending_run_calls.setdefault(key, {})[call_id] = {
+        "model": config.model,
+        "input_tokens": max(0, int(input_tokens)),
+    }
+    _emit_pending_usage_update(context, key)
+    return context, key, call_id
+
+
+def _end_pending_usage(
+    token: tuple[_UsageContext, tuple[str, int], int] | None,
+) -> None:
+    if token is None:
+        return
+    context, key, call_id = token
+    calls = _pending_run_calls.get(key)
+    if calls is not None:
+        calls.pop(call_id, None)
+        if not calls:
+            _pending_run_calls.pop(key, None)
+    _emit_pending_usage_update(context, key)
 
 
 def _record_usage(
@@ -731,6 +1157,9 @@ def _record_usage(
     copilot_quota: dict[str, Any] | None = None,
     codex_quota: dict[str, Any] | None = None,
     thinking_tokens: int = 0,
+    input_includes_cache: bool | None = None,
+    service_tier: str | None = None,
+    daybreak_program: str | None = None,
     **kwargs: Any,
 ) -> None:
     """Accumulate provider usage for a run and the independent monthly ledger."""
@@ -738,18 +1167,32 @@ def _record_usage(
     # this as its cumulative ``thread/tokenUsage/updated`` stream advances).
     # Keep a per-call total so the limiter reconciles the whole turn rather than
     # only the final notification.
-    previous_call_usage = _last_call_tokens_var.get() or {"input": 0, "output": 0}
-    _last_call_tokens_var.set(
-        {
-            "input": previous_call_usage.get("input", 0)
-            + input_tokens
-            + cache_read_tokens,
-            "output": previous_call_usage.get("output", 0) + output_tokens,
-        }
-    )
     context = usage_context or _capture_usage_context()
     usage_provider = provider or _provider_var.get() or "unknown"
     usage_base_url = base_url if base_url is not None else _base_url_var.get()
+    usage_service_tier = (
+        service_tier if service_tier is not None else _service_tier_var.get()
+    )
+    # Bedrock Converse reports only uncached tokens in inputTokens. Keep the
+    # run's input total inclusive while retaining separate cache counters.
+    reported_input = (
+        input_tokens + cache_read_tokens + cache_write_tokens
+        if usage_provider == "bedrock"
+        else input_tokens
+    )
+    # Bedrock's token quota counts cache writes, but not cache reads.
+    limiter_input = (
+        input_tokens + cache_write_tokens
+        if usage_provider == "bedrock"
+        else input_tokens + cache_read_tokens
+    )
+    previous_call_usage = _last_call_tokens_var.get() or {"input": 0, "output": 0}
+    _last_call_tokens_var.set(
+        {
+            "input": previous_call_usage.get("input", 0) + limiter_input,
+            "output": previous_call_usage.get("output", 0) + output_tokens,
+        }
+    )
     inclusive_input_providers = {
         "openai",
         "openai_compatible",
@@ -757,13 +1200,20 @@ def _record_usage(
         "azure_foundry",
         "azure_foundry_openai",
         "bedrock_mantle",
+        "bedrock",
         "google",
+        "google_vertex",
         "openai_codex",
+        "openai_chatgpt_plan",
         "google_antigravity",
     }
-    normalized_input = max(0, input_tokens)
-    if usage_provider in inclusive_input_providers:
-        normalized_input = max(0, input_tokens - cache_read_tokens - cache_write_tokens)
+    normalized_input = max(0, reported_input)
+    if input_includes_cache is True or (
+        input_includes_cache is None and usage_provider in inclusive_input_providers
+    ):
+        normalized_input = max(
+            0, reported_input - cache_read_tokens - cache_write_tokens
+        )
     usage_rates: dict[str, Any] = {}
     try:
         from aespa.services import statistics as statistics_service
@@ -771,6 +1221,7 @@ def _record_usage(
         usage_rates = statistics_service.record_usage(
             usage_provider,
             model,
+            service_tier=usage_service_tier,
             base_url=usage_base_url,
             input_tokens=normalized_input,
             output_tokens=output_tokens,
@@ -790,9 +1241,13 @@ def _record_usage(
     key = (run_kind, run_id)
     bucket = _run_token_usage.setdefault(key, {})
     entry = bucket.setdefault(
-        model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        _bucket_key(model, usage_service_tier),
+        {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
     )
-    entry["input"] += input_tokens
+    if usage_service_tier:
+        entry["model"] = model
+        entry["service_tier"] = usage_service_tier
+    entry["input"] += reported_input
     entry["output"] += output_tokens
     entry["cache_read"] += cache_read_tokens
     entry["cache_write"] += cache_write_tokens
@@ -801,6 +1256,12 @@ def _record_usage(
     entry["factory_credits"] = entry.get("factory_credits", 0) + factory_credits
     entry["premium_requests"] = entry.get("premium_requests", 0) + premium_requests
     entry["requests"] = entry.get("requests", 0) + requests
+    if daybreak_program in {"daybreak_blue", "daybreak_red"}:
+        entry["daybreak_programs"] = sorted(
+            set(entry.get("daybreak_programs", [])) | {daybreak_program}
+        )
+    if usage_provider == "bedrock":
+        entry["bedrock_input_inclusive"] = True
     try:
         from aespa.services import statistics as statistics_service
 
@@ -830,18 +1291,33 @@ def _record_usage(
                 {
                     "type": "token_usage_update",
                     "model": model,
-                    "input_tokens": input_tokens,
+                    "service_tier": usage_service_tier,
+                    "input_tokens": reported_input,
                     "output_tokens": output_tokens,
                     "cache_read_tokens": cache_read_tokens,
                     "cache_write_tokens": cache_write_tokens,
                     "ai_credits": ai_credits,
                     "factory_credits": factory_credits,
                     "premium_requests": premium_requests,
-                    "totals": _usage_totals(bucket),
+                    "totals": _usage_totals(bucket, _pending_run_calls.get(key)),
                 }
             )
         except Exception:
             pass
+
+
+def _record_daybreak_program(model: str, program: str, context: _UsageContext) -> None:
+    if program not in {"daybreak_blue", "daybreak_red"} or context.run_id is None:
+        return
+    key = (context.run_kind, context.run_id)
+    bucket = _run_token_usage.setdefault(key, {})
+    entry = bucket.setdefault(
+        model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    )
+    entry["daybreak_programs"] = sorted(
+        set(entry.get("daybreak_programs", [])) | {program}
+    )
+    _persist_bucket_to_db(context.run_id, bucket, context.run_kind)
 
 
 def _record_google_usage(model: str, usage_metadata: Any | None) -> None:
@@ -873,11 +1349,27 @@ def get_run_token_usage(run_id: int, run_kind: str = "web") -> dict:
         bucket = _load_bucket_from_db(run_id, run_kind)
     elif _reprice_bucket(bucket):
         _persist_bucket_to_db(run_id, bucket, run_kind)
-    return _usage_totals(bucket)
+    return _usage_totals(bucket, _pending_run_calls.get(key))
 
 
 def set_llm_proxy(url: str | None) -> None:
     _llm_proxy_var.set(url)
+
+
+def set_llm_ca_bundle(path: str | None) -> None:
+    _llm_ca_bundle_var.set(path)
+
+
+@contextmanager
+def llm_transport_scope(proxy_url: str | None, ca_bundle_path: str | None):
+    """Use one request's LLM network settings without changing other tasks."""
+    proxy_token = _llm_proxy_var.set(proxy_url)
+    ca_token = _llm_ca_bundle_var.set(ca_bundle_path)
+    try:
+        yield
+    finally:
+        _llm_ca_bundle_var.reset(ca_token)
+        _llm_proxy_var.reset(proxy_token)
 
 
 def _emit_run_event(event: dict) -> None:
@@ -967,8 +1459,8 @@ def _llm_client_kwargs() -> dict:
     """
     proxy = _llm_proxy_var.get()
     return {
-        "http_client": httpx.AsyncClient(
-            verify=proxy is None,
+        "http_client": httpx2.AsyncClient(
+            verify=httpx_verify(_llm_ca_bundle_var.get(), proxy is None),
             headers=_LLM_HEADERS,
             **{"proxy": proxy} if proxy else {},
         )
@@ -982,11 +1474,49 @@ def _make_llm_http_client(**kwargs) -> httpx.AsyncClient:
     configured (HTTPS interception). See ``_llm_client_kwargs`` for rationale.
     """
     proxy = _llm_proxy_var.get()
-    kwargs.setdefault("verify", proxy is None)
+    kwargs.setdefault("verify", _llm_ca_bundle_var.get() or proxy is None)
     kwargs["headers"] = {**_LLM_HEADERS, **kwargs.get("headers", {})}
     if proxy:
         kwargs["proxy"] = proxy
     return httpx.AsyncClient(**kwargs)
+
+
+def _bedrock_botocore_config(proxy_url: str | None):
+    """Build the Bedrock SDK transport settings used by every request path."""
+    from botocore.config import Config as BotocoreConfig
+
+    kwargs: dict[str, Any] = {
+        "connect_timeout": BEDROCK_CONNECT_TIMEOUT_S,
+        "read_timeout": BEDROCK_READ_TIMEOUT_S,
+    }
+    if proxy_url:
+        kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+    return BotocoreConfig(**kwargs)
+
+
+def _bedrock_session(profile: str | None, proxy_url: str | None, ca_bundle: str | None):
+    """Give Bedrock and any AWS credential refresh the same network settings."""
+    import boto3
+
+    session_kwargs = {"profile_name": profile} if profile else {}
+    if ca_bundle or proxy_url:
+        import botocore.session
+
+        core_session = botocore.session.get_session()
+        if ca_bundle:
+            core_session.set_config_variable("ca_bundle", ca_bundle)
+        if proxy_url:
+            core_session.set_default_client_config(_bedrock_botocore_config(proxy_url))
+        session_kwargs["botocore_session"] = core_session
+    return boto3.Session(**session_kwargs)
+
+
+def _bedrock_http_timeout() -> httpx.Timeout:
+    """Use the same long read allowance for bearer-token Bedrock requests."""
+    return httpx.Timeout(
+        BEDROCK_READ_TIMEOUT_S,
+        connect=BEDROCK_CONNECT_TIMEOUT_S,
+    )
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -1452,39 +1982,59 @@ def _parse(raw: Optional[str], page_url: str) -> tuple[str, list[str], PageCateg
         return raw_cleaned, [], dict(_EMPTY_CATS)
 
 
+async def _dispatch_completion(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    if config.provider == "factory_droid":
+        return await _factory_droid(config, prompt, screenshot_b64)
+    if config.provider == "claude_cli":
+        return await _claude_cli(config, prompt, screenshot_b64)
+    if config.provider == "github_copilot":
+        return await _github_copilot(config, prompt, screenshot_b64)
+    if config.provider == "openai_codex":
+        return await _openai_codex(config, prompt, screenshot_b64)
+    if config.provider == "google_antigravity":
+        return await _google_antigravity(config, prompt, screenshot_b64)
+    if config.provider == "anthropic":
+        return await _anthropic(config, prompt, screenshot_b64)
+    if config.provider == "google_vertex" and _uses_openai_responses(config):
+        return await _openai_responses(config, prompt, screenshot_b64)
+    if config.provider in {"google", "google_vertex"}:
+        return await _google(config, prompt, screenshot_b64)
+    if config.provider == "azure_openai":
+        return await _azure_openai(config, prompt, screenshot_b64)
+    if config.provider in ("azure_foundry", "azure_foundry_openai"):
+        return await _azure_foundry_openai(config, prompt, screenshot_b64)
+    if config.provider == "azure_foundry_anthropic":
+        return await _azure_foundry_anthropic(config, prompt, screenshot_b64)
+    if config.provider == "openrouter":
+        return await _openrouter(config, prompt, screenshot_b64)
+    if config.provider == "bedrock":
+        return await _bedrock(config, prompt, screenshot_b64)
+    if config.provider == "bedrock_mantle":
+        mantle_api = _bedrock_mantle_model_api(config.model)
+        if mantle_api == "messages":
+            return await _anthropic(config, prompt, screenshot_b64)
+        if mantle_api == "chat_completions":
+            return await _openai_compat(config, prompt, screenshot_b64)
+        return await _openai_responses(config, prompt, screenshot_b64)
+    if _uses_openai_responses(config):
+        return await _openai_responses(config, prompt, screenshot_b64)
+    return await _openai_compat(config, prompt, screenshot_b64)
+
+
 async def _call_impl(
     config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
 ) -> str:
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
+    _service_tier_var.set(getattr(config, "service_tier", None) or "")
     _last_call_tokens_var.set(None)
+    _last_response_cache_telemetry_var.set(None)
     limiter = get_limiter_for_config(config)
     if limiter is None:
-        if config.provider == "factory_droid":
-            return await _factory_droid(config, prompt, screenshot_b64)
-        if config.provider == "github_copilot":
-            return await _github_copilot(config, prompt, screenshot_b64)
-        if config.provider == "openai_codex":
-            return await _openai_codex(config, prompt, screenshot_b64)
-        if config.provider == "google_antigravity":
-            return await _google_antigravity(config, prompt, screenshot_b64)
-        if config.provider == "anthropic":
-            return await _anthropic(config, prompt, screenshot_b64)
-        if config.provider == "google":
-            return await _google(config, prompt, screenshot_b64)
-        if config.provider == "azure_openai":
-            return await _azure_openai(config, prompt, screenshot_b64)
-        if config.provider in ("azure_foundry", "azure_foundry_openai"):
-            return await _azure_foundry_openai(config, prompt, screenshot_b64)
-        if config.provider == "azure_foundry_anthropic":
-            return await _azure_foundry_anthropic(config, prompt, screenshot_b64)
-        if config.provider == "openrouter":
-            return await _openrouter(config, prompt, screenshot_b64)
-        if config.provider == "bedrock":
-            return await _bedrock(config, prompt, screenshot_b64)
-        if config.provider == "bedrock_mantle":
-            return await _openai_responses(config, prompt, screenshot_b64)
-        return await _openai_compat(config, prompt, screenshot_b64)
+        async with _run_concurrency_slot():
+            return await _dispatch_completion(config, prompt, screenshot_b64)
 
     estimated_input = estimate_tokens(
         prompt, screenshot_b64, config.provider, model=config.model
@@ -1504,32 +2054,8 @@ async def _call_impl(
         _emit_llm_pacing_finished(config.model)
 
     try:
-        if config.provider == "factory_droid":
-            resp = await _factory_droid(config, prompt, screenshot_b64)
-        elif config.provider == "github_copilot":
-            resp = await _github_copilot(config, prompt, screenshot_b64)
-        elif config.provider == "openai_codex":
-            resp = await _openai_codex(config, prompt, screenshot_b64)
-        elif config.provider == "google_antigravity":
-            resp = await _google_antigravity(config, prompt, screenshot_b64)
-        elif config.provider == "anthropic":
-            resp = await _anthropic(config, prompt, screenshot_b64)
-        elif config.provider == "google":
-            resp = await _google(config, prompt, screenshot_b64)
-        elif config.provider == "azure_openai":
-            resp = await _azure_openai(config, prompt, screenshot_b64)
-        elif config.provider in ("azure_foundry", "azure_foundry_openai"):
-            resp = await _azure_foundry_openai(config, prompt, screenshot_b64)
-        elif config.provider == "azure_foundry_anthropic":
-            resp = await _azure_foundry_anthropic(config, prompt, screenshot_b64)
-        elif config.provider == "openrouter":
-            resp = await _openrouter(config, prompt, screenshot_b64)
-        elif config.provider == "bedrock":
-            resp = await _bedrock(config, prompt, screenshot_b64)
-        elif config.provider == "bedrock_mantle":
-            resp = await _openai_responses(config, prompt, screenshot_b64)
-        else:
-            resp = await _openai_compat(config, prompt, screenshot_b64)
+        async with _run_concurrency_slot():
+            resp = await _dispatch_completion(config, prompt, screenshot_b64)
 
         usage = _last_call_tokens_var.get()
         if usage:
@@ -1570,6 +2096,68 @@ def _infer_llm_operation() -> str:
     module = str(frame.f_globals.get("__name__") or "unknown").rsplit(".", 1)[-1]
     function = frame.f_code.co_name
     return f"{module}.{function}"
+
+
+def _traffic_request_payload(
+    system_message: str,
+    messages: list[dict],
+    call_id: int,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build the logged request, replacing a known conversation prefix by a link.
+
+    The full request is logged the first time a conversation is seen. Later
+    requests that extend an already logged conversation record only the new
+    messages plus the call ID that holds the earlier ones.
+    """
+    if not traffic_log.isEnabledFor(logging.INFO):
+        return {}
+    digest = hashlib.sha256(system_message.encode("utf-8", "replace"))
+    prefixes: list[str] = []
+    for message in messages:
+        digest.update(
+            json.dumps(message, ensure_ascii=False, sort_keys=True, default=str).encode(
+                "utf-8", "replace"
+            )
+        )
+        prefixes.append(digest.copy().hexdigest())
+    with _traffic_prefix_lock:
+        matched = 0
+        previous_call: int | None = None
+        for index in range(len(prefixes) - 1, -1, -1):
+            found = _traffic_prefixes.get(prefixes[index])
+            if found is not None:
+                matched, previous_call = index + 1, found
+                _traffic_prefixes.move_to_end(prefixes[index])
+                break
+        if prefixes:
+            _traffic_prefixes[prefixes[-1]] = call_id
+            _traffic_prefixes.move_to_end(prefixes[-1])
+            while len(_traffic_prefixes) > _TRAFFIC_PREFIX_LIMIT:
+                _traffic_prefixes.popitem(last=False)
+    if previous_call is None:
+        return {"system": system_message, "messages": messages, **extra}
+    return {
+        "continues_call": previous_call,
+        "previous_messages": matched,
+        "new_messages": messages[matched:],
+        **extra,
+    }
+
+
+def _refused_agentic_prompt(
+    system_message: str, messages: list[dict], tools: list[dict] | None
+) -> str:
+    """Save the complete canonical request only when a provider refuses it."""
+    request = {
+        "system": system_message,
+        "messages": [
+            {"role": message.get("role"), "content": message.get("content")}
+            for message in _repair_tool_use_inputs(messages)
+        ],
+        "tools": tools if tools is not None else THINKING_AGENT_TOOLS,
+    }
+    return json.dumps(request, ensure_ascii=False, indent=2, default=str)
 
 
 def _log_llm_traffic(
@@ -1623,6 +2211,18 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
         operation=operation,
         call_id=call_id,
     )
+    pending_token = _begin_pending_usage(
+        config,
+        call_id,
+        estimate_tokens(
+            prompt,
+            screenshot_b64,
+            getattr(config.provider, "value", config.provider),
+            model=config.model,
+        ),
+    )
+    call_token = _traffic_call_id_var.set(call_id)
+    operation_token = _traffic_operation_var.set(operation)
     try:
         response = await _call_impl(config, prompt, screenshot_b64)
     except Exception as exc:
@@ -1634,24 +2234,41 @@ async def _call(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -
             operation=operation,
             call_id=call_id,
         )
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
         raise
-    _log_llm_traffic(
-        "RESPONSE",
-        config,
-        response,
-        kind="completion",
-        operation=operation,
-        call_id=call_id,
-    )
-    return response
+    finally:
+        _end_pending_usage(pending_token)
+    try:
+        telemetry = _last_response_cache_telemetry_var.get()
+        response_payload: Any = response
+        if telemetry is not None:
+            response_payload = {
+                "content": response,
+                "cache_telemetry": telemetry,
+            }
+        _log_llm_traffic(
+            "RESPONSE",
+            config,
+            response_payload,
+            kind="completion",
+            operation=operation,
+            call_id=call_id,
+        )
+        return response
+    finally:
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
 
 
 async def plain_completion(
     config: LLMConfig, prompt: str, *, system_prompt: str | None = None
 ) -> str:
     """Send a plain text prompt and return the raw response text."""
-    combined = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-    return await _call(config, combined, None)
+    request_config, combined, _budget = _fit_plain_prompt_to_context(
+        config, prompt, system_prompt
+    )
+    return await _call(request_config, combined, None)
 
 
 async def stream_chat_completion(
@@ -1661,7 +2278,7 @@ async def stream_chat_completion(
 ) -> AsyncGenerator[str, None]:
     operation = _operation_var.get() or _infer_llm_operation()
     call_id = next(_traffic_call_ids)
-    request = {"system": system_message, "messages": messages}
+    request = _traffic_request_payload(system_message, messages, call_id)
     _log_llm_traffic(
         "REQUEST",
         config,
@@ -1672,11 +2289,12 @@ async def stream_chat_completion(
     )
     chunks: list[str] = []
     try:
-        async for chunk in _stream_chat_completion_impl(
-            config, system_message, messages
-        ):
-            chunks.append(chunk)
-            yield chunk
+        async with _run_concurrency_slot():
+            async for chunk in _stream_chat_completion_impl(
+                config, system_message, messages
+            ):
+                chunks.append(chunk)
+                yield chunk
     except Exception as exc:
         _log_llm_traffic(
             "FAILED",
@@ -1707,7 +2325,9 @@ async def _stream_chat_completion_impl(
     """Stream a chat completion from the configured LLM provider in real-time."""
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
+    _service_tier_var.set(getattr(config, "service_tier", None) or "")
     if config.provider in (
+        "claude_cli",
         "factory_droid",
         "github_copilot",
         "openai_codex",
@@ -1725,7 +2345,9 @@ async def _stream_chat_completion_impl(
                 ],
             ]
         )
-        if config.provider == "factory_droid":
+        if config.provider == "claude_cli":
+            yield await _claude_cli(config, combined, None)
+        elif config.provider == "factory_droid":
             yield await _factory_droid(config, combined, None)
         elif config.provider == "github_copilot":
             yield await _github_copilot(config, combined, None)
@@ -1733,10 +2355,17 @@ async def _stream_chat_completion_impl(
             yield await _openai_codex(config, combined, None)
         else:
             yield await _google_antigravity(config, combined, None)
-    elif config.provider == "anthropic":
+    elif config.provider == "anthropic" or (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "messages"
+    ):
         import anthropic as _ant
 
-        client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        client = (
+            _make_bedrock_mantle_anthropic_client(config)
+            if config.provider == "bedrock_mantle"
+            else _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        )
         formatted_messages = []
         for m in messages:
             if m.get("role") in ("user", "assistant"):
@@ -1787,7 +2416,9 @@ async def _stream_chat_completion_impl(
                 "Accept": "application/json",
             }
             try:
-                async with _make_llm_http_client(timeout=120) as client:
+                async with _make_llm_http_client(
+                    timeout=_bedrock_http_timeout()
+                ) as client:
                     async with client.stream(
                         "POST", url, headers=headers, json=payload
                     ) as response:
@@ -1811,6 +2442,7 @@ async def _stream_chat_completion_impl(
                 raise RuntimeError(f"Bedrock API key stream failed: {e}") from e
         else:
             _proxy_url = _llm_proxy_var.get()
+            _ca_bundle = _llm_ca_bundle_var.get()
             _model = config.model
             _messages = converse_messages
             _system = system_list
@@ -1820,24 +2452,16 @@ async def _stream_chat_completion_impl(
             _endpoint = config.base_url or None
 
             def _run_converse_stream():
-                import boto3
-                from botocore.config import Config as _BotocoreConfig
-
                 region = _bedrock_region(config)
-                profile = os.getenv("AWS_PROFILE")
-                session_kwargs = {"profile_name": profile} if profile else {}
-                session = boto3.Session(**session_kwargs)
-                _boto_cfg = (
-                    _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
-                    if _proxy_url
-                    else None
-                )
+                profile = config.aws_profile or os.getenv("AWS_PROFILE")
+                session = _bedrock_session(profile, _proxy_url, _ca_bundle)
+                _boto_cfg = _bedrock_botocore_config(_proxy_url)
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=_endpoint,
-                    verify=not _proxy_url,
-                    **{"config": _boto_cfg} if _boto_cfg else {},
+                    verify=_ca_bundle or not _proxy_url,
+                    config=_boto_cfg,
                 )
                 return client.converse_stream(
                     modelId=_model,
@@ -1878,29 +2502,72 @@ async def _stream_chat_completion_impl(
                 elif item_type == "error":
                     raise RuntimeError(f"Bedrock SDK stream failed: {val}") from val
 
-    elif config.provider == "bedrock_mantle":
-        # Mantle uses the OpenAI Responses API (gpt-5.x are Responses-only).
-        client = _make_bedrock_mantle_client(config)
+    elif (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "responses"
+    ) or _uses_openai_responses(config):
+        client = (
+            await _make_chatgpt_plan_client(config)
+            if config.provider == "openai_chatgpt_plan"
+            else _make_responses_client(config)
+        )
         r_input = [
             {"type": "message", "role": m["role"], "content": m["content"]}
             for m in messages
             if m.get("role") in ("user", "assistant")
         ]
         try:
-            stream = await _create_response(
-                client,
-                _mantle_response_kwargs(
-                    config, input=r_input, instructions=system_message, stream=True
-                ),
+            request_kwargs = _responses_request_kwargs(
+                config, input=r_input, instructions=system_message, stream=True
             )
+            if config.provider == "openai_chatgpt_plan":
+                await _add_daybreak_access(config, request_kwargs)
+            stream = await _create_response(client, request_kwargs)
+            completed = False
+            completed_response = None
             async for event in stream:
                 if getattr(event, "type", None) == "response.output_text.delta":
                     delta = getattr(event, "delta", None)
                     if delta:
                         yield delta
+                elif config.provider == "openai_chatgpt_plan":
+                    event_type = getattr(event, "type", None)
+                    if event_type == "response.completed":
+                        completed = True
+                        completed_response = getattr(event, "response", None)
+                    elif event_type == "response.failed":
+                        response = getattr(event, "response", None)
+                        error = getattr(response, "error", None)
+                        code = str(getattr(error, "code", None) or "unknown_error")
+                        if code in {
+                            "subscription_sharing_usage_limit_exceeded",
+                            "subscription_sharing_usage_unavailable",
+                        }:
+                            raise LLMQuotaPauseError(
+                                "ChatGPT plan usage is unavailable or exhausted"
+                            )
+                        raise RuntimeError(f"ChatGPT plan response failed: {code}")
+                    elif event_type == "response.incomplete":
+                        raise RuntimeError("ChatGPT plan response was incomplete")
+            if config.provider == "openai_chatgpt_plan" and not completed:
+                raise RuntimeError("ChatGPT plan stream ended early")
+            if (
+                config.provider == "openai_chatgpt_plan"
+                and completed_response is not None
+            ):
+                _record_responses_usage(
+                    config,
+                    completed_response,
+                    requested_prompt_cache_key=request_kwargs.get("prompt_cache_key"),
+                    daybreak_program=_response_daybreak_program(
+                        completed_response, request_kwargs
+                    ),
+                )
+        except LLMQuotaPauseError:
+            raise
         except Exception as e:
-            log.exception("Error in Bedrock Mantle responses stream")
-            raise RuntimeError(f"Bedrock Mantle responses stream failed: {e}") from e
+            log.exception("Error in OpenAI Responses stream")
+            raise RuntimeError(f"OpenAI Responses stream failed: {e}") from e
 
     else:
         from openai import AsyncOpenAI
@@ -1912,7 +2579,11 @@ async def _stream_chat_completion_impl(
                 base += "/v1"
             kwargs["base_url"] = base
         kwargs.update(_llm_client_kwargs())
-        client = AsyncOpenAI(**kwargs)
+        client = (
+            _make_bedrock_mantle_client(config)
+            if config.provider == "bedrock_mantle"
+            else AsyncOpenAI(**kwargs)
+        )
 
         formatted_messages = [{"role": "system", "content": system_message}]
         for m in messages:
@@ -2138,8 +2809,31 @@ def _model_needs_reasoning_params(model: str) -> bool:
     lowered = (model or "").lower().split("/")[-1]
     return (
         lowered.startswith(("o1", "o3", "o4"))
-        or lowered.startswith("gpt-5")
+        or lowered.startswith(("gpt-5", "gpt-6"))
         or "reasoning" in lowered
+    )
+
+
+def _is_gpt_6_astra(model: str) -> bool:
+    return (model or "").lower().split("/")[-1].startswith("gpt-6-astra")
+
+
+def _is_gpt_5_6(model: str) -> bool:
+    model = (model or "").lower().split("/")[-1]
+    return model == "gpt-5.6" or model.startswith(
+        ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")
+    )
+
+
+def _uses_openai_responses(config: LLMConfig) -> bool:
+    """Return whether this model uses an OpenAI-compatible Responses API."""
+    if config.provider == "openai_chatgpt_plan":
+        return True
+    if config.provider == "google_vertex":
+        model_name = (config.model or "").lower().split("/")[-1]
+        return not model_name.startswith("gemini-")
+    return config.provider == "openai" and (
+        _is_gpt_6_astra(config.model) or _is_gpt_5_6(config.model)
     )
 
 
@@ -2231,7 +2925,7 @@ def _bedrock_reasoning_fields(config: LLMConfig) -> dict[str, Any]:
         return {}
     return {
         "thinking": {"type": "adaptive"},
-        "outputConfig": {"effort": config.reasoning_effort},
+        "output_config": {"effort": config.reasoning_effort},
     }
 
 
@@ -2268,6 +2962,11 @@ async def _create_chat_completion(client: Any, kwargs: dict[str, Any]) -> Any:
         ):
             retry_kwargs.pop("tool_choice", None)
             changed = True
+        if "stream_options" in retry_kwargs and (
+            "stream_options" in message or "stream options" in message
+        ):
+            retry_kwargs.pop("stream_options", None)
+            changed = True
 
         if not changed:
             raise
@@ -2286,7 +2985,11 @@ async def _anthropic(
 ) -> str:
     import anthropic as _ant
 
-    client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+    client = (
+        _make_bedrock_mantle_anthropic_client(config)
+        if config.provider == "bedrock_mantle"
+        else _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+    )
     content: list = []
     if screenshot_b64:
         content.append(
@@ -2300,7 +3003,7 @@ async def _anthropic(
             }
         )
     content.append({"type": "text", "text": prompt})
-    resp = await client.messages.create(
+    async with client.messages.stream(
         model=config.model,
         max_tokens=config.max_tokens,
         **_anthropic_reasoning_kwargs(config),
@@ -2310,31 +3013,24 @@ async def _anthropic(
             else {}
         ),
         messages=[{"role": "user", "content": content}],
-    )
+    ) as stream:
+        resp = await stream.get_final_message()
     _record_usage(
         config.model,
         getattr(resp.usage, "input_tokens", 0),
         getattr(resp.usage, "output_tokens", 0),
-        cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
-        cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0),
+        cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
+        cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0) or 0,
+        input_includes_cache=False,
     )
     return "".join(_content_part_text(block) for block in (resp.content or [])).strip()
 
 
 async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str]) -> str:
-    from google import genai
     from google.genai import types
 
-    _g_proxy = _llm_proxy_var.get()
-    _g_http_opts: dict = {}
-    if config.base_url:
-        _g_http_opts["base_url"] = config.base_url
-    _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-        verify=_g_proxy is None,
-        headers=_LLM_HEADERS,
-        **({"proxy": _g_proxy} if _g_proxy else {}),
-    )
-    client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
+    client = _make_google_client(config)
+    async_client = client.aio
     parts: list = []
     if screenshot_b64:
         parts.append(
@@ -2345,21 +3041,62 @@ async def _google(config: LLMConfig, prompt: str, screenshot_b64: Optional[str])
         )
     parts.append(prompt)
 
-    resp = await client.aio.models.generate_content(
-        model=config.model,
-        contents=parts,
-        config=types.GenerateContentConfig(
-            max_output_tokens=config.max_tokens,
-            **_google_thinking_config(types, config),
-            **(
-                {"temperature": config.temperature}
-                if config.temperature is not None
-                else {}
+    try:
+        resp = await async_client.models.generate_content(
+            model=config.model,
+            contents=parts,
+            config=types.GenerateContentConfig(
+                max_output_tokens=config.max_tokens,
+                **_google_thinking_config(types, config),
+                **(
+                    {"temperature": config.temperature}
+                    if config.temperature is not None
+                    else {}
+                ),
             ),
-        ),
-    )
+        )
+    finally:
+        await async_client.aclose()
     _record_google_usage(config.model, getattr(resp, "usage_metadata", None))
     return resp.text or ""
+
+
+def _make_google_client(config: LLMConfig):
+    """Build a Gemini Developer API or Vertex AI client for one request."""
+    from google import genai
+
+    project_id = None
+    if config.provider == "google_vertex":
+        project_id = (getattr(config, "project_id", None) or "").strip()
+        if not project_id:
+            raise ValueError("Google Cloud project id is required for Vertex AI")
+
+    _g_proxy = _llm_proxy_var.get()
+    _g_http_opts: dict = {}
+    if config.provider == "google_vertex":
+        _g_http_opts["api_version"] = "v1"
+    elif config.base_url:
+        _g_http_opts["base_url"] = config.base_url
+    _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
+        verify=httpx_verify(_llm_ca_bundle_var.get(), _g_proxy is None),
+        headers=_LLM_HEADERS,
+        **({"proxy": _g_proxy} if _g_proxy else {}),
+    )
+    if config.provider == "google_vertex":
+        return genai.Client(
+            vertexai=True,
+            project=project_id,
+            location=(getattr(config, "location", None) or "global").strip()
+            or "global",
+            http_options=_g_http_opts,
+        )
+    return genai.Client(api_key=config.api_key, http_options=_g_http_opts)
+
+
+def _google_candidate_parts(candidate: Any | None) -> list[Any]:
+    """Return response parts when a Google candidate carries content."""
+    content = getattr(candidate, "content", None)
+    return list(getattr(content, "parts", None) or [])
 
 
 async def _github_copilot(
@@ -2390,6 +3127,43 @@ async def _factory_droid(
         _droid_usage_callback(),
         _llm_proxy_var.get(),
     )
+
+
+async def _claude_cli(
+    config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
+) -> str:
+    from aespa.services import claude_cli_provider
+
+    return await claude_cli_provider.plain_completion(
+        config,
+        prompt,
+        screenshot_b64,
+        _claude_cli_usage_callback(),
+        _llm_proxy_var.get(),
+    )
+
+
+def _claude_cli_usage_callback() -> Any:
+    usage_context = _capture_usage_context()
+
+    def record(
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> None:
+        _record_usage(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            usage_context=usage_context,
+            provider="claude_cli",
+        )
+
+    return record
 
 
 async def _google_antigravity(
@@ -2517,6 +3291,10 @@ def _codex_usage_callback() -> Any:
         cache_write_tokens: int = 0,
         **details: Any,
     ) -> None:
+        program = details.pop("daybreak_program", None)
+        if program:
+            _record_daybreak_program(model, program, usage_context)
+            return
         _record_usage(
             model,
             input_tokens,
@@ -2546,7 +3324,11 @@ async def _openai_compat(
             base += "/v1"
         kwargs["base_url"] = base
     kwargs.update(_llm_client_kwargs())
-    client = AsyncOpenAI(**kwargs)
+    client = (
+        _make_bedrock_mantle_client(config)
+        if config.provider == "bedrock_mantle"
+        else AsyncOpenAI(**kwargs)
+    )
 
     if screenshot_b64:
         msg_content: object = [
@@ -2582,9 +3364,39 @@ async def _openai_compat(
     return _extract_first_choice_text(resp)
 
 
-# ── Bedrock Mantle (OpenAI Responses API) ─────────────────────────────────────
-# Mantle's frontier OpenAI models (gpt-5.x) are served only via the Responses
-# API (/v1/responses), not Chat Completions, so all Mantle traffic uses Responses.
+# ── Bedrock Mantle (model-specific inference APIs) ───────────────────────────
+
+
+def _bedrock_mantle_model_api(model: str) -> str:
+    """Select the Mantle API supported by a model family.
+
+    Mantle's model catalog lists available IDs, but an available model does not
+    necessarily support every Mantle inference API. Claude uses Anthropic
+    Messages, OpenAI models use Responses, and the other text families exposed
+    by Mantle use Chat Completions.
+    """
+    family = (model or "").split(".", 1)[0].lower()
+    if family == "anthropic":
+        return "messages"
+    if family == "openai":
+        return "responses"
+    if family in {
+        "deepseek",
+        "google",
+        "minimax",
+        "mistral",
+        "moonshotai",
+        "nvidia",
+        "qwen",
+        "writer",
+        "xai",
+        "zai",
+    }:
+        return "chat_completions"
+    raise ValueError(
+        f"No Bedrock Mantle inference API is known for model '{model}'. "
+        "Check the model's endpoint-specific API support before using it."
+    )
 
 
 def _ant_tools_to_responses(tools: list[dict]) -> list[dict]:
@@ -2598,6 +3410,87 @@ def _ant_tools_to_responses(tools: list[dict]) -> list[dict]:
         }
         for t in tools
     ]
+
+
+_RESPONSES_OUTPUT_ITEM_BLOCK = "responses_output_item"
+
+
+def _responses_output_item_dict(item: Any) -> dict[str, Any] | None:
+    """Serialize one Responses output item for exact replay on the next turn."""
+    if isinstance(item, dict):
+        return copy.deepcopy(item)
+    model_dump = getattr(item, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="json", exclude_none=True)
+        except TypeError:
+            try:
+                dumped = model_dump(exclude_none=True)
+            except Exception:
+                dumped = None
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            return dumped
+    to_dict = getattr(item, "to_dict", None)
+    if callable(to_dict):
+        try:
+            dumped = to_dict()
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            return dumped
+    values = getattr(item, "__dict__", None)
+    if isinstance(values, dict):
+        return {
+            key: copy.deepcopy(value)
+            for key, value in values.items()
+            if not str(key).startswith("_")
+        }
+    return None
+
+
+def _responses_replay_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep only fields Vertex accepts when response output becomes input."""
+
+    def without_none(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: without_none(child)
+                for key, child in value.items()
+                if child is not None
+            }
+        if isinstance(value, list):
+            return [without_none(child) for child in value if child is not None]
+        return copy.deepcopy(value)
+
+    cleaned = without_none(item)
+    item_type = cleaned.get("type")
+    allowed_fields = {
+        # xAI requires encrypted reasoning for cache-stable stateless turns.
+        # Its id and status are part of the documented replay shape.
+        "reasoning": {"type", "id", "summary", "encrypted_content", "status"},
+        # Vertex returns read-only ids, status, phase and log-probability data on
+        # these items. Replaying those fields produces INVALID_ARGUMENT,
+        # especially when parallel function calls share one response id.
+        "message": {"type", "role", "content"},
+        "function_call": {"type", "call_id", "name", "arguments"},
+    }.get(item_type)
+    if allowed_fields is None:
+        return cleaned
+    replay = {key: value for key, value in cleaned.items() if key in allowed_fields}
+    if item_type == "message" and isinstance(replay.get("content"), list):
+        replay["content"] = [
+            {
+                key: value
+                for key, value in part.items()
+                if key in {"type", "text", "annotations"}
+            }
+            if isinstance(part, dict)
+            else part
+            for part in replay["content"]
+        ]
+    return replay
 
 
 def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
@@ -2633,6 +3526,19 @@ def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
             if joined:
                 items.append({"type": "message", "role": "user", "content": joined})
         elif role == "assistant":
+            native_items = [
+                block.get("item")
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type") == _RESPONSES_OUTPUT_ITEM_BLOCK
+                and isinstance(block.get("item"), dict)
+            ]
+            if native_items:
+                # Grok reasoning models require the previous output, including
+                # encrypted reasoning, to remain in the next request. Strip
+                # response-only metadata that Vertex rejects as input.
+                items.extend(_responses_replay_item(item) for item in native_items)
+                continue
             text_parts = [b.get("text", "") for b in content if b.get("type") == "text"]
             joined = " ".join(p for p in text_parts if p)
             if joined:
@@ -2652,16 +3558,214 @@ def _ant_messages_to_responses(messages: list[dict]) -> list[dict]:
     return items
 
 
-def _is_mantle_reasoning_model(model: str) -> bool:
-    """True for Mantle reasoning models (gpt-5.x, o-series) that reject temperature.
+def _is_reasoning_model_without_sampling(model: str) -> bool:
+    """True for reasoning models that reject temperature.
 
     Mantle ids carry a vendor prefix (e.g. ``openai.gpt-5.5``), which the slash-based
     ``_model_needs_reasoning_params`` split doesn't catch — so match the substring too.
     """
-    return "gpt-5" in (model or "").lower() or _model_needs_reasoning_params(model)
+    return any(
+        marker in (model or "").lower() for marker in ("gpt-5", "gpt-6")
+    ) or _model_needs_reasoning_params(model)
 
 
-def _mantle_response_kwargs(
+def _make_responses_client(config: LLMConfig) -> Any:
+    if config.provider == "bedrock_mantle":
+        return _make_bedrock_mantle_client(config)
+    if config.provider == "google_vertex":
+        return _make_google_vertex_responses_client(config)
+
+    from openai import AsyncOpenAI
+
+    kwargs: dict[str, Any] = {"api_key": config.api_key or "not-needed"}
+    if config.base_url:
+        base = config.base_url.rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
+        kwargs["base_url"] = base
+    kwargs.update(_llm_client_kwargs())
+    return AsyncOpenAI(**kwargs)
+
+
+async def _make_chatgpt_plan_client(config: LLMConfig) -> Any:
+    from openai import AsyncOpenAI
+
+    from aespa.services import chatgpt_plan, llm_sign_in_stop
+
+    try:
+        api_key = await chatgpt_plan.access_token(getattr(config, "username", None))
+    except chatgpt_plan.ChatGPTSignInRequired as exc:
+        llm_sign_in_stop.schedule_stop(_run_kind_var.get(), _run_id_var.get(), str(exc))
+        raise
+    return AsyncOpenAI(
+        api_key=api_key,
+        base_url="https://api.openai.com/v1",
+        max_retries=0,
+        **_llm_client_kwargs(),
+    )
+
+
+async def _add_daybreak_access(config: LLMConfig, kwargs: dict[str, Any]) -> None:
+    if config.model == "gpt-6-sol":
+        return
+
+    from aespa.services import chatgpt_plan
+
+    program = await chatgpt_plan.daybreak_program(
+        getattr(config, "username", None), config.model
+    )
+    if program:
+        kwargs["extra_body"] = {"access_programs": {"cyber": program}}
+
+
+async def _create_chatgpt_plan_stream(client: Any, kwargs: dict[str, Any]) -> Any:
+    """Retry connection timeouts before the provider receives a request."""
+    from openai import APITimeoutError
+
+    for attempt in range(3):
+        try:
+            return await client.responses.create(**kwargs)
+        except (APITimeoutError, httpx.ConnectTimeout, httpx2.ConnectTimeout) as exc:
+            connect_timeout = isinstance(
+                exc, (httpx.ConnectTimeout, httpx2.ConnectTimeout)
+            )
+            if isinstance(exc, APITimeoutError):
+                connect_timeout = isinstance(
+                    exc.__cause__, (httpx.ConnectTimeout, httpx2.ConnectTimeout)
+                )
+            if not connect_timeout or attempt == 2:
+                raise
+            delay = 2**attempt
+            log.warning(
+                "ChatGPT connection timed out; retrying request %s/3 in %ss",
+                attempt + 2,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
+async def _chatgpt_plan_response(
+    client: Any,
+    kwargs: dict[str, Any],
+    on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+) -> Any:
+    """Complete the required HTTP stream and reject failed or incomplete turns."""
+    # A stream can close without the terminal event even though the request did
+    # not raise. No tool calls are executed until this function returns, so a
+    # scanner turn can safely repeat the request. Do not repeat streamed text:
+    # callers with a delta callback may already have shown it to the user.
+    max_attempts = 3 if on_text_delta is None else 1
+    for attempt in range(1, max_attempts + 1):
+        completed = None
+        output_items: list[Any] = []
+        try:
+            stream = await _create_chatgpt_plan_stream(client, kwargs)
+            async for event in stream:
+                event_type = getattr(event, "type", None)
+                if event_type == "response.output_text.delta" and on_text_delta:
+                    delta = getattr(event, "delta", None)
+                    if delta:
+                        await on_text_delta(delta)
+                elif event_type == "response.output_item.done":
+                    item = getattr(event, "item", None)
+                    if item is not None:
+                        output_items.append(item)
+                elif event_type == "response.completed":
+                    completed = getattr(event, "response", None)
+                elif event_type == "response.failed":
+                    response = getattr(event, "response", None)
+                    error = getattr(response, "error", None)
+                    code = str(getattr(error, "code", None) or "unknown_error")
+                    if code in {
+                        "subscription_sharing_usage_limit_exceeded",
+                        "subscription_sharing_usage_unavailable",
+                    }:
+                        raise LLMQuotaPauseError(
+                            "ChatGPT plan usage is unavailable or exhausted"
+                        )
+                    raise RuntimeError(f"ChatGPT plan request failed: {code}")
+                elif event_type == "response.incomplete":
+                    raise RuntimeError("ChatGPT plan response was incomplete")
+        except Exception as exc:
+            if isinstance(exc, LLMQuotaPauseError):
+                raise
+            body = getattr(exc, "body", None)
+            error = body.get("error", body) if isinstance(body, dict) else {}
+            code = error.get("code") if isinstance(error, dict) else None
+            if code in {
+                "subscription_sharing_usage_limit_exceeded",
+                "subscription_sharing_usage_unavailable",
+            }:
+                raise LLMQuotaPauseError(
+                    "ChatGPT plan usage is unavailable or exhausted"
+                ) from exc
+            raise
+        if completed is not None:
+            break
+        if attempt == max_attempts:
+            raise RuntimeError(
+                "ChatGPT plan stream ended without a completed response "
+                f"after {max_attempts} attempt(s)"
+            )
+        delay = 2 ** (attempt - 1)
+        log.warning(
+            "ChatGPT plan stream ended without a completed response; "
+            "retrying request %s/%s in %ss",
+            attempt + 1,
+            max_attempts,
+            delay,
+        )
+        await asyncio.sleep(delay)
+    # Subscription streams can leave the final response.output empty even
+    # though completed message and function-call items arrived earlier.
+    if not getattr(completed, "output", None) and output_items:
+        if hasattr(completed, "model_copy"):
+            completed = completed.model_copy(update={"output": output_items})
+        else:
+            completed.output = output_items
+    if not getattr(completed, "output", None):
+        raise RuntimeError("ChatGPT plan completed without any output items")
+    return completed
+
+
+def _make_google_vertex_responses_client(config: LLMConfig) -> Any:
+    """Build an ADC-authenticated client for Vertex's Responses endpoint."""
+    from google import auth as google_auth
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from openai import AsyncOpenAI
+
+    project_id = (getattr(config, "project_id", None) or "").strip()
+    if not project_id:
+        raise ValueError("Google Cloud project id is required for Vertex AI")
+
+    credentials, _ = google_auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    credentials.refresh(GoogleAuthRequest())
+    access_token = str(getattr(credentials, "token", None) or "").strip()
+    if not access_token:
+        raise RuntimeError(
+            "Google Application Default Credentials returned no access token"
+        )
+
+    location = (getattr(config, "location", None) or "global").strip() or "global"
+    host = (
+        "aiplatform.googleapis.com"
+        if location == "global"
+        else f"{location}-aiplatform.googleapis.com"
+    )
+    base_url = (
+        f"https://{host}/v1/projects/{quote(project_id, safe='')}"
+        f"/locations/{quote(location, safe='')}/endpoints/openapi"
+    )
+    return AsyncOpenAI(
+        api_key=access_token,
+        base_url=base_url,
+        **_llm_client_kwargs(),
+    )
+
+
+def _responses_request_kwargs(
     config: LLMConfig,
     *,
     input: Any,
@@ -2674,19 +3778,91 @@ def _mantle_response_kwargs(
         "input": input,
         "max_output_tokens": config.max_tokens,
     }
+    if config.provider == "openai_chatgpt_plan":
+        kwargs.pop("max_output_tokens")
+        kwargs["store"] = False
+        kwargs["stream"] = True
+        kwargs["include"] = ["reasoning.encrypted_content"]
+        if instructions is not None:
+            kwargs["instructions"] = instructions
+        if tools is not None:
+            kwargs["tools"] = [
+                {
+                    "type": "namespace",
+                    "name": "aespa",
+                    "description": "Tools provided by AESPA for this scan.",
+                    "tools": tools,
+                }
+            ]
+        if config.reasoning_effort:
+            kwargs["reasoning"] = {"effort": config.reasoning_effort}
+        if getattr(config, "service_tier", None):
+            kwargs["service_tier"] = config.service_tier
+        return kwargs
+    prompt_cache_key = _grok_prompt_cache_key(
+        config,
+        input=input,
+        instructions=instructions,
+        tools=tools,
+    )
+    if prompt_cache_key is not None:
+        kwargs["prompt_cache_key"] = prompt_cache_key
+        # Vertex-hosted Grok does not currently support previous_response_id.
+        # Return encrypted reasoning so stateless calls can replay the exact
+        # prior output and retain the prompt-cache prefix.
+        kwargs["include"] = ["reasoning.encrypted_content"]
+        kwargs["store"] = False
     if instructions is not None:
         kwargs["instructions"] = instructions
-    if config.reasoning_effort:
-        kwargs["reasoning"] = {"effort": config.reasoning_effort}
+    reasoning_effort = config.reasoning_effort
+    if _is_gpt_6_astra(config.model) and reasoning_effort in {"none", "minimal"}:
+        reasoning_effort = "low"
+    if reasoning_effort:
+        kwargs["reasoning"] = {"effort": reasoning_effort}
     # Reasoning models (gpt-5.x / o-series) reject a custom temperature; skip it
     # for them rather than pay a failed round-trip (the retry below is a backstop).
-    if config.temperature is not None and not _is_mantle_reasoning_model(config.model):
+    if config.temperature is not None and not _is_reasoning_model_without_sampling(
+        config.model
+    ):
         kwargs["temperature"] = config.temperature
     if tools is not None:
         kwargs["tools"] = tools
     if stream:
         kwargs["stream"] = True
     return kwargs
+
+
+def _grok_prompt_cache_key(
+    config: LLMConfig,
+    *,
+    input: Any,
+    instructions: str | None,
+    tools: list[dict] | None,
+) -> str | None:
+    """Return a stable routing key for one Vertex-hosted Grok conversation."""
+    model = (config.model or "").lower()
+    if config.provider != "google_vertex" or not model.startswith("xai/grok-"):
+        return None
+
+    # Grok uses this key to route related requests to the server holding their
+    # prompt cache. Hash only the stable opening prefix so appending later turns
+    # does not change the key. Instructions and tools separate agent roles that
+    # happen to start with the same user message.
+    opening_input = input[0] if isinstance(input, list) and input else input
+    seed = json.dumps(
+        {
+            "model": config.model,
+            "instructions": instructions or "",
+            "opening_input": opening_input,
+            "tools": tools or [],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return f"aespa-{digest[:58]}"
 
 
 async def _create_response(client: Any, kwargs: dict[str, Any]) -> Any:
@@ -2710,8 +3886,82 @@ async def _create_response(client: Any, kwargs: dict[str, Any]) -> Any:
         return await client.responses.create(**retry)
 
 
-def _record_responses_usage(config: LLMConfig, resp: Any) -> None:
+def _cache_key_fingerprint(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _response_metadata_value(resp: Any, name: str) -> Any:
+    metadata = getattr(resp, "metadata", None)
+    if isinstance(metadata, dict):
+        return metadata.get(name)
+    return getattr(metadata, name, None) if metadata is not None else None
+
+
+def _responses_cache_telemetry(
+    config: LLMConfig,
+    resp: Any,
+    *,
+    requested_prompt_cache_key: str | None = None,
+) -> dict[str, Any]:
     usage = getattr(resp, "usage", None)
+    input_tokens = max(0, int(getattr(usage, "input_tokens", 0) or 0))
+    output_tokens = max(0, int(getattr(usage, "output_tokens", 0) or 0))
+    cached_tokens = max(
+        0,
+        int(
+            getattr(
+                getattr(usage, "input_tokens_details", None),
+                "cached_tokens",
+                0,
+            )
+            or 0
+        ),
+    )
+    echoed_key = getattr(resp, "prompt_cache_key", None)
+    requested_fingerprint = _cache_key_fingerprint(requested_prompt_cache_key)
+    echoed_fingerprint = _cache_key_fingerprint(echoed_key)
+    cache_key_match = None
+    if requested_prompt_cache_key and echoed_key:
+        cache_key_match = str(requested_prompt_cache_key) == str(echoed_key)
+    return {
+        "provider": str(getattr(config.provider, "value", config.provider)),
+        "model": config.model,
+        "call_id": _traffic_call_id_var.get(),
+        "operation": _traffic_operation_var.get()
+        or _operation_var.get()
+        or _infer_llm_operation(),
+        "requested_cache_key_fingerprint": requested_fingerprint,
+        "echoed_cache_key_fingerprint": echoed_fingerprint,
+        "cache_key_echoed": echoed_fingerprint is not None,
+        "cache_key_match": cache_key_match,
+        "system_fingerprint": _response_metadata_value(resp, "system_fingerprint"),
+        "input_tokens": input_tokens,
+        "uncached_input_tokens": max(0, input_tokens - cached_tokens),
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cached_tokens,
+        "cache_hit_percent": round(100 * cached_tokens / input_tokens, 2)
+        if input_tokens
+        else 0.0,
+    }
+
+
+def _record_responses_usage(
+    config: LLMConfig,
+    resp: Any,
+    *,
+    requested_prompt_cache_key: str | None = None,
+    daybreak_program: str | None = None,
+) -> dict[str, Any]:
+    usage = getattr(resp, "usage", None)
+    telemetry = _responses_cache_telemetry(
+        config,
+        resp,
+        requested_prompt_cache_key=requested_prompt_cache_key,
+    )
+    _last_response_cache_telemetry_var.set(telemetry)
     _record_usage(
         config.model,
         getattr(usage, "input_tokens", 0) if usage else 0,
@@ -2721,6 +3971,45 @@ def _record_responses_usage(config: LLMConfig, resp: Any) -> None:
             if usage
             else 0
         ),
+        requests=1,
+        daybreak_program=daybreak_program,
+    )
+    emit_fn = _emit_fn_var.get()
+    if emit_fn is not None and (
+        requested_prompt_cache_key is not None or telemetry["cache_read_tokens"] > 0
+    ):
+        try:
+            cached = telemetry["cache_read_tokens"]
+            total = telemetry["input_tokens"]
+            emit_fn(
+                {
+                    "type": "scanner_phase",
+                    "phase": "llm_cache",
+                    "status": "hit" if cached else "miss",
+                    "message": (
+                        f"LLM prompt cache {'hit' if cached else 'miss'}: "
+                        f"{cached:,} of {total:,} input tokens reused "
+                        f"({telemetry['cache_hit_percent']:.2f}%)."
+                    ),
+                    "data": telemetry,
+                    "_persist_only": True,
+                }
+            )
+        except Exception:
+            pass
+    return telemetry
+
+
+def _response_daybreak_program(resp: Any, request_kwargs: dict[str, Any]) -> str | None:
+    programs = getattr(resp, "access_programs", None)
+    if isinstance(programs, dict):
+        actual = programs.get("cyber")
+    else:
+        actual = getattr(programs, "cyber", None)
+    if actual is not None:
+        return actual if actual in {"daybreak_blue", "daybreak_red"} else None
+    return (
+        (request_kwargs.get("extra_body") or {}).get("access_programs", {}).get("cyber")
     )
 
 
@@ -2742,7 +4031,11 @@ def _extract_responses_text(resp: Any) -> str:
 async def _openai_responses(
     config: LLMConfig, prompt: str, screenshot_b64: Optional[str]
 ) -> str:
-    client = _make_bedrock_mantle_client(config)
+    client = (
+        await _make_chatgpt_plan_client(config)
+        if config.provider == "openai_chatgpt_plan"
+        else _make_responses_client(config)
+    )
     if screenshot_b64:
         r_input: Any = [
             {
@@ -2758,11 +4051,25 @@ async def _openai_responses(
             }
         ]
     else:
-        r_input = prompt
-    resp = await _create_response(
-        client, _mantle_response_kwargs(config, input=r_input)
+        r_input = (
+            [{"type": "message", "role": "user", "content": prompt}]
+            if config.provider == "openai_chatgpt_plan"
+            else prompt
+        )
+    request_kwargs = _responses_request_kwargs(config, input=r_input)
+    if config.provider == "openai_chatgpt_plan":
+        await _add_daybreak_access(config, request_kwargs)
+    resp = (
+        await _chatgpt_plan_response(client, request_kwargs)
+        if config.provider == "openai_chatgpt_plan"
+        else await _create_response(client, request_kwargs)
     )
-    _record_responses_usage(config, resp)
+    _record_responses_usage(
+        config,
+        resp,
+        requested_prompt_cache_key=request_kwargs.get("prompt_cache_key"),
+        daybreak_program=_response_daybreak_program(resp, request_kwargs),
+    )
     return _extract_responses_text(resp)
 
 
@@ -3008,11 +4315,176 @@ def _bedrock_region(config: LLMConfig) -> str:
     )
 
 
+def _bedrock_reasoning_content(
+    content: dict[str, Any], *, for_sdk: bool = False
+) -> dict[str, Any]:
+    """Keep encrypted reasoning JSON-safe in history and binary for the SDK."""
+    if "redactedContent" not in content:
+        return copy.deepcopy(content)
+    redacted = content["redactedContent"]
+    if for_sdk and isinstance(redacted, str):
+        redacted = base64.b64decode(redacted, validate=True)
+    elif not for_sdk and isinstance(redacted, (bytes, bytearray)):
+        redacted = base64.b64encode(redacted).decode("ascii")
+    # Older histories can also contain an empty reasoningText object here.
+    # Bedrock accepts only one member of this union.
+    return {"redactedContent": redacted}
+
+
+def _consume_bedrock_converse_stream(
+    response: dict[str, Any], on_text_delta: Callable[[str], None] | None = None
+) -> dict[str, Any]:
+    """Collect ConverseStream events into the shape returned by Converse."""
+    content: dict[int, dict[str, Any]] = {}
+    tool_inputs: dict[int, str] = {}
+    stop_reason = "end_turn"
+    usage: dict[str, Any] = {}
+    metrics: dict[str, Any] = {}
+    trace: dict[str, Any] | None = None
+    stream = response.get("stream")
+
+    try:
+        for event in stream or ():
+            started = event.get("contentBlockStart")
+            if isinstance(started, dict):
+                index = int(started.get("contentBlockIndex", len(content)))
+                start = started.get("start") or {}
+                if isinstance(start.get("toolUse"), dict):
+                    tool = start["toolUse"]
+                    content[index] = {
+                        "toolUse": {
+                            "toolUseId": tool.get("toolUseId"),
+                            "name": tool.get("name"),
+                            "input": {},
+                        }
+                    }
+                    tool_inputs[index] = ""
+
+            changed = event.get("contentBlockDelta")
+            if isinstance(changed, dict):
+                index = int(changed.get("contentBlockIndex", len(content)))
+                delta = changed.get("delta") or {}
+                if "text" in delta:
+                    text_delta = str(delta.get("text") or "")
+                    block = content.setdefault(index, {"text": ""})
+                    block["text"] = str(block.get("text") or "") + str(text_delta)
+                    if text_delta and on_text_delta is not None:
+                        on_text_delta(text_delta)
+                tool_delta = delta.get("toolUse")
+                if isinstance(tool_delta, dict):
+                    tool_inputs[index] = tool_inputs.get(index, "") + str(
+                        tool_delta.get("input") or ""
+                    )
+                reasoning_delta = delta.get("reasoningContent")
+                if isinstance(reasoning_delta, dict):
+                    block = content.setdefault(index, {"reasoningContent": {}})
+                    native = block.setdefault("reasoningContent", {})
+                    if "text" in reasoning_delta or "signature" in reasoning_delta:
+                        reasoning_text = native.setdefault("reasoningText", {})
+                    if "text" in reasoning_delta:
+                        reasoning_text["text"] = str(
+                            reasoning_text.get("text") or ""
+                        ) + str(reasoning_delta.get("text") or "")
+                    if "signature" in reasoning_delta:
+                        reasoning_text["signature"] = reasoning_delta["signature"]
+                    if "redactedContent" in reasoning_delta:
+                        native["redactedContent"] = (
+                            native.get("redactedContent", b"")
+                            + reasoning_delta["redactedContent"]
+                        )
+
+            stopped = event.get("messageStop")
+            if isinstance(stopped, dict):
+                stop_reason = str(stopped.get("stopReason") or stop_reason)
+
+            metadata = event.get("metadata")
+            if isinstance(metadata, dict):
+                usage = metadata.get("usage") or usage
+                metrics = metadata.get("metrics") or metrics
+                trace = metadata.get("trace") or trace
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+
+    for index, raw_input in tool_inputs.items():
+        tool = content[index]["toolUse"]
+        if raw_input:
+            try:
+                tool["input"] = json.loads(raw_input)
+            except json.JSONDecodeError:
+                tool["input"] = raw_input
+
+    result = {
+        "stopReason": stop_reason,
+        "output": {
+            "message": {
+                "content": [content[index] for index in sorted(content)],
+            }
+        },
+        "usage": usage,
+        "metrics": metrics,
+        "ResponseMetadata": response.get("ResponseMetadata") or {},
+    }
+    if trace is not None:
+        result["trace"] = trace
+    return result
+
+
 # SigV4 signing name for the bedrock-mantle endpoint.  AWS signs Mantle requests
 # (like the bedrock-runtime OpenAI-compatible endpoint) under the "bedrock"
 # service name — NOT "bedrock-mantle".  Confirmed by the AWS SigV4 curl example
 # (`--aws-sigv4 "aws:amz:<region>:bedrock"`) and litellm's Bedrock signer.
 _BEDROCK_MANTLE_SIGV4_SERVICE = "bedrock"
+
+
+# Converse cachePoint support, not caching through other Bedrock APIs.
+# Unknown models default to no markers. Keep this list in sync with:
+# https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+_BEDROCK_CONVERSE_CACHE_MODELS = {
+    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "anthropic.claude-3-7-sonnet",
+    "anthropic.claude-haiku-4-5",
+    "anthropic.claude-sonnet-4",
+    "anthropic.claude-sonnet-4-5",
+    "anthropic.claude-sonnet-4-6",
+    "anthropic.claude-sonnet-5",
+    "anthropic.claude-sonnet-5-5",
+    "anthropic.claude-opus-4",
+    "anthropic.claude-opus-4-1",
+    "anthropic.claude-opus-4-5",
+    "anthropic.claude-opus-4-6",
+    "anthropic.claude-opus-4-7",
+    "anthropic.claude-opus-4-8",
+    "anthropic.claude-opus-5",
+    "anthropic.claude-opus-5-5",
+    "anthropic.claude-fable-5",
+    "anthropic.claude-fable-5-1",
+    "anthropic.claude-mythos-5",
+    "anthropic.claude-mythos-5-1",
+    "amazon.nova-micro-v1:0",
+    "amazon.nova-lite-v1:0",
+    "amazon.nova-pro-v1:0",
+    "amazon.nova-premier-v1:0",
+    "amazon.nova-2-lite-v1:0",
+}
+
+
+def _bedrock_supports_cache_points(model: str) -> bool:
+    """Whether the model supports explicit cache markers in Converse requests."""
+    name = (model or "").lower()
+    # Foundation-model and geographic inference-profile ARNs include the ID.
+    if name.startswith("arn:"):
+        name = name.rsplit("/", 1)[-1]
+    for prefix in ("global.", "us.", "eu.", "apac.", "jp.", "au."):
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    if name in _BEDROCK_CONVERSE_CACHE_MODELS:
+        return True
+    # Claude IDs may include a release date and Bedrock revision.
+    name = re.sub(r"(?:-\d{8})?(?:-v\d+(?::\d+)?)?$", "", name)
+    return name in _BEDROCK_CONVERSE_CACHE_MODELS
 
 
 def _bedrock_mantle_region() -> str:
@@ -3025,36 +4497,39 @@ def _bedrock_mantle_region() -> str:
     )
 
 
-def _bedrock_mantle_is_frontier_model(model: str) -> bool:
-    """Frontier OpenAI models (gpt-5.x) are served on Mantle's ``/openai/v1`` path.
+def _bedrock_mantle_uses_openai_path(model: str) -> bool:
+    """Models served on Mantle's ``/openai/v1`` path.
 
-    The gpt-oss and other models use the plain ``/v1`` path instead — confirmed by
-    the AWS launch blog and the OpenAI Bedrock cookbook.
+    Frontier GPT models and Gemma 4 use this path; GPT OSS and older
+    third-party text models use plain ``/v1``.
     """
-    return "gpt-5" in (model or "").lower()
+    name = (model or "").lower()
+    return name.startswith(
+        ("openai.gpt-5", "openai.gpt-6", "google.gemma-4", "xai.grok-4")
+    )
+
+
+def _bedrock_mantle_root(config: LLMConfig) -> str:
+    base = (config.base_url or "").rstrip("/")
+    if not base:
+        base = f"https://bedrock-mantle.{_bedrock_mantle_region()}.api.aws"
+    for suffix in ("/anthropic/v1/messages", "/anthropic", "/openai/v1", "/v1"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return base
 
 
 def _bedrock_mantle_base_url(config: LLMConfig) -> str:
-    """Resolve the OpenAI Responses base URL for a Bedrock Mantle config.
+    """Resolve the OpenAI-compatible base URL for a Bedrock Mantle model.
 
-    The path is model-dependent: frontier ``openai.gpt-5.x`` models use
-    ``/openai/v1`` while gpt-oss and others use ``/v1`` — so a single provider can
-    serve both. An explicit ``base_url`` keeps its host (and region) but the path
-    suffix is normalised to match the selected model. When blank, the region comes
+    The path is model-dependent. An explicit ``base_url`` keeps its host (and
+    region) but the path suffix is normalised to match the selected model.
+    When blank, the region comes
     from ``BEDROCK_MANTLE_REGION``/``AWS_REGION``/``AWS_DEFAULT_REGION`` (default
     ``us-east-2``).
     """
-    suffix = "/openai/v1" if _bedrock_mantle_is_frontier_model(config.model) else "/v1"
-    if config.base_url:
-        base = config.base_url.rstrip("/")
-        # Drop any path suffix the user supplied, then re-apply the one this model
-        # needs, so switching models on the same provider routes correctly.
-        for known in ("/openai/v1", "/v1"):
-            if base.endswith(known):
-                base = base[: -len(known)]
-                break
-        return f"{base}{suffix}"
-    return f"https://bedrock-mantle.{_bedrock_mantle_region()}.api.aws{suffix}"
+    suffix = "/openai/v1" if _bedrock_mantle_uses_openai_path(config.model) else "/v1"
+    return f"{_bedrock_mantle_root(config)}{suffix}"
 
 
 def _bedrock_mantle_region_from_url(base_url: str) -> str:
@@ -3063,7 +4538,7 @@ def _bedrock_mantle_region_from_url(base_url: str) -> str:
     return match.group(1) if match else _bedrock_mantle_region()
 
 
-class _BedrockMantleSigV4Auth(httpx.Auth):
+class _BedrockMantleSigV4Auth(httpx2.Auth):
     """httpx auth flow that SigV4-signs Bedrock Mantle requests with AWS creds.
 
     Lets the OpenAI SDK reach the OpenAI-compatible Mantle endpoint using the
@@ -3083,12 +4558,13 @@ class _BedrockMantleSigV4Auth(httpx.Auth):
 
     def _resolve_credentials(self):
         if self._credentials is None:
-            import boto3
+            from aespa.services.llm_network import configured_llm_network
 
-            session = (
-                boto3.Session(profile_name=self._profile)
-                if self._profile
-                else boto3.Session()
+            saved_proxy, saved_ca = configured_llm_network()
+            session = _bedrock_session(
+                self._profile,
+                _llm_proxy_var.get() or saved_proxy,
+                _llm_ca_bundle_var.get() or saved_ca,
             )
             creds = session.get_credentials()
             if creds is None:
@@ -3100,11 +4576,14 @@ class _BedrockMantleSigV4Auth(httpx.Auth):
             self._credentials = creds
         return self._credentials
 
-    def _sign(self, request: httpx.Request) -> None:
+    def _sign(self, request: httpx2.Request) -> None:
         from botocore.auth import SigV4Auth
         from botocore.awsrequest import AWSRequest
 
         frozen = self._resolve_credentials().get_frozen_credentials()
+        # Anthropic's SDK requires an API key before its httpx auth hook runs.
+        # Remove that placeholder so AWS sees only the SigV4 credential.
+        request.headers.pop("x-api-key", None)
         aws_request = AWSRequest(
             method=request.method,
             url=str(request.url),
@@ -3121,11 +4600,11 @@ class _BedrockMantleSigV4Auth(httpx.Auth):
         for key, value in aws_request.headers.items():
             request.headers[key] = value
 
-    def sync_auth_flow(self, request: httpx.Request):
+    def sync_auth_flow(self, request: httpx2.Request):
         self._sign(request)
         yield request
 
-    async def async_auth_flow(self, request: httpx.Request):
+    async def async_auth_flow(self, request: httpx2.Request):
         # botocore credential resolution / signing is synchronous and may touch
         # the filesystem or IMDS on first use; keep it off the event loop.
         await asyncio.get_running_loop().run_in_executor(None, self._sign, request)
@@ -3157,10 +4636,10 @@ def _make_bedrock_mantle_client(config: LLMConfig):
     proxy = _llm_proxy_var.get()
     signer = _BedrockMantleSigV4Auth(
         region=_bedrock_mantle_region_from_url(base_url),
-        profile=os.getenv("AWS_PROFILE"),
+        profile=config.aws_profile or os.getenv("AWS_PROFILE"),
     )
-    http_client = httpx.AsyncClient(
-        verify=proxy is None,
+    http_client = httpx2.AsyncClient(
+        verify=httpx_verify(_llm_ca_bundle_var.get(), proxy is None),
         headers=_LLM_HEADERS,
         auth=signer,
         **({"proxy": proxy} if proxy else {}),
@@ -3170,6 +4649,40 @@ def _make_bedrock_mantle_client(config: LLMConfig):
         base_url=base_url,
         http_client=http_client,
         **project_kwargs,
+    )
+
+
+def _make_bedrock_mantle_anthropic_client(config: LLMConfig):
+    """Build an Anthropic Messages client for Claude on Bedrock Mantle."""
+    import anthropic
+
+    base_url = f"{_bedrock_mantle_root(config)}/anthropic"
+    project_id = getattr(config, "project_id", None) or None
+    headers = {"anthropic-workspace-id": project_id} if project_id else None
+    if config.api_key:
+        return anthropic.AsyncAnthropic(
+            api_key=config.api_key,
+            base_url=base_url,
+            default_headers=headers,
+            **_llm_client_kwargs(),
+        )
+
+    proxy = _llm_proxy_var.get()
+    signer = _BedrockMantleSigV4Auth(
+        region=_bedrock_mantle_region_from_url(base_url),
+        profile=config.aws_profile or os.getenv("AWS_PROFILE"),
+    )
+    http_client = httpx2.AsyncClient(
+        verify=httpx_verify(_llm_ca_bundle_var.get(), proxy is None),
+        headers=_LLM_HEADERS,
+        auth=signer,
+        **({"proxy": proxy} if proxy else {}),
+    )
+    return anthropic.AsyncAnthropic(
+        api_key="not-needed",
+        base_url=base_url,
+        default_headers=headers,
+        http_client=http_client,
     )
 
 
@@ -3204,31 +4717,24 @@ async def _bedrock(
     if not config.api_key:
         import asyncio as _aio
 
-        import boto3
-        from botocore.config import Config as _BotocoreConfig
-
         region = _bedrock_region(config)
-        profile = os.getenv("AWS_PROFILE")
+        profile = config.aws_profile or os.getenv("AWS_PROFILE")
         _proxy_url = _llm_proxy_var.get()
+        _ca_bundle = _llm_ca_bundle_var.get()
         _model = config.model
         _messages = payload["messages"]
         _infer = payload["inferenceConfig"]
         _endpoint = config.base_url or None
 
         def _run_sync() -> dict:
-            _session_kwargs = {"profile_name": profile} if profile else {}
-            _session = boto3.Session(**_session_kwargs)
-            _boto_cfg = (
-                _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
-                if _proxy_url
-                else None
-            )
+            _session = _bedrock_session(profile, _proxy_url, _ca_bundle)
+            _boto_cfg = _bedrock_botocore_config(_proxy_url)
             _client = _session.client(
                 "bedrock-runtime",
                 region_name=region,
                 endpoint_url=_endpoint,
-                verify=not _proxy_url,
-                **{"config": _boto_cfg} if _boto_cfg else {},
+                verify=_ca_bundle or not _proxy_url,
+                config=_boto_cfg,
             )
             return _client.converse(
                 modelId=_model,
@@ -3259,7 +4765,7 @@ async def _bedrock(
         "Accept": "application/json",
     }
 
-    async with _make_llm_http_client(timeout=120) as client:
+    async with _make_llm_http_client(timeout=_bedrock_http_timeout()) as client:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
         _resp_data = resp.json()
@@ -3494,9 +5000,18 @@ async def analyse_probes(
 
 
 def _format_probe_result(result: dict) -> str:
+    sent_authenticated = result.get("sent_authenticated")
+    auth_state = (
+        "yes"
+        if sent_authenticated is True
+        else "no"
+        if sent_authenticated is False
+        else "unknown; inspect request evidence"
+    )
     return (
         f"--- Probe: {result.get('desc', result.get('url', '?'))} ---\n"
         f"Sent as user: {result.get('as_user') or '(primary session)'}\n"
+        f"Credentials observed on wire: {auth_state}\n"
         f"URL: {result.get('url')}\n"
         f"Status: {result.get('status')}\n"
         f"Request evidence:\n{str(result.get('request_evidence') or '')[:2000]}\n\n"
@@ -3536,17 +5051,15 @@ def _chunk_probe_results(
 
     token_budget = 0
     if config is not None and getattr(config, "max_context_tokens", 0):
-        safety = max(1024, min(8192, int(config.max_context_tokens) // 20))
+        context_limit = int(config.max_context_tokens)
+        safety = max(1024, min(8192, context_limit // 20))
         empty_prompt = build_reporting_analyse_prompt(url, [])
         overhead = estimate_tokens(
             empty_prompt, model=config.model, provider=config.provider
         )
         token_budget = max(
-            1024,
-            int(config.max_context_tokens)
-            - int(config.max_tokens or 0)
-            - safety
-            - overhead,
+            1,
+            context_limit - int(config.max_tokens or 0) - safety - overhead,
         )
 
     for result in results:
@@ -3569,9 +5082,7 @@ def _chunk_probe_results(
             or (
                 token_budget
                 and next_token_count
-                > int(config.max_context_tokens)
-                - int(config.max_tokens or 0)
-                - max(1024, min(8192, int(config.max_context_tokens) // 20))
+                > context_limit - int(config.max_tokens or 0) - safety
             )
         ):
             batches.append(current_batch)
@@ -3939,10 +5450,13 @@ async def normalize_finding_titles(
 
     existing_list = "\n".join(
         f"  {i + 1}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f['title']}"
+        + f"\n     url: {str(f.get('affected_url') or '')[:200]}"
+        + f"\n     desc: {str(f.get('description') or '')[:180]}"
         for i, f in enumerate(existing_findings[:60])
     )
     new_list = "\n".join(
         f"  {i}. [{f.get('owasp_category', '?')}] [{(f.get('severity') or '?').upper()}] {f.get('title', '?')}"
+        + f"\n     url: {str(f.get('affected_url') or '')[:200]}"
         + (
             f"\n     desc: {(f.get('description') or '')[:120]}"
             if f.get("description")
@@ -3967,6 +5481,28 @@ async def normalize_finding_titles(
             idx = entry.get("index")
             title = (entry.get("title") or "").strip()
             if isinstance(idx, int) and 0 <= idx < len(result) and title:
+                title = re.sub(
+                    r"^\[(?:A\d{2}(?::[^\]]+)?|API\d+)\]\s*",
+                    "",
+                    title,
+                    flags=re.IGNORECASE,
+                )
+                title = re.sub(
+                    r"^\[(?:critical|high|medium|low|info)\]\s*",
+                    "",
+                    title,
+                    flags=re.IGNORECASE,
+                )
+                original_title = str(result[idx].get("title") or "")
+                auth_claim = re.compile(
+                    r"\bunauthenticated\b|\bwithout\s+(?:any\s+)?authentication\b|"
+                    r"\bmissing\s+authentication\b|\bno\s+authentication\s+(?:is\s+)?required\b",
+                    re.IGNORECASE,
+                )
+                if bool(auth_claim.search(original_title)) != bool(
+                    auth_claim.search(title)
+                ):
+                    continue
                 result[idx] = {**result[idx], "title": title}
         return result
     except Exception as exc:
@@ -4164,8 +5700,338 @@ def build_wstg_skill_context(selected: set[str]) -> str:
 
 # ── Continuous agentic session (Anthropic native tool use) ────────────────────
 
-TOOL_RESULT_CHAR_LIMIT = 8_000
-CONTEXT_TOOL_RESULT_CHAR_LIMIT = 12_000
+TOOL_RESULT_CHAR_LIMIT = 24_000
+CONTEXT_TOOL_RESULT_CHAR_LIMIT = 30_000
+
+
+def _tool_result_omitted_note(omitted: int) -> str:
+    return (
+        f"\n[{omitted} chars omitted — request a narrower range, fewer results, "
+        "or a more specific query to see the rest]"
+    )
+
+
+CONTEXT_JOURNAL_CHAR_LIMIT = 16_000
+_COMPACTION_SUFFIX_COUNTS = (32, 16, 8, 4, 2, 0)
+# A tool call needs room for a JSON action and its arguments. Keep this much
+# output space even when the configured context window is nearly full.
+MIN_AGENT_OUTPUT_TOKENS = 1_024
+
+
+def _redact_compaction_text(value: str) -> str:
+    """Remove credentials from text copied into the short-lived journal."""
+    text = str(value or "")
+    # Keep the key and redact only its value.  The patterns intentionally cover
+    # both JSON-ish input and the ``key=value`` strings used in journal lines.
+    text = re.sub(
+        r"(?i)([\"']?(?:authorization|proxy-authorization)[\"']?\s*[:=]\s*[\"']?(?:bearer|basic)\s+)[^\"'\s,;}]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|cookie|session(?:[_-]?id)?|credential)[\"']?\s*[:=]\s*[\"']?)[^\"'\s,;}]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)([?&](?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|key)=)[^&#\s]+",
+        r"\1[REDACTED]",
+        text,
+    )
+    # Common fixed-format credentials should not be copied even when they have
+    # no descriptive key nearby.
+    text = re.sub(r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED]", text)
+    return text
+
+
+def _canonical_content_block(block: Any) -> dict[str, Any] | Any:
+    """Convert provider SDK blocks to the dict form used in checkpoints."""
+    if isinstance(block, dict):
+        return block
+    dumped: Any = None
+    model_dump = getattr(block, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(exclude_none=False)
+        except TypeError:
+            dumped = model_dump()
+        except Exception:
+            dumped = None
+    if not isinstance(dumped, dict):
+        to_dict = getattr(block, "to_dict", None)
+        if callable(to_dict):
+            try:
+                dumped = to_dict()
+            except Exception:
+                dumped = None
+    if not isinstance(dumped, dict):
+        dumped = {}
+        for key in (
+            "type",
+            "id",
+            "name",
+            "input",
+            "text",
+            "thinking",
+            "signature",
+            "data",
+            "citations",
+        ):
+            value = getattr(block, key, None)
+            if value is not None:
+                dumped[key] = value
+    return dumped or block
+
+
+def _content_blocks(message: dict) -> list[Any]:
+    content = message.get("content")
+    if isinstance(content, list):
+        return [_canonical_content_block(block) for block in content]
+    return []
+
+
+def _agentic_tool_use_block(block: Any) -> dict[str, Any] | None:
+    """Return a canonical tool-use view of a saved provider output block."""
+    if not isinstance(block, dict):
+        return None
+    if block.get("type") == "tool_use":
+        return block
+    if block.get("type") != _RESPONSES_OUTPUT_ITEM_BLOCK:
+        return None
+    item = block.get("item")
+    if not isinstance(item, dict) or item.get("type") != "function_call":
+        return None
+    arguments = item.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            tool_input = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            tool_input = {}
+    elif isinstance(arguments, dict):
+        tool_input = arguments
+    else:
+        tool_input = {}
+    return {
+        "type": "tool_use",
+        "id": item.get("call_id") or item.get("id") or "",
+        "name": item.get("name") or "",
+        "input": tool_input,
+    }
+
+
+def _append_agentic_user_steer(messages: list[dict], text: str) -> None:
+    """Add a steering instruction as a user-side text block.
+
+    Merges into the trailing user message when one is present (a text block may
+    sit alongside tool_result blocks), otherwise appends a new user message, so
+    the conversation never ends up with two consecutive user turns.
+    """
+    block = {"type": "text", "text": text}
+    if messages and messages[-1].get("role") == "user":
+        content = messages[-1].get("content")
+        if isinstance(content, list):
+            content.append(block)
+        elif isinstance(content, str):
+            messages[-1]["content"] = (
+                [{"type": "text", "text": content}, block] if content else [block]
+            )
+        else:
+            messages[-1]["content"] = [block]
+    else:
+        messages.append({"role": "user", "content": [block]})
+
+
+def _drop_last_agentic_exchange(messages: list[dict]) -> bool:
+    """Remove the most recent completed assistant/tool-result exchange.
+
+    Drops the trailing assistant turn and its following user tool_result turn as
+    a matched pair so the refused content leaves the context window without
+    orphaning a tool_result or losing the initial user message. Returns True
+    when a pair was removed.
+    """
+    if len(messages) < 3:
+        return False
+    if messages[-1].get("role") == "user" and messages[-2].get("role") == "assistant":
+        assistant_content = messages[-2].get("content")
+        has_tool_use = any(
+            _agentic_tool_use_block(b) is not None
+            for b in (assistant_content if isinstance(assistant_content, list) else [])
+        )
+        if has_tool_use:
+            del messages[-2:]
+            return True
+    return False
+
+
+def _journal_from_first_message(message: dict) -> tuple[dict, list[str]]:
+    """Return a first message without old journals and their useful lines."""
+    first = dict(message)
+    old_lines: list[str] = []
+
+    def clean_text(value: str) -> str:
+        nonlocal old_lines
+        matches = re.findall(
+            r"\[CONTEXT JOURNAL:[^\n]*\n?(.*?)(?=\n\[CONTEXT JOURNAL:|\Z)",
+            value,
+            flags=re.DOTALL,
+        )
+        for match in matches:
+            old_lines.extend(
+                _redact_compaction_text(line.strip())
+                for line in match.splitlines()
+                if line.strip()
+            )
+        return re.sub(
+            r"\s*\[CONTEXT JOURNAL:[^\n]*\n?.*?(?=\n\[CONTEXT JOURNAL:|\Z)",
+            "",
+            value,
+            flags=re.DOTALL,
+        ).strip()
+
+    content = first.get("content")
+    if isinstance(content, str):
+        first["content"] = clean_text(content)
+    elif isinstance(content, list):
+        cleaned: list[Any] = []
+        for block in content:
+            block = _canonical_content_block(block)
+            if isinstance(block, dict) and block.get("type") == "text":
+                block = dict(block)
+                block["text"] = clean_text(str(block.get("text") or ""))
+                if block["text"]:
+                    cleaned.append(block)
+            else:
+                cleaned.append(block)
+        first["content"] = cleaned
+    return first, old_lines
+
+
+def _tool_block_ids(message: dict, block_type: str) -> list[str]:
+    content = _content_blocks(message)
+    if block_type == "tool_use":
+        return [
+            str(tool_block.get("id"))
+            for block in content
+            if (tool_block := _agentic_tool_use_block(block)) is not None
+            and tool_block.get("id")
+        ]
+    key = "id" if block_type == "tool_use" else "tool_use_id"
+    return [
+        str(block.get(key))
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == block_type
+        and block.get(key)
+    ]
+
+
+def _protocol_valid_suffix(messages: list[dict], start: int) -> bool:
+    """Check tool calls are assistant turns followed by matching user results."""
+    transcript = messages[start:]
+    for index, message in enumerate(transcript):
+        role = message.get("role")
+        blocks = _content_blocks(message)
+        use_ids = {
+            tool_id for tool_id in _tool_block_ids(message, "tool_use") if tool_id
+        }
+        result_ids = {
+            tool_id for tool_id in _tool_block_ids(message, "tool_result") if tool_id
+        }
+        if use_ids and role != "assistant":
+            return False
+        if result_ids and role != "user":
+            return False
+        if not use_ids and not result_ids:
+            continue
+        if use_ids:
+            if index + 1 >= len(transcript):
+                return False
+            next_message = transcript[index + 1]
+            if next_message.get("role") != "user":
+                return False
+            next_result_ids = set(_tool_block_ids(next_message, "tool_result"))
+            if use_ids != next_result_ids:
+                return False
+        if result_ids:
+            if index == 0 or transcript[index - 1].get("role") != "assistant":
+                return False
+            previous_use_ids = set(_tool_block_ids(transcript[index - 1], "tool_use"))
+            if previous_use_ids != result_ids:
+                return False
+        # A malformed block type in a content list should not make an otherwise
+        # valid exchange appear complete. This also keeps model SDK objects
+        # from being silently ignored by the protocol check.
+        if any(
+            isinstance(block, dict)
+            and (
+                block.get("type") in {"tool_use", "tool_result"}
+                or _agentic_tool_use_block(block) is not None
+            )
+            for block in blocks
+        ) and not (use_ids or result_ids):
+            return False
+    return True
+
+
+def _suffix_start(messages: list[dict], suffix_count: int) -> int:
+    """Choose the earliest valid boundary within the requested recent suffix."""
+    if suffix_count <= 0:
+        return len(messages)
+    threshold = max(1, len(messages) - suffix_count)
+    valid = [
+        start
+        for start in range(1, len(messages) + 1)
+        if _protocol_valid_suffix(messages, start)
+    ]
+    if not valid:
+        return len(messages)
+    retained = [start for start in valid if start >= threshold]
+    if retained:
+        return min(retained)
+    # A threshold can land on the user-side half of a tool exchange. Include
+    # the preceding assistant call rather than dropping a completed pair.
+    return max(valid)
+
+
+def _fit_text_to_chars(text: str, budget: int) -> str:
+    if budget <= 0 or len(text) <= budget:
+        return text
+    marker = "\n[… evidence excerpt trimmed …]\n"
+    if budget <= len(marker):
+        return marker[:budget]
+    available = budget - len(marker)
+    left = available // 2
+    return text[:left] + marker + text[-(available - left) :]
+
+
+def _without_bedrock_reasoning(messages: list[dict]) -> list[dict]:
+    cleaned = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            filtered = [
+                block
+                for block in content
+                if not (
+                    isinstance(block, dict) and block.get("type") == "bedrock_reasoning"
+                )
+            ]
+            if len(filtered) != len(content):
+                message = {**message, "content": filtered}
+        cleaned.append(message)
+    return cleaned
+
+
+def _has_context_journal(message: dict) -> bool:
+    content = message.get("content")
+    if isinstance(content, str):
+        return "[CONTEXT JOURNAL:" in content
+    return isinstance(content, list) and any(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and "[CONTEXT JOURNAL:" in str(block.get("text") or "")
+        for block in content
+    )
 
 
 def compact_agentic_messages(
@@ -4179,30 +6045,28 @@ def compact_agentic_messages(
     model: str | None = None,
     provider: str = "openai",
     recent_messages: int = 32,
-) -> tuple[list[dict], dict[str, int] | None]:
+) -> tuple[list[dict], dict[str, Any] | None]:
     """Compact completed tool exchanges while preserving protocol-valid pairs.
 
     The first user brief is retained. Older assistant/tool-result pairs become a
     short mechanical journal, and a recent suffix remains verbatim. Raw secrets
     and full response bodies are deliberately excluded from the journal.
     """
+    if not messages:
+        return messages, None
     before_chars = len(json.dumps(messages, default=str))
-    before_tokens = (
-        _estimate_tools_call_tokens(
-            system_message,
-            messages,
-            tools=tools,
-            model=model,
-            provider=provider,
-        )
-        if max_context_tokens > 0
-        else 0
+    before_tokens = _estimate_tools_call_tokens(
+        system_message,
+        messages,
+        tools=tools,
+        model=model,
+        provider=provider,
     )
     safety_tokens = (
         max(1024, min(8192, max_context_tokens // 20)) if max_context_tokens else 0
     )
     input_budget = (
-        max(1024, max_context_tokens - max_output_tokens - safety_tokens)
+        max(1, max_context_tokens - max_output_tokens - safety_tokens)
         if max_context_tokens
         else 0
     )
@@ -4211,33 +6075,30 @@ def compact_agentic_messages(
         if max_context_tokens
         else before_chars > max_context_chars
     )
-    if not over_limit or len(messages) < 8:
+    if not over_limit:
         return messages, None
 
-    def _build(suffix_count: int, journal_limit: int) -> tuple[list[dict], int]:
-        suffix_start = max(1, len(messages) - max(4, suffix_count))
-        while (
-            suffix_start < len(messages)
-            and messages[suffix_start].get("role") != "assistant"
-        ):
-            suffix_start += 1
-        if suffix_start >= len(messages) - 1:
-            return messages, 0
+    first, old_journal_lines = _journal_from_first_message(messages[0])
+
+    def _build(
+        suffix_count: int, journal_limit: int
+    ) -> tuple[list[dict], dict[str, int]]:
+        suffix_start = _suffix_start(messages, suffix_count)
         removed = messages[1:suffix_start]
-        journal_lines: list[str] = []
+        journal_lines: list[str] = list(old_journal_lines)
         for message in removed:
-            content = message.get("content")
-            blocks = content if isinstance(content, list) else []
+            blocks = _content_blocks(message)
             for block in blocks:
                 if not isinstance(block, dict):
                     continue
-                if block.get("type") == "tool_use":
+                tool_block = _agentic_tool_use_block(block)
+                if tool_block is not None:
                     tool_input = (
-                        block.get("input")
-                        if isinstance(block.get("input"), dict)
+                        tool_block.get("input")
+                        if isinstance(tool_block.get("input"), dict)
                         else {}
                     )
-                    details = [str(block.get("name") or "tool")]
+                    details = [str(tool_block.get("name") or "tool")]
                     for key in (
                         "method",
                         "url",
@@ -4247,52 +6108,88 @@ def compact_agentic_messages(
                     ):
                         value = tool_input.get(key)
                         if value not in (None, ""):
-                            details.append(f"{key}={str(value)[:240]}")
+                            details.append(
+                                f"{key}={_redact_compaction_text(str(value)[:240])}"
+                            )
                     journal_lines.append("- " + " ".join(details))
                 elif block.get("type") == "tool_result":
-                    result = str(block.get("content") or "").replace("\n", " ").strip()
+                    result = (
+                        _redact_compaction_text(str(block.get("content") or ""))
+                        .replace("\n", " ")
+                        .strip()
+                    )
                     if result:
                         journal_lines.append(f"  result: {result[:360]}")
-        journal = (
-            f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
-            "Use context tools for full durable evidence.]\n"
-            + "\n".join(journal_lines[-journal_limit:])
-        )[:16_000]
-        first = dict(messages[0])
-        first_content = first.get("content")
-        if isinstance(first_content, list):
-            first["content"] = list(first_content) + [{"type": "text", "text": journal}]
-        else:
-            first["content"] = f"{first_content or ''}\n\n{journal}"
-        return [first, *messages[suffix_start:]], len(removed)
+        built_first = dict(first)
+        journal = ""
+        if journal_lines:
+            journal_text = "\n".join(journal_lines[-journal_limit:])
+            journal = (
+                f"[CONTEXT JOURNAL: {len(removed)} older messages compacted. "
+                "Use context tools for full durable evidence.]\n" + journal_text
+            )
+            journal = _fit_text_to_chars(journal, CONTEXT_JOURNAL_CHAR_LIMIT)
+            first_content = built_first.get("content")
+            if isinstance(first_content, list):
+                built_first["content"] = list(first_content) + [
+                    {"type": "text", "text": journal}
+                ]
+            else:
+                built_first["content"] = f"{first_content or ''}\n\n{journal}"
+        return [
+            built_first,
+            *(copy.deepcopy(message) for message in messages[suffix_start:]),
+        ], {
+            "removed_messages": len(removed),
+            "suffix_messages": len(messages) - suffix_start,
+            "journal_entries": len(journal_lines[-journal_limit:]),
+            "journal_chars": len(journal),
+            "suffix_start": suffix_start,
+        }
 
-    compacted, removed_count = _build(recent_messages, 80)
+    compacted, build_stats = _build(recent_messages, 80)
+    removed_count = build_stats["removed_messages"]
     truncated_tool_results = 0
-    if max_context_tokens:
-        for suffix_count, journal_limit in ((16, 60), (8, 40), (4, 20)):
-            estimated = _estimate_tools_call_tokens(
-                system_message, compacted, tools=tools, model=model, provider=provider
-            )
-            if estimated <= input_budget:
-                break
-            compacted, removed_count = _build(suffix_count, journal_limit)
-        if (
+    fit_passes = 0
+    suffix_counts = list(dict.fromkeys((recent_messages, *_COMPACTION_SUFFIX_COUNTS)))
+
+    def _estimate(candidate: list[dict]) -> int:
+        return (
             _estimate_tools_call_tokens(
-                system_message, compacted, tools=tools, model=model, provider=provider
+                system_message, candidate, tools=tools, model=model, provider=provider
             )
-            > input_budget
+            if max_context_tokens
+            else len(json.dumps(candidate, default=str))
+        )
+
+    # Prefer keeping the most recent completed exchanges. If they are still too
+    # large, trim their results in progressively smaller passes, then evict old
+    # pairs by moving the suffix boundary back to 8, 4, 2, and finally 0.
+    selected_fit = False
+    for suffix_count in suffix_counts:
+        journal_limit = max(8, min(80, suffix_count * 2 or 8))
+        candidate, candidate_stats = _build(suffix_count, journal_limit)
+        for result_budget in (
+            max(128, input_budget // 8),
+            max(64, input_budget // 16),
+            64,
         ):
-            compacted = [dict(message) for message in compacted]
-            for index in range(1, len(compacted)):
-                message = compacted[index]
+            estimated = _estimate(candidate)
+            if not max_context_tokens and estimated <= max_context_chars:
+                selected_fit = True
+                break
+            if max_context_tokens and estimated <= input_budget:
+                selected_fit = True
+                break
+            changed = False
+            for index in range(1, len(candidate)):
+                message = candidate[index]
                 content = message.get("content")
                 if not isinstance(content, list):
                     continue
                 blocks = [
-                    dict(block) if isinstance(block, dict) else block
-                    for block in content
+                    copy.deepcopy(_canonical_content_block(block)) for block in content
                 ]
-                changed = False
                 for block in blocks:
                     if (
                         not isinstance(block, dict)
@@ -4300,42 +6197,44 @@ def compact_agentic_messages(
                     ):
                         continue
                     result = block.get("content")
-                    if not isinstance(result, str) or len(result) < 256:
+                    if not isinstance(result, str) or len(result) < 64:
                         continue
-                    block["content"] = _fit_text_to_tokens(
-                        result,
-                        max(128, input_budget // 8),
-                        model=model,
-                    )
-                    changed = True
-                    truncated_tool_results += 1
-                if changed:
+                    if max_context_tokens:
+                        fitted = _fit_text_to_tokens(result, result_budget, model=model)
+                    else:
+                        fitted = _fit_text_to_chars(
+                            result, max(32, max_context_chars // 8)
+                        )
+                    if fitted != result:
+                        block["content"] = fitted
+                        changed = True
+                        truncated_tool_results += 1
+                if blocks != content:
                     message["content"] = blocks
-                if (
-                    _estimate_tools_call_tokens(
-                        system_message,
-                        compacted,
-                        tools=tools,
-                        model=model,
-                        provider=provider,
-                    )
-                    <= input_budget
-                ):
-                    break
-    if removed_count == 0:
-        return messages, None
+            fit_passes += 1
+            if not changed:
+                break
+        compacted, build_stats = candidate, candidate_stats
+        removed_count = build_stats["removed_messages"]
+        if selected_fit:
+            break
+
+    if provider == "bedrock" and compacted != messages:
+        compacted = _without_bedrock_reasoning(compacted)
+        compacted[0] = {**compacted[0], "_bedrock_reasoning_reset": True}
+
+    after_estimate = _estimate(compacted)
     after_chars = len(json.dumps(compacted, default=str))
-    after_tokens = (
-        _estimate_tools_call_tokens(
-            system_message,
-            compacted,
-            tools=tools,
-            model=model,
-            provider=provider,
-        )
-        if max_context_tokens
-        else 0
+    after_tokens = _estimate_tools_call_tokens(
+        system_message,
+        compacted,
+        tools=tools,
+        model=model,
+        provider=provider,
     )
+    changed = compacted != messages
+    if not changed or (after_tokens >= before_tokens and after_chars >= before_chars):
+        return messages, None
     return compacted, {
         "before_chars": before_chars,
         "after_chars": after_chars,
@@ -4345,6 +6244,15 @@ def compact_agentic_messages(
         "removed_messages": removed_count,
         "truncated_tool_results": truncated_tool_results,
         "remaining_messages": len(compacted),
+        "suffix_messages": build_stats["suffix_messages"],
+        "journal_entries": build_stats["journal_entries"],
+        "journal_chars": build_stats["journal_chars"],
+        "fit_passes": fit_passes,
+        "estimated_fit": selected_fit,
+        "protocol_valid": _protocol_valid_suffix(compacted, 1),
+        "compaction_applied": True,
+        "changed": True,
+        "after_estimate": after_estimate,
     }
 
 
@@ -4353,7 +6261,7 @@ def compact_messages_for_config(
     system_message: str,
     messages: list[dict],
     tools: list[dict] | None = None,
-) -> tuple[list[dict], dict[str, int] | None]:
+) -> tuple[list[dict], dict[str, Any] | None]:
     """Apply the configured model context budget to a live transcript."""
     compacted, stats = compact_agentic_messages(
         messages,
@@ -4370,7 +6278,7 @@ def compact_messages_for_config(
     if context_limit:
         safety = max(1024, min(8192, context_limit // 20))
         budget = max(
-            1024, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety
+            1, context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety
         )
         estimated = _estimate_tools_call_tokens(
             system_message,
@@ -4394,9 +6302,11 @@ def compact_messages_for_config(
 # wire format or the Bedrock Runtime toolConfig format.
 AGENTIC_LOOP_PROVIDERS = frozenset(
     {
+        "claude_cli",
         "factory_droid",
         "github_copilot",
         "openai_codex",
+        "openai_chatgpt_plan",
         "google_antigravity",
         "anthropic",
         "azure_foundry_anthropic",
@@ -4409,8 +6319,19 @@ AGENTIC_LOOP_PROVIDERS = frozenset(
         "azure_foundry",
         "azure_foundry_openai",
         "google",
+        "google_vertex",
     }
 )
+
+
+def _anthropic_history_block(block: Any) -> dict[str, Any]:
+    """Keep SDK parsing metadata out of subsequent Messages requests."""
+    canonical = _canonical_content_block(block)
+    if not isinstance(canonical, dict):
+        raise TypeError("Anthropic message content block could not be serialized")
+    wire_block = dict(canonical)
+    wire_block.pop("parsed_output", None)
+    return wire_block
 
 
 def _with_anthropic_cache(
@@ -4420,7 +6341,14 @@ def _with_anthropic_cache(
     """Helper to copy messages and tools, and attach ephemeral cache points
     to the last item of each, avoiding in-place mutation of the caller's lists.
     """
-    cached_messages = [dict(m) for m in messages]
+    cached_messages = []
+    for message in messages:
+        copied = dict(message)
+        if isinstance(copied.get("content"), list):
+            copied["content"] = [
+                _anthropic_history_block(block) for block in copied["content"]
+            ]
+        cached_messages.append(copied)
     if cached_messages:
         last_msg = dict(cached_messages[-1])
         content = last_msg.get("content")
@@ -4470,35 +6398,246 @@ def _estimate_tools_call_tokens(
     covers role/message separators.
     """
     parts: list[str] = [system_message or ""]
+    image_count = 0
+
+    def _image_without_payload(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    f"<{key}:{len(item)} bytes>"
+                    if key in {"data", "bytes"}
+                    and isinstance(item, (str, bytes, bytearray))
+                    else (
+                        f"<base64 image:{len(item)} bytes>"
+                        if key == "url"
+                        and isinstance(item, str)
+                        and item.startswith("data:")
+                        else _image_without_payload(item)
+                    )
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [_image_without_payload(item) for item in value]
+        return value
+
     for m in messages:
         content = m.get("content")
         if isinstance(content, str):
             parts.append(content)
         elif isinstance(content, list):
-            for block in content:
+            for block in _content_blocks(m):
                 if isinstance(block, str):
                     parts.append(block)
                 elif isinstance(block, dict):
-                    # text / tool_result content / tool_use input — stringify cheaply.
-                    parts.append(
-                        str(
-                            block.get("text")
-                            or block.get("content")
-                            or block.get("input")
-                            or ""
+                    block_type = str(block.get("type") or "")
+                    if block_type in {"image", "image_url"} or "image_url" in block:
+                        image_count += 1
+                        # Image bytes are not text tokens. Count the modality
+                        # with the same provider-specific allowance used by
+                        # estimate_tokens(), while retaining its small wrapper.
+                        parts.append(
+                            json.dumps(
+                                {
+                                    "type": block_type,
+                                    **_image_without_payload(block),
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            )
                         )
-                    )
+                    else:
+                        # Count the complete canonical block. In particular,
+                        # this preserves tool IDs/names, structured results,
+                        # OpenAI reasoning details, Bedrock signatures, and
+                        # provider diagnostics that the old value-only estimate
+                        # discarded.
+                        parts.append(
+                            json.dumps(
+                                block,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            )
+                        )
         elif content is not None:
-            parts.append(str(content))
+            parts.append(
+                json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+                if isinstance(content, (dict, list))
+                else str(content)
+            )
     if tools:
         parts.append(
             json.dumps(tools, sort_keys=True, separators=(",", ":"), default=str)
         )
     estimated = estimate_tokens("\n".join(parts), provider=provider, model=model)
+    if image_count:
+        estimated += image_count * estimate_tokens(
+            "",
+            screenshot_b64="image",
+            provider=provider,
+            model=model,
+        )
     # Provider wire formats add a few tokens per message and a wrapper around
     # the tool list. Keep this explicit rather than hiding another character
     # heuristic inside the tokenizer count.
     return estimated + 8 + (4 * len(messages)) + (8 if tools else 0)
+
+
+def _copy_config_with_max_tokens(config: Any, max_tokens: int) -> Any:
+    """Return a request-only config copy without changing saved settings."""
+    return config.model_copy(update={"max_tokens": int(max_tokens)})
+
+
+def _context_budget_for_request(
+    config: Any, input_tokens: int, *, context_limit: int | None = None
+) -> dict[str, int]:
+    """Calculate the output allowance for one request.
+
+    ``max_tokens`` is a saved profile setting, but a long individual turn may
+    leave less room in the model window. The effective value is request-local.
+    """
+    configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
+    provider = getattr(config.provider, "value", config.provider)
+    minimum_output_tokens = (
+        configured
+        if provider == "openai_chatgpt_plan"
+        else min(configured, MIN_AGENT_OUTPUT_TOKENS)
+    )
+    context_limit = max(
+        0,
+        int(
+            context_limit
+            if context_limit is not None
+            else (getattr(config, "max_context_tokens", 0) or 0)
+        ),
+    )
+    if not context_limit:
+        return {
+            "context_limit_tokens": 0,
+            "input_tokens": max(0, int(input_tokens)),
+            "safety_tokens": 0,
+            "available_output_tokens": configured,
+            "configured_max_output_tokens": configured,
+            "effective_max_output_tokens": configured,
+            "configured_max_tokens": configured,
+            "effective_max_tokens": configured,
+        }
+
+    safety = max(1024, min(8192, context_limit // 20))
+    available = context_limit - max(0, int(input_tokens)) - safety
+    if available < minimum_output_tokens:
+        raise LLMContextLimitError(
+            "The configured context window cannot fit this request with the "
+            f"minimum {minimum_output_tokens:,}-token agent response "
+            f"({input_tokens:,} input tokens estimated; "
+            f"{max(0, available):,} output tokens available)."
+        )
+    return {
+        "context_limit_tokens": context_limit,
+        "input_tokens": max(0, int(input_tokens)),
+        "safety_tokens": safety,
+        "available_output_tokens": available,
+        "configured_max_output_tokens": configured,
+        "effective_max_output_tokens": min(configured, available),
+        "configured_max_tokens": configured,
+        "effective_max_tokens": min(configured, available),
+    }
+
+
+def _fit_plain_prompt_to_context(
+    config: Any,
+    prompt: str,
+    system_prompt: str | None,
+) -> tuple[Any, str, dict[str, int]]:
+    """Fit a plain request while keeping the system prompt intact."""
+    system = system_prompt or ""
+    combined = f"{system}\n\n{prompt}" if system else prompt
+    context_limit = max(0, int(getattr(config, "max_context_tokens", 0) or 0))
+    if not context_limit:
+        configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
+        return (
+            config,
+            combined,
+            {
+                "context_limit_tokens": 0,
+                "input_tokens": estimate_tokens(
+                    combined,
+                    provider=getattr(config.provider, "value", config.provider),
+                    model=config.model,
+                ),
+                "configured_max_output_tokens": configured,
+                "effective_max_output_tokens": configured,
+                "configured_max_tokens": configured,
+                "effective_max_tokens": configured,
+            },
+        )
+
+    configured = max(1, int(getattr(config, "max_tokens", 0) or 4096))
+    provider = getattr(config.provider, "value", config.provider)
+    minimum_output_tokens = (
+        configured
+        if provider == "openai_chatgpt_plan"
+        else min(configured, MIN_AGENT_OUTPUT_TOKENS)
+    )
+    initial_input = estimate_tokens(
+        combined,
+        provider=getattr(config.provider, "value", config.provider),
+        model=config.model,
+    )
+    try:
+        budget = _context_budget_for_request(config, initial_input)
+        if budget["effective_max_output_tokens"] == configured:
+            return config, combined, budget
+    except LLMContextLimitError:
+        pass
+
+    safety = max(1024, min(8192, context_limit // 20))
+    input_limit = context_limit - safety - minimum_output_tokens
+    fixed = f"{system}\n\n" if system else ""
+    fixed_tokens = estimate_tokens(
+        fixed,
+        provider=getattr(config.provider, "value", config.provider),
+        model=config.model,
+    )
+    if fixed_tokens > input_limit:
+        raise LLMContextLimitError(
+            "The configured context window cannot fit the system prompt with "
+            f"the minimum {minimum_output_tokens:,}-token response "
+            f"({fixed_tokens:,} system tokens estimated; "
+            f"{max(0, input_limit):,} input tokens available)."
+        )
+
+    user_limit = input_limit - fixed_tokens
+    provider = getattr(config.provider, "value", config.provider)
+    fitted_prompt = _fit_text_to_tokens(prompt, user_limit, model=config.model)
+    fitted = f"{fixed}{fitted_prompt}" if fixed else fitted_prompt
+    fitted_input = estimate_tokens(fitted, provider=provider, model=config.model)
+    if fitted_input > input_limit:
+        # Very small budgets cannot hold the normal excerpt marker. Preserve the
+        # system text and use a deterministic prefix in that case.
+        lo, hi = 0, len(prompt)
+        best = ""
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate_prompt = prompt[:mid]
+            candidate = f"{fixed}{candidate_prompt}" if fixed else candidate_prompt
+            if (
+                estimate_tokens(candidate, provider=provider, model=config.model)
+                <= input_limit
+            ):
+                best = candidate_prompt
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        fitted = f"{fixed}{best}" if fixed else best
+        fitted_input = estimate_tokens(fitted, provider=provider, model=config.model)
+    budget = _context_budget_for_request(config, fitted_input)
+    request_config = _copy_config_with_max_tokens(
+        config, budget["effective_max_output_tokens"]
+    )
+    return request_config, fitted, budget
 
 
 async def _call_with_tools_rate_limited(
@@ -4516,11 +6655,13 @@ async def _call_with_tools_rate_limited(
     implementation.
     """
     _last_call_tokens_var.set(None)
+    _last_response_cache_telemetry_var.set(None)
     limiter = get_limiter_for_config(config)
     if limiter is None:
-        return await _call_with_tools_impl(
-            config, system_message, messages, tools=tools
-        )
+        async with _run_concurrency_slot():
+            return await _call_with_tools_impl(
+                config, system_message, messages, tools=tools
+            )
 
     active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
     estimated = _estimate_tools_call_tokens(
@@ -4539,9 +6680,10 @@ async def _call_with_tools_rate_limited(
     if slept:
         _emit_llm_pacing_finished(config.model)
     try:
-        result = await _call_with_tools_impl(
-            config, system_message, messages, tools=tools
-        )
+        async with _run_concurrency_slot():
+            result = await _call_with_tools_impl(
+                config, system_message, messages, tools=tools
+            )
         usage = _last_call_tokens_var.get()
         actual_total = (usage["input"] + usage["output"]) if usage else estimated
         await limiter.reconcile(estimated, actual_total)
@@ -4562,11 +6704,13 @@ async def _call_with_tools(
     operation = _operation_var.get() or _infer_llm_operation()
     call_id = next(_traffic_call_ids)
     active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
-    request = {
-        "system": system_message,
-        "messages": messages,
-        "tools": [tool.get("name", "") for tool in active_tools],
-    }
+    messages = _repair_tool_use_inputs(messages)
+    request = _traffic_request_payload(
+        system_message,
+        messages,
+        call_id,
+        tools=[tool.get("name", "") for tool in active_tools],
+    )
     _log_llm_traffic(
         "REQUEST",
         config,
@@ -4575,6 +6719,19 @@ async def _call_with_tools(
         operation=operation,
         call_id=call_id,
     )
+    pending_token = _begin_pending_usage(
+        config,
+        call_id,
+        _estimate_tools_call_tokens(
+            system_message,
+            messages,
+            tools=active_tools,
+            model=config.model,
+            provider=str(getattr(config.provider, "value", config.provider)),
+        ),
+    )
+    call_token = _traffic_call_id_var.set(call_id)
+    operation_token = _traffic_operation_var.set(operation)
     try:
         result = await _call_with_tools_rate_limited(
             config, system_message, messages, tools=tools
@@ -4588,17 +6745,87 @@ async def _call_with_tools(
             operation=operation,
             call_id=call_id,
         )
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
         raise
-    blocks, stop_reason, raw_content = result
-    _log_llm_traffic(
-        "RESPONSE",
-        config,
-        {"stop_reason": stop_reason, "content": blocks},
-        kind="tools",
-        operation=operation,
-        call_id=call_id,
-    )
-    return blocks, stop_reason, raw_content
+    finally:
+        _end_pending_usage(pending_token)
+    try:
+        blocks, stop_reason, raw_content = result
+        response_payload = {"stop_reason": stop_reason, "content": blocks}
+        telemetry = _last_response_cache_telemetry_var.get()
+        if telemetry is not None:
+            response_payload["cache_telemetry"] = telemetry
+        _log_llm_traffic(
+            "RESPONSE",
+            config,
+            response_payload,
+            kind="tools",
+            operation=operation,
+            call_id=call_id,
+        )
+        return blocks, stop_reason, raw_content
+    finally:
+        _traffic_call_id_var.reset(call_token)
+        _traffic_operation_var.reset(operation_token)
+
+
+async def stream_tools_call(
+    config: "LLMConfig",
+    system_message: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Run a tool-capable call and yield provider text before its final result.
+
+    Providers without native tool streaming simply yield the final result. This
+    keeps ALICE compatible with every configured provider while allowing native
+    streams to update the chat as tokens arrive.
+    """
+    queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def _on_text(delta: str) -> None:
+        if delta:
+            queue.put_nowait(delta)
+
+    async def _run() -> tuple[list[dict], str, Any]:
+        token = _tool_text_delta_var.set(_on_text)
+        try:
+            return await _call_with_tools(config, system_message, messages, tools=tools)
+        finally:
+            _tool_text_delta_var.reset(token)
+
+    task = asyncio.create_task(_run())
+    try:
+        while True:
+            if task.done() and queue.empty():
+                break
+            queue_get = asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait(
+                {task, queue_get}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if queue_get in done:
+                delta = queue_get.result()
+                # Provider streams often send one token per event. Briefly
+                # coalesce ready tokens so React does not render for every one.
+                await asyncio.sleep(0.02)
+                while not queue.empty():
+                    delta += queue.get_nowait()
+                yield {"type": "text_delta", "delta": delta}
+            else:
+                queue_get.cancel()
+                try:
+                    await queue_get
+                except asyncio.CancelledError:
+                    pass
+        yield {"type": "result", "result": await task}
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 async def _call_with_tools_impl(
@@ -4622,7 +6849,19 @@ async def _call_with_tools_impl(
     """
     _provider_var.set(_usage_provider(config))
     _base_url_var.set(_usage_base_url(config))
+    _service_tier_var.set(getattr(config, "service_tier", None) or "")
     _active_tools = tools if tools is not None else THINKING_AGENT_TOOLS
+    if config.provider == "claude_cli":
+        from aespa.services import claude_cli_provider
+
+        return await claude_cli_provider.completion_with_tools(
+            config,
+            system_message,
+            messages,
+            _active_tools,
+            _claude_cli_usage_callback(),
+            _llm_proxy_var.get(),
+        )
     if config.provider == "factory_droid":
         from aespa.services import droid_provider
 
@@ -4678,12 +6917,19 @@ async def _call_with_tools_impl(
                 str(exc), reset_at=exc.reset_at, snapshot=exc.snapshot
             ) from exc
     # ── Anthropic (direct) ────────────────────────────────────────────────────
-    if config.provider == "anthropic":
+    if config.provider == "anthropic" or (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "messages"
+    ):
         import anthropic as _ant
 
-        client = _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        client = (
+            _make_bedrock_mantle_anthropic_client(config)
+            if config.provider == "bedrock_mantle"
+            else _ant.AsyncAnthropic(api_key=config.api_key, **_llm_client_kwargs())
+        )
         cached_messages, cached_tools = _with_anthropic_cache(messages, _active_tools)
-        resp = await client.messages.create(
+        request_kwargs = dict(
             model=config.model,
             max_tokens=config.max_tokens,
             **_anthropic_reasoning_kwargs(config),
@@ -4702,6 +6948,12 @@ async def _call_with_tools_impl(
             tools=cached_tools,
             messages=cached_messages,
         )
+        on_text_delta = _tool_text_delta_var.get()
+        async with client.messages.stream(**request_kwargs) as stream:
+            if on_text_delta is not None:
+                async for text_delta in stream.text_stream:
+                    await on_text_delta(text_delta)
+            resp = await stream.get_final_message()
         blocks = [
             {
                 "type": b.type,
@@ -4717,10 +6969,16 @@ async def _call_with_tools_impl(
             config.model,
             getattr(resp.usage, "input_tokens", 0),
             getattr(resp.usage, "output_tokens", 0),
-            cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0),
-            cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0),
+            cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
+            cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0)
+            or 0,
+            input_includes_cache=False,
         )
-        return blocks, resp.stop_reason or "end_turn", resp.content
+        return (
+            blocks,
+            resp.stop_reason or "end_turn",
+            [_anthropic_history_block(block) for block in (resp.content or [])],
+        )
 
     # ── Azure AI Foundry (Anthropic endpoint) ─────────────────────────────────
     if config.provider == "azure_foundry_anthropic":
@@ -4865,7 +7123,13 @@ async def _call_with_tools_impl(
                     if isinstance(reasoning_content, dict) and reasoning_content:
                         # Bedrock requires reasoning text/signatures to be replayed
                         # byte-for-byte in subsequent multi-turn requests.
-                        cvt.append({"reasoningContent": reasoning_content})
+                        cvt.append(
+                            {
+                                "reasoningContent": _bedrock_reasoning_content(
+                                    reasoning_content, for_sdk=not config.api_key
+                                )
+                            }
+                        )
             if not cvt:
                 # Legacy checkpoints can contain an empty assistant turn when a
                 # model returned reasoning-only or otherwise unsupported content.
@@ -4874,31 +7138,32 @@ async def _call_with_tools_impl(
             return {"role": role, "content": cvt}
 
         converse_messages = [_ant_msg_to_converse(m) for m in messages]
-        system_list = [
-            {"text": system_message},
-            {"cachePoint": {"type": "default"}},
-        ]
+        system_list = [{"text": system_message}]
+        if _bedrock_supports_cache_points(config.model):
+            system_list.append({"cachePoint": {"type": "default"}})
 
-        # Cache the static initial user message (crawl context + WSTG blocks).
-        # It is messages[0] and never changes during the scan, so it qualifies
-        # as a stable prefix.  The cachePoint is re-sent on every turn, which
-        # is correct — Bedrock resets the TTL on each cache hit.
-        if converse_messages and converse_messages[0].get("role") == "user":
-            first_content = list(converse_messages[0].get("content") or [])
-            if not any("cachePoint" in blk for blk in first_content):
-                first_content = first_content + [{"cachePoint": {"type": "default"}}]
-            converse_messages = [
-                {**converse_messages[0], "content": first_content},
-                *converse_messages[1:],
-            ]
+            # Cache the static initial user message (crawl context + WSTG blocks).
+            # It is messages[0] and never changes during the scan, so it qualifies
+            # as a stable prefix.  The cachePoint is re-sent on every turn, which
+            # is correct — Bedrock resets the TTL on each cache hit.
+            if converse_messages and converse_messages[0].get("role") == "user":
+                first_content = list(converse_messages[0].get("content") or [])
+                if not any("cachePoint" in blk for blk in first_content):
+                    first_content = first_content + [
+                        {"cachePoint": {"type": "default"}}
+                    ]
+                converse_messages = [
+                    {**converse_messages[0], "content": first_content},
+                    *converse_messages[1:],
+                ]
 
-        # Cache the latest turn of the conversation history to enable prefix extension caching.
-        if len(converse_messages) > 1:
-            last_msg = converse_messages[-1]
-            last_content = list(last_msg.get("content") or [])
-            if not any("cachePoint" in blk for blk in last_content):
-                last_content = last_content + [{"cachePoint": {"type": "default"}}]
-            converse_messages[-1] = {**last_msg, "content": last_content}
+            # Cache the latest turn of the conversation history to enable prefix extension caching.
+            if len(converse_messages) > 1:
+                last_msg = converse_messages[-1]
+                last_content = list(last_msg.get("content") or [])
+                if not any("cachePoint" in blk for blk in last_content):
+                    last_content = last_content + [{"cachePoint": {"type": "default"}}]
+                converse_messages[-1] = {**last_msg, "content": last_content}
 
         bedrock_transport: dict[str, Any] = {}
         if config.api_key:
@@ -4921,7 +7186,7 @@ async def _call_with_tools_impl(
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
-            async with _make_llm_http_client(timeout=120) as _hx:
+            async with _make_llm_http_client(timeout=_bedrock_http_timeout()) as _hx:
                 _resp = await _hx.post(url, headers=headers, json=payload)
                 _resp.raise_for_status()
                 data = _resp.json()
@@ -4937,41 +7202,45 @@ async def _call_with_tools_impl(
             # Env-credential path (IAM role, ~/.aws/credentials, instance profile …).
             # Capture proxy URL now — ContextVar values are not inherited by threads.
             _proxy_url = _llm_proxy_var.get()
+            _ca_bundle = _llm_ca_bundle_var.get()
+            _on_text_delta = _tool_text_delta_var.get()
+            loop = _asyncio.get_event_loop()
 
-            def _run_converse():
-                import boto3
-                from botocore.config import Config as _BotocoreConfig
+            def _forward_text_delta(delta: str) -> None:
+                if _on_text_delta is not None:
+                    future = _asyncio.run_coroutine_threadsafe(
+                        _on_text_delta(delta), loop
+                    )
+                    future.result()
 
+            def _run_converse_stream():
                 region = _bedrock_region(config)
-                profile = os.getenv("AWS_PROFILE")
-                session_kwargs = {"profile_name": profile} if profile else {}
-                session = boto3.Session(**session_kwargs)
-                _boto_cfg = (
-                    _BotocoreConfig(proxies={"http": _proxy_url, "https": _proxy_url})
-                    if _proxy_url
-                    else None
-                )
+                profile = config.aws_profile or os.getenv("AWS_PROFILE")
+                session = _bedrock_session(profile, _proxy_url, _ca_bundle)
+                _boto_cfg = _bedrock_botocore_config(_proxy_url)
                 client = session.client(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=config.base_url or None,
-                    verify=not _proxy_url,
-                    **{"config": _boto_cfg} if _boto_cfg else {},
+                    verify=_ca_bundle or not _proxy_url,
+                    config=_boto_cfg,
                 )
                 _infer_converse: dict = {"maxTokens": config.max_tokens}
                 if config.temperature is not None:
                     _infer_converse["temperature"] = config.temperature
-                return client.converse(
-                    modelId=config.model,
-                    system=system_list,
-                    messages=converse_messages,
-                    toolConfig=tool_config,
-                    inferenceConfig=_infer_converse,
-                    **_bedrock_sdk_reasoning_kwargs(config),
+                return _consume_bedrock_converse_stream(
+                    client.converse_stream(
+                        modelId=config.model,
+                        system=system_list,
+                        messages=converse_messages,
+                        toolConfig=tool_config,
+                        inferenceConfig=_infer_converse,
+                        **_bedrock_sdk_reasoning_kwargs(config),
+                    ),
+                    _forward_text_delta if _on_text_delta is not None else None,
                 )
 
-            loop = _asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, _run_converse)
+            data = await loop.run_in_executor(None, _run_converse_stream)
             response_metadata = data.get("ResponseMetadata") or {}
             bedrock_transport = {
                 "http_status": response_metadata.get("HTTPStatusCode"),
@@ -4989,7 +7258,9 @@ async def _call_with_tools_impl(
                 raw_content_ant.append(
                     {
                         "type": "bedrock_reasoning",
-                        "reasoning_content": blk["reasoningContent"],
+                        "reasoning_content": _bedrock_reasoning_content(
+                            blk["reasoningContent"]
+                        ),
                     }
                 )
             if "text" in blk:
@@ -5050,23 +7321,65 @@ async def _call_with_tools_impl(
             )
         return blocks, str(stop_reason_raw), raw_content_ant
 
-    # ── Bedrock Mantle (OpenAI Responses API with function tools) ─────────────
-    if config.provider == "bedrock_mantle":
-        client = _make_bedrock_mantle_client(config)
-        r_kwargs = _mantle_response_kwargs(
+    # ── OpenAI Responses API with function tools ──────────────────────────────
+    if (
+        config.provider == "bedrock_mantle"
+        and _bedrock_mantle_model_api(config.model) == "responses"
+    ) or _uses_openai_responses(config):
+        client = (
+            await _make_chatgpt_plan_client(config)
+            if config.provider == "openai_chatgpt_plan"
+            else _make_responses_client(config)
+        )
+        r_kwargs = _responses_request_kwargs(
             config,
             input=_ant_messages_to_responses(messages),
             instructions=system_message,
             tools=_ant_tools_to_responses(_active_tools),
         )
+        if config.provider == "openai_chatgpt_plan":
+            await _add_daybreak_access(config, r_kwargs)
         # Force a tool call unless disabled; if the model rejects forced tool
         # choice, _create_response retries once without it.
-        if getattr(config, "force_tool_choice", False):
+        if (
+            getattr(config, "force_tool_choice", False)
+            and config.provider != "openai_chatgpt_plan"
+        ):
             r_kwargs["tool_choice"] = "required"
-        resp = await _create_response(client, r_kwargs)
+        on_text_delta = _tool_text_delta_var.get()
+        if config.provider == "openai_chatgpt_plan":
+            resp = await _chatgpt_plan_response(client, r_kwargs, on_text_delta)
+        elif on_text_delta is None:
+            resp = await _create_response(client, r_kwargs)
+        else:
+            stream_kwargs = dict(r_kwargs)
+            stream_kwargs["stream"] = True
+            response_stream = await _create_response(client, stream_kwargs)
+            resp = None
+            async for event in response_stream:
+                event_type = getattr(event, "type", None)
+                if event_type == "response.output_text.delta":
+                    delta = getattr(event, "delta", None)
+                    if delta:
+                        await on_text_delta(delta)
+                elif event_type in ("response.completed", "response.incomplete"):
+                    resp = getattr(event, "response", None)
+            if resp is None:
+                raise RuntimeError("Responses API stream ended without a response")
 
         blocks = []
+        preserve_native_history = config.provider == "openai_chatgpt_plan" or (
+            config.provider == "google_vertex"
+            and (config.model or "").lower().startswith("xai/grok-")
+        )
+        native_history = []
         for item in getattr(resp, "output", None) or []:
+            if preserve_native_history:
+                native_item = _responses_output_item_dict(item)
+                if native_item is not None:
+                    native_history.append(
+                        {"type": _RESPONSES_OUTPUT_ITEM_BLOCK, "item": native_item}
+                    )
             itype = getattr(item, "type", None)
             if itype == "message":
                 for part in getattr(item, "content", None) or []:
@@ -5091,7 +7404,11 @@ async def _call_with_tools_impl(
                     {
                         "type": "tool_use",
                         "id": getattr(item, "call_id", None),
-                        "name": getattr(item, "name", None),
+                        "name": (
+                            str(getattr(item, "name", "")).removeprefix("aespa.")
+                            if config.provider == "openai_chatgpt_plan"
+                            else getattr(item, "name", None)
+                        ),
                         "input": inp,
                         "text": None,
                     }
@@ -5099,8 +7416,13 @@ async def _call_with_tools_impl(
         stop_reason = (
             "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
         )
-        _record_responses_usage(config, resp)
-        return blocks, stop_reason, blocks  # store Anthropic-format in history
+        _record_responses_usage(
+            config,
+            resp,
+            requested_prompt_cache_key=r_kwargs.get("prompt_cache_key"),
+            daybreak_program=_response_daybreak_program(resp, r_kwargs),
+        )
+        return blocks, stop_reason, native_history or blocks
 
     # ── OpenAI-style providers ─────────────────────────────────────────────────
     # Covers: openai, openai_compatible, openrouter, azure_openai,
@@ -5210,6 +7532,7 @@ async def _call_with_tools_impl(
         "azure_openai",
         "azure_foundry",
         "azure_foundry_openai",
+        "bedrock_mantle",
     ):
         from openai import AsyncOpenAI
 
@@ -5233,7 +7556,11 @@ async def _call_with_tools_impl(
                 base += "/v1"
             client_kwargs["base_url"] = base
         client_kwargs.update(_llm_client_kwargs())
-        oai_client = AsyncOpenAI(**client_kwargs)
+        oai_client = (
+            _make_bedrock_mantle_client(config)
+            if config.provider == "bedrock_mantle"
+            else AsyncOpenAI(**client_kwargs)
+        )
         oai_tools = _ant_tools_to_openai()
         oai_messages = _ant_messages_to_openai(messages)
         call_kwargs = _chat_completion_kwargs(
@@ -5255,6 +7582,98 @@ async def _call_with_tools_impl(
             pass
         else:
             call_kwargs["tool_choice"] = "required"
+        on_text_delta = _tool_text_delta_var.get()
+        if on_text_delta is not None:
+            stream_kwargs = dict(call_kwargs)
+            stream_kwargs["stream"] = True
+            stream_kwargs["stream_options"] = {"include_usage": True}
+            stream = await _create_chat_completion(oai_client, stream_kwargs)
+            text_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            tool_parts: dict[int, dict[str, str]] = {}
+            finish = "stop"
+            stream_usage = None
+            async for chunk in stream:
+                if getattr(chunk, "usage", None) is not None:
+                    stream_usage = chunk.usage
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish = choice.finish_reason
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+                content_delta = getattr(delta, "content", None)
+                if content_delta:
+                    text_parts.append(content_delta)
+                    await on_text_delta(content_delta)
+                reasoning_delta = getattr(delta, "reasoning_content", None)
+                if reasoning_delta:
+                    reasoning_parts.append(reasoning_delta)
+                for tool_delta in getattr(delta, "tool_calls", None) or []:
+                    index = int(getattr(tool_delta, "index", 0) or 0)
+                    part = tool_parts.setdefault(
+                        index, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if getattr(tool_delta, "id", None):
+                        part["id"] += tool_delta.id
+                    function = getattr(tool_delta, "function", None)
+                    if function is not None:
+                        part["name"] += getattr(function, "name", None) or ""
+                        part["arguments"] += getattr(function, "arguments", None) or ""
+            blocks: list[dict[str, Any]] = []
+            reasoning_text = "".join(reasoning_parts)
+            if reasoning_text:
+                blocks.append({"type": "thinking", "thinking": reasoning_text})
+            visible_text = "".join(text_parts)
+            if visible_text:
+                blocks.append(
+                    {
+                        "type": "text",
+                        "id": None,
+                        "name": None,
+                        "input": None,
+                        "text": visible_text,
+                    }
+                )
+            for index in sorted(tool_parts):
+                part = tool_parts[index]
+                try:
+                    tool_input = json.loads(part["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    tool_input = {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": part["id"] or f"call_{index}",
+                        "name": part["name"],
+                        "input": tool_input,
+                        "text": None,
+                    }
+                )
+            _record_usage(
+                config.model,
+                getattr(stream_usage, "prompt_tokens", 0) if stream_usage else 0,
+                getattr(stream_usage, "completion_tokens", 0) if stream_usage else 0,
+                cache_read_tokens=(
+                    getattr(
+                        getattr(stream_usage, "prompt_tokens_details", None),
+                        "cached_tokens",
+                        0,
+                    )
+                    if stream_usage
+                    else 0
+                ),
+            )
+            stop_reason = (
+                "tool_use"
+                if finish == "tool_calls"
+                or any(block["type"] == "tool_use" for block in blocks)
+                else "end_turn"
+            )
+            return blocks, stop_reason, blocks
         resp = await _create_chat_completion(oai_client, call_kwargs)
         _oai_u = getattr(resp, "usage", None)
         _oai_cached = (
@@ -5302,19 +7721,23 @@ async def _call_with_tools_impl(
         return blocks, stop_reason, blocks  # store Anthropic-format in history
 
     # ── Google Gemini (function calling) ──────────────────────────────────────
-    if config.provider == "google":
-        from google import genai
+    if config.provider in {"google", "google_vertex"}:
         from google.genai import types as _gtypes
 
         def _ant_tools_to_gemini() -> list:
             fn_decls = []
             for t in _active_tools:
                 schema = t.get("input_schema") or {}
+                schema_arg = (
+                    {"parameters_json_schema": schema if schema else None}
+                    if config.provider == "google_vertex"
+                    else {"parameters": schema if schema else None}
+                )
                 fn_decls.append(
                     _gtypes.FunctionDeclaration(
                         name=t["name"],
                         description=t.get("description", ""),
-                        parameters=schema if schema else None,
+                        **schema_arg,
                     )
                 )
             return [_gtypes.Tool(function_declarations=fn_decls)]
@@ -5361,35 +7784,91 @@ async def _call_with_tools_impl(
                     result.append(_gtypes.Content(role=role, parts=parts))
             return result
 
-        _g_proxy = _llm_proxy_var.get()
-        _g_http_opts: dict = {}
-        if config.base_url:
-            _g_http_opts["base_url"] = config.base_url
-        _g_http_opts["httpx_async_client"] = httpx.AsyncClient(
-            verify=_g_proxy is None,
-            headers=_LLM_HEADERS,
-            **({"proxy": _g_proxy} if _g_proxy else {}),
-        )
-        g_client = genai.Client(api_key=config.api_key, http_options=_g_http_opts)
+        g_client = _make_google_client(config)
+        g_async = g_client.aio
         g_tools = _ant_tools_to_gemini()
         g_contents = _ant_contents_to_gemini(messages)
-        g_resp = await g_client.aio.models.generate_content(
-            model=config.model,
-            contents=g_contents,
-            config=_gtypes.GenerateContentConfig(
-                system_instruction=system_message,
-                tools=g_tools,
-                max_output_tokens=config.max_tokens,
-                **_google_thinking_config(_gtypes, config),
-                **(
-                    {"temperature": config.temperature}
-                    if config.temperature is not None
-                    else {}
-                ),
+        generate_config = _gtypes.GenerateContentConfig(
+            system_instruction=system_message,
+            tools=g_tools,
+            max_output_tokens=config.max_tokens,
+            **_google_thinking_config(_gtypes, config),
+            **(
+                {"temperature": config.temperature}
+                if config.temperature is not None
+                else {}
             ),
         )
+        on_text_delta = _tool_text_delta_var.get()
+        if on_text_delta is not None:
+            text_parts: list[str] = []
+            streamed_functions: list[dict[str, Any]] = []
+            usage_metadata = None
+            try:
+                g_stream = await g_async.models.generate_content_stream(
+                    model=config.model,
+                    contents=g_contents,
+                    config=generate_config,
+                )
+                async for chunk in g_stream:
+                    usage_metadata = (
+                        getattr(chunk, "usage_metadata", None) or usage_metadata
+                    )
+                    candidates = getattr(chunk, "candidates", None) or []
+                    parts = _google_candidate_parts(
+                        candidates[0] if candidates else None
+                    )
+                    for part in parts:
+                        if getattr(part, "text", None):
+                            text_parts.append(part.text)
+                            await on_text_delta(part.text)
+                        elif getattr(part, "function_call", None):
+                            fc = part.function_call
+                            streamed_functions.append(
+                                {
+                                    "type": "tool_use",
+                                    "id": fc.name,
+                                    "name": fc.name,
+                                    "input": dict(fc.args) if fc.args else {},
+                                    "text": None,
+                                    "thought_signature": getattr(
+                                        part, "thought_signature", None
+                                    ),
+                                }
+                            )
+            finally:
+                await g_async.aclose()
+            blocks: list[dict[str, Any]] = []
+            streamed_text = "".join(text_parts)
+            if streamed_text:
+                blocks.append(
+                    {
+                        "type": "text",
+                        "id": None,
+                        "name": None,
+                        "input": None,
+                        "text": streamed_text,
+                    }
+                )
+            blocks.extend(streamed_functions)
+            stop_reason = (
+                "tool_use"
+                if any(block["type"] == "tool_use" for block in blocks)
+                else "end_turn"
+            )
+            _record_google_usage(config.model, usage_metadata)
+            return blocks, stop_reason, blocks
+        try:
+            g_resp = await g_async.models.generate_content(
+                model=config.model,
+                contents=g_contents,
+                config=generate_config,
+            )
+        finally:
+            await g_async.aclose()
         blocks = []
-        for part in g_resp.candidates[0].content.parts if g_resp.candidates else []:
+        candidates = getattr(g_resp, "candidates", None) or []
+        for part in _google_candidate_parts(candidates[0] if candidates else None):
             if getattr(part, "text", None):
                 blocks.append(
                     {
@@ -5421,6 +7900,56 @@ async def _call_with_tools_impl(
     raise ValueError(f"Provider {config.provider!r} does not support native tool use")
 
 
+def _history_tool_input(value: Any) -> dict[str, Any]:
+    """Return a tool-call input that every provider accepts in conversation history."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _repair_tool_use_inputs(messages: list[dict]) -> list[dict]:
+    """Replace tool-call inputs that are not JSON objects in *messages*.
+
+    A reply cut off by the output token limit can end with a partial tool call
+    whose arguments are an unparsed string. Providers reject that in later
+    requests, so the history keeps the call and its id with empty arguments.
+    """
+    repaired: list[dict] | None = None
+    for index, message in enumerate(messages):
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        new_content: list[Any] | None = None
+        for block_index, block in enumerate(content):
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and "input" in block
+                and not isinstance(block.get("input"), dict)
+            ):
+                if new_content is None:
+                    new_content = list(content)
+                new_content[block_index] = {
+                    **block,
+                    "input": _history_tool_input(block.get("input")),
+                }
+        if new_content is not None:
+            if repaired is None:
+                repaired = list(messages)
+            repaired[index] = {**message, "content": new_content}
+    return repaired if repaired is not None else messages
+
+
+_OUTPUT_LIMIT_STOP_REASONS = {"max_tokens", "length", "max_output_tokens"}
+
+
 def _normalize_agentic_tool_input(value: Any) -> tuple[dict[str, Any], str | None]:
     """Normalize provider tool arguments to the mapping expected by executors."""
     if value is None:
@@ -5447,6 +7976,22 @@ def _stringify_agentic_tool_result(value: Any) -> str:
         return str(value)
 
 
+async def _sleep_unless_stopped(delay: float, stop_check=None) -> None:
+    """Sleep for ``delay`` seconds, returning early once ``stop_check`` is true."""
+    deadline = time.monotonic() + delay
+    while True:
+        if stop_check:
+            try:
+                if stop_check():
+                    return
+            except Exception:
+                pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(remaining, 1.0))
+
+
 async def thinking_agentic_loop(
     config: "LLMConfig",
     *,
@@ -5470,6 +8015,8 @@ async def thinking_agentic_loop(
     max_context_tokens: int | None = None,
     on_context_compaction=None,
     text_only_repair_message: str | None = None,
+    refusal_recovery_prompt: RefusalRecoveryPrompt | None = None,
+    on_recovery_checkpoint=None,
 ) -> str:
     """Run a continuous Anthropic tool-use session.
 
@@ -5511,17 +8058,24 @@ async def thinking_agentic_loop(
     resume_repair: dict[str, Any] | None = None
     if resume_messages is not None:
         messages = list(resume_messages)
+        if (
+            config.provider == "bedrock"
+            and messages
+            and not messages[0].get("_bedrock_reasoning_reset")
+            and _has_context_journal(messages[0])
+        ):
+            messages = _without_bedrock_reasoning(messages)
+            messages[0] = {**messages[0], "_bedrock_reasoning_reset": True}
         if messages and messages[-1].get("role") == "assistant":
             assistant_content = messages[-1].get("content")
             assistant_blocks = (
                 assistant_content if isinstance(assistant_content, list) else []
             )
             interrupted_tools = [
-                block
+                tool_block
                 for block in assistant_blocks
-                if isinstance(block, dict)
-                and block.get("type") == "tool_use"
-                and block.get("id")
+                if (tool_block := _agentic_tool_use_block(block)) is not None
+                and tool_block.get("id")
             ]
             if interrupted_tools:
                 repair_content = [
@@ -5542,7 +8096,7 @@ async def thinking_agentic_loop(
                         "type": "text",
                         "text": (
                             "The previous model turn ended without a completed tool "
-                            "exchange. Resume the assessment by calling exactly one tool."
+                            "exchange. Resume the assessment by calling a tool."
                         ),
                     }
                 ]
@@ -5555,9 +8109,33 @@ async def thinking_agentic_loop(
             }
     else:
         messages: list[dict] = [{"role": "user", "content": initial_user_message}]
+    baseline_system_message = system_message
+    recovery_marker = messages[0].get("_openai_refusal_recovery") if messages else None
+    # Only an in-flight ("sent") marker keeps recovery active on resume. A
+    # "completed" or "unresolved" marker means an earlier scoped retry already
+    # resolved, so the loop resumes under the full prompt and stays free to
+    # re-arm for a later refusal instead of being latched into recovery mode.
+    recovery_active = (
+        isinstance(recovery_marker, dict) and recovery_marker.get("attempt") == "sent"
+    )
+    if recovery_active:
+        if (
+            config.provider not in {"openai_chatgpt_plan", "openai_codex"}
+            or refusal_recovery_prompt is None
+            or recovery_marker.get("template_id") != refusal_recovery_prompt.template_id
+        ):
+            raise RuntimeError("Saved OpenAI refusal recovery prompt is unavailable")
+        system_message = refusal_recovery_prompt.system
     tool_call_count = resume_step_count
     final_summary = ""
     consecutive_text_only_turns = 0
+    # Consecutive refusals drive retry-once-then-skip. Keep the skip count for
+    # activity events; it does not stop the scan.
+    consecutive_refusals = 0
+    refusal_skips = 0
+    # Temporary network or credential-refresh failures retry the same request
+    # with backoff; a successful turn resets the count.
+    network_attempt = 0
 
     if resume_repair and emit_fn:
         try:
@@ -5582,6 +8160,19 @@ async def thinking_agentic_loop(
 
     operation_token = _operation_var.set(_infer_llm_operation())
     try:
+        if (
+            recovery_active
+            and recovery_marker.get("attempt") == "sent"
+            and recovery_marker.get("step") == tool_call_count + 1
+        ):
+            _append_agentic_user_steer(
+                messages,
+                "The prior model request has no saved result. Leave that test unresolved "
+                "and continue with another in-scope coverage item.",
+            )
+            recovery_marker["attempt"] = "unresolved"
+            if on_recovery_checkpoint:
+                await on_recovery_checkpoint(messages, tool_call_count)
         while True:
             if stop_check and stop_check():
                 break
@@ -5621,6 +8212,8 @@ async def thinking_agentic_loop(
                 model=config.model,
                 provider=str(getattr(config.provider, "value", config.provider)),
             )
+            if recovery_active:
+                recovery_marker = messages[0].get("_openai_refusal_recovery")
             if compaction:
                 if on_context_compaction:
                     try:
@@ -5648,24 +8241,24 @@ async def thinking_agentic_loop(
             context_limit = int(
                 max_context_tokens or getattr(config, "max_context_tokens", 0) or 0
             )
-            if context_limit:
-                safety = max(1024, min(8192, context_limit // 20))
-                budget = max(
-                    1024,
-                    context_limit - int(getattr(config, "max_tokens", 0) or 0) - safety,
+            estimated = _estimate_tools_call_tokens(
+                system_message,
+                messages,
+                tools=tools if tools is not None else THINKING_AGENT_TOOLS,
+                model=config.model,
+                provider=str(getattr(config.provider, "value", config.provider)),
+            )
+            budget = _context_budget_for_request(
+                config, estimated, context_limit=context_limit
+            )
+            effective_config = (
+                _copy_config_with_max_tokens(
+                    config, budget["effective_max_output_tokens"]
                 )
-                estimated = _estimate_tools_call_tokens(
-                    system_message,
-                    messages,
-                    tools=tools if tools is not None else THINKING_AGENT_TOOLS,
-                    model=config.model,
-                    provider=str(getattr(config.provider, "value", config.provider)),
-                )
-                if estimated > budget:
-                    raise LLMContextLimitError(
-                        f"The configured context window cannot fit the fixed prompt and current turn "
-                        f"({estimated:,} input tokens estimated; {budget:,} available)."
-                    )
+                if budget["effective_max_output_tokens"]
+                != budget["configured_max_output_tokens"]
+                else config
+            )
 
             if emit_fn:
                 try:
@@ -5680,6 +8273,19 @@ async def thinking_agentic_loop(
                             "data": {
                                 "step": tool_call_count + 1,
                                 "mode": "agentic",
+                                "context_limit_tokens": budget["context_limit_tokens"],
+                                "input_tokens": budget["input_tokens"],
+                                "safety_tokens": budget["safety_tokens"],
+                                "configured_max_output_tokens": budget[
+                                    "configured_max_output_tokens"
+                                ],
+                                "effective_max_output_tokens": budget[
+                                    "effective_max_output_tokens"
+                                ],
+                                "configured_max_tokens": budget[
+                                    "configured_max_tokens"
+                                ],
+                                "effective_max_tokens": budget["effective_max_tokens"],
                             },
                         }
                     )
@@ -5701,6 +8307,23 @@ async def thinking_agentic_loop(
                                 "data": {
                                     "step": tool_call_count + 1,
                                     "message_count": len(messages),
+                                    "context_limit_tokens": budget[
+                                        "context_limit_tokens"
+                                    ],
+                                    "input_tokens": budget["input_tokens"],
+                                    "safety_tokens": budget["safety_tokens"],
+                                    "configured_max_output_tokens": budget[
+                                        "configured_max_output_tokens"
+                                    ],
+                                    "effective_max_output_tokens": budget[
+                                        "effective_max_output_tokens"
+                                    ],
+                                    "configured_max_tokens": budget[
+                                        "configured_max_tokens"
+                                    ],
+                                    "effective_max_tokens": budget[
+                                        "effective_max_tokens"
+                                    ],
                                 },
                             }
                         )
@@ -5709,7 +8332,9 @@ async def thinking_agentic_loop(
                 _step_no = tool_call_count + 1
                 _t_llm = time.monotonic()
                 _llm_fut = asyncio.ensure_future(
-                    _call_with_tools(config, system_message, messages, tools=tools)
+                    _call_with_tools(
+                        effective_config, system_message, messages, tools=tools
+                    )
                 )
                 while True:
                     _done, _ = await asyncio.wait({_llm_fut}, timeout=30)
@@ -5731,11 +8356,121 @@ async def thinking_agentic_loop(
                         except Exception:
                             pass
                 content_blocks, stop_reason, raw_content = _llm_fut.result()
+                if str(stop_reason or "").lower() == "content_filtered":
+                    raise LLMContentFilteredError(
+                        "LLM provider refused the scan request "
+                        "(native stop reason: content_filtered)"
+                    )
+                # A completed turn means we are past any earlier refusal.
+                consecutive_refusals = 0
+                network_attempt = 0
+                recovered_turn = bool(
+                    recovery_active
+                    and recovery_marker is not None
+                    and recovery_marker.get("attempt") == "sent"
+                    and recovery_marker.get("step") == tool_call_count + 1
+                )
+                recovered_stage = (
+                    recovery_marker.get("stage", "rewritten")
+                    if recovered_turn
+                    else None
+                )
+                if recovery_active and recovery_marker is not None:
+                    recovery_marker["attempt"] = "completed"
+                    # The scoped retry was accepted, so drop back out of
+                    # recovery: restore the full prompt and clear the latch so a
+                    # later, independent cyber refusal earns its own scoped
+                    # retry instead of falling through to retry-once-then-skip.
+                    recovery_active = False
+                    system_message = baseline_system_message
             except Exception as exc:
-                log.error(
+                error_message = describe_exception(exc)
+                if (
+                    not isinstance(exc, LLMQuotaPauseError)
+                    and not _is_llm_refusal(exc)
+                    and is_transient_provider_error(exc)
+                ):
+                    overloaded = is_overloaded_provider_error(exc)
+                    if network_attempt >= len(AGENTIC_NETWORK_RETRY_DELAYS):
+                        log.warning(
+                            "thinking_agentic_loop: LLM provider %s at "
+                            "step %d after %d retries: %s",
+                            "overloaded" if overloaded else "unreachable",
+                            tool_call_count + 1,
+                            network_attempt,
+                            error_message,
+                        )
+                        if overloaded:
+                            raise LLMNetworkPauseError(
+                                "The LLM provider stayed overloaded after "
+                                f"{network_attempt} retries, so the scan was paused "
+                                "at its last saved step. Resume the scan to try "
+                                f"again. Last error: {error_message}"
+                            ) from exc
+                        raise LLMNetworkPauseError(
+                            "The LLM provider could not be reached after "
+                            f"{network_attempt} retries, so the scan was paused at "
+                            "its last saved step. Check your network connection and "
+                            f"provider sign-in, then resume the scan. Last error: "
+                            f"{error_message}"
+                        ) from exc
+                    # Provider overload clears on its own timescale, so wait about
+                    # a minute between tries instead of the fast network backoff.
+                    delay = (
+                        AGENTIC_OVERLOAD_RETRY_DELAY
+                        if overloaded
+                        else AGENTIC_NETWORK_RETRY_DELAYS[network_attempt]
+                    )
+                    network_attempt += 1
+                    log.warning(
+                        "thinking_agentic_loop: %s LLM error at step %d; "
+                        "retry %d/%d in %ss: %s",
+                        "overloaded" if overloaded else "temporary",
+                        tool_call_count + 1,
+                        network_attempt,
+                        len(AGENTIC_NETWORK_RETRY_DELAYS),
+                        delay,
+                        error_message,
+                    )
+                    if emit_fn:
+                        try:
+                            retry_reason = (
+                                "the LLM provider is overloaded"
+                                if overloaded
+                                else "could not reach the LLM provider"
+                            )
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "llm_response",
+                                    "status": "retrying",
+                                    "message": (
+                                        f"Step {tool_call_count + 1}: {retry_reason}. "
+                                        f"Retrying in {delay:g}s "
+                                        f"({network_attempt}/"
+                                        f"{len(AGENTIC_NETWORK_RETRY_DELAYS)})."
+                                    ),
+                                    "data": {
+                                        "step": tool_call_count + 1,
+                                        "error": error_message,
+                                        "error_type": type(exc).__name__,
+                                        "overloaded": overloaded,
+                                        "network_retry": network_attempt,
+                                        "network_retry_limit": len(
+                                            AGENTIC_NETWORK_RETRY_DELAYS
+                                        ),
+                                        "retry_delay_s": delay,
+                                    },
+                                }
+                            )
+                        except Exception:
+                            pass
+                    await _sleep_unless_stopped(delay, stop_check)
+                    continue
+                log.exception(
                     "thinking_agentic_loop: API error at step %d: %s",
                     tool_call_count + 1,
-                    exc,
+                    error_message,
                 )
                 _is_refusal = _is_llm_refusal(exc)
                 _is_quota_pause = isinstance(exc, LLMQuotaPauseError)
@@ -5758,29 +8493,235 @@ async def thinking_agentic_loop(
                                 "Please refresh your AWS credentials and resume the pentest."
                             )
                         elif _is_refusal:
-                            _msg = f"Step {tool_call_count + 1}: LLM provider refused the scan request — {exc}"
+                            _msg = f"Step {tool_call_count + 1}: LLM provider refused the scan request — {error_message}"
                         elif _is_quota_pause:
-                            _msg = f"Step {tool_call_count + 1}: scan paused because the Codex allowance or rate-limit window is exhausted — {exc}"
+                            _msg = f"Step {tool_call_count + 1}: scan paused because the Codex allowance or rate-limit window is exhausted — {error_message}"
                         else:
-                            _msg = f"Step {tool_call_count + 1}: LLM API error — {exc}"
+                            _msg = f"Step {tool_call_count + 1}: LLM API error — {error_message}"
                         emit_fn(
                             {
                                 "type": "scanner_phase",
                                 "phase": "llm_response",
-                                "status": "warning" if _is_quota_pause else "error",
+                                "status": (
+                                    "warning"
+                                    if (_is_quota_pause or _is_refusal)
+                                    else "error"
+                                ),
                                 "message": _msg,
                                 "data": {
                                     "step": tool_call_count + 1,
-                                    "error": str(exc),
+                                    "error": error_message,
+                                    "error_type": type(exc).__name__,
+                                    **(
+                                        {
+                                            "prompt": _refused_agentic_prompt(
+                                                system_message, messages, tools
+                                            )
+                                        }
+                                        if _is_refusal
+                                        else {}
+                                    ),
                                 },
                             }
                         )
                     except Exception:
                         pass
                 if _is_refusal:
-                    raise LLMRefusalError(
-                        f"LLM provider refused the scan request at step {tool_call_count + 1}: {exc}"
-                    ) from exc
+                    consecutive_refusals += 1
+                    if (
+                        consecutive_refusals == 1
+                        and not recovery_active
+                        and refusal_recovery_prompt is not None
+                        and _is_explicit_openai_cyber_refusal(config.provider, exc)
+                    ):
+                        candidate = copy.deepcopy(messages)
+                        candidate[0]["content"] = _scoped_opening_with_journal(
+                            candidate[0].get("content"),
+                            refusal_recovery_prompt.initial_user,
+                        )
+                        candidate[0]["_openai_refusal_recovery"] = {
+                            "template_id": refusal_recovery_prompt.template_id,
+                            "attempt": "sent",
+                            "stage": "rewritten",
+                            "step": tool_call_count + 1,
+                        }
+                        if on_recovery_checkpoint:
+                            await on_recovery_checkpoint(candidate, tool_call_count)
+                        if config.provider == "openai_codex":
+                            from aespa.services import codex_provider
+
+                            await codex_provider.close_conversation(messages)
+                        messages = candidate
+                        system_message = refusal_recovery_prompt.system
+                        recovery_active = True
+                        recovery_marker = messages[0]["_openai_refusal_recovery"]
+                        if emit_fn:
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "llm_response",
+                                    "status": "retrying",
+                                    "message": (
+                                        f"Step {tool_call_count + 1}: retrying the OpenAI "
+                                        "cyber refusal with shorter instructions."
+                                    ),
+                                    "data": {
+                                        "step": tool_call_count + 1,
+                                        "provider": config.provider,
+                                        "recovery_template": refusal_recovery_prompt.template_id,
+                                    },
+                                }
+                            )
+                        continue
+                    if (
+                        consecutive_refusals == 2
+                        and recovery_active
+                        and recovery_marker is not None
+                        and recovery_marker.get("attempt") == "sent"
+                        and recovery_marker.get("stage", "rewritten") == "rewritten"
+                        and refusal_recovery_prompt is not None
+                        and _is_explicit_openai_cyber_refusal(config.provider, exc)
+                    ):
+                        candidate = [
+                            {
+                                "role": "user",
+                                "content": initial_user_message,
+                                "_openai_refusal_recovery": {
+                                    "template_id": refusal_recovery_prompt.template_id,
+                                    "attempt": "sent",
+                                    "stage": "fresh",
+                                    "step": tool_call_count + 1,
+                                },
+                            },
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Resume this authorized assessment from saved scan data. "
+                                    "Use context_tool to check current coverage or evidence "
+                                    "for the assigned target, then choose a different "
+                                    "in-scope test. Do not repeat the last attempted test."
+                                ),
+                            },
+                        ]
+                        if on_recovery_checkpoint:
+                            await on_recovery_checkpoint(candidate, tool_call_count)
+                        if config.provider == "openai_codex":
+                            from aespa.services import codex_provider
+
+                            await codex_provider.close_conversation(messages)
+                        messages = candidate
+                        recovery_marker = candidate[0]["_openai_refusal_recovery"]
+                        if emit_fn:
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "llm_response",
+                                    "status": "retrying",
+                                    "message": (
+                                        f"Step {tool_call_count + 1}: shorter OpenAI retry "
+                                        "was refused; retrying with fresh context."
+                                    ),
+                                    "data": {
+                                        "step": tool_call_count + 1,
+                                        "provider": config.provider,
+                                        "refusal_recovery": "fresh_context",
+                                    },
+                                }
+                            )
+                        continue
+                    retry_limit = 2 if isinstance(exc, LLMContentFilteredError) else 1
+                    if consecutive_refusals <= retry_limit:
+                        if emit_fn:
+                            try:
+                                emit_fn(
+                                    {
+                                        "type": "scanner_phase",
+                                        "phase": "llm_response",
+                                        "status": "warning",
+                                        "message": (
+                                            f"Step {tool_call_count + 1}: provider refused "
+                                            "this request; retrying "
+                                            f"({consecutive_refusals}/{retry_limit}) "
+                                            "before skipping it."
+                                        ),
+                                        "data": {
+                                            "step": tool_call_count + 1,
+                                            "refusal_retry": consecutive_refusals,
+                                        },
+                                    }
+                                )
+                            except Exception:
+                                pass
+                        continue
+                    # The request was refused after its retries. Move to another test.
+                    fresh_retry_refused = bool(
+                        recovery_active
+                        and recovery_marker is not None
+                        and recovery_marker.get("attempt") == "sent"
+                        and recovery_marker.get("stage") == "fresh"
+                        and recovery_marker.get("step") == tool_call_count + 1
+                    )
+                    refusal_skips += 1
+                    if recovery_active and config.provider == "openai_codex":
+                        from aespa.services import codex_provider
+
+                        await codex_provider.close_conversation(messages)
+                        messages = list(messages)
+                    if not recovery_active:
+                        _drop_last_agentic_exchange(messages)
+                    refused_attempts = consecutive_refusals
+                    refused_count = (
+                        "twice"
+                        if refused_attempts == 2
+                        else f"{refused_attempts} times"
+                    )
+                    _append_agentic_user_steer(
+                        messages,
+                        (
+                            "Choose a different in-scope test. Do not repeat the last "
+                            "attempted endpoint, payload, or line of investigation."
+                            if recovery_active
+                            and recovery_marker is not None
+                            and recovery_marker.get("stage") == "fresh"
+                            else "The model provider's safety filter refused the previous "
+                            f"request {refused_count}. Do NOT repeat that endpoint, payload, or line "
+                            "of investigation. Abandon it and continue the assessment on a "
+                            "completely different attack surface or vulnerability class."
+                        ),
+                    )
+                    consecutive_refusals = 0
+                    if recovery_active and recovery_marker is not None:
+                        recovery_marker["attempt"] = "unresolved"
+                    if emit_fn:
+                        try:
+                            emit_fn(
+                                {
+                                    "type": "scanner_phase",
+                                    "phase": "llm_response",
+                                    "status": "warning",
+                                    "message": (
+                                        f"Step {tool_call_count + 1}: OpenAI retry with "
+                                        "fresh context was refused. Leaving this test unresolved "
+                                        "and moving to a different target."
+                                        if fresh_retry_refused
+                                        else f"Step {tool_call_count + 1}: provider refused this "
+                                        f"request {refused_count} — skipping it and moving to a "
+                                        "different target."
+                                    ),
+                                    "data": {
+                                        "step": tool_call_count + 1,
+                                        "refusal_skips": refusal_skips,
+                                        **(
+                                            {"refusal_recovery": "refused"}
+                                            if fresh_retry_refused
+                                            else {}
+                                        ),
+                                    },
+                                }
+                            )
+                        except Exception:
+                            pass
+                    continue
                 # A provider/serialization failure is not a successful terminal
                 # condition. Propagate it so the owning scan is marked failed and
                 # can be resumed from the final checkpoint.
@@ -5813,7 +8754,17 @@ async def thinking_agentic_loop(
                 "message_count": len(messages),
                 "context_chars": len(json.dumps(messages, default=str)),
                 "provider_diagnostics": provider_diagnostics,
+                "context_limit_tokens": budget["context_limit_tokens"],
+                "input_tokens": budget["input_tokens"],
+                "safety_tokens": budget["safety_tokens"],
+                "configured_max_output_tokens": budget["configured_max_output_tokens"],
+                "effective_max_output_tokens": budget["effective_max_output_tokens"],
+                "configured_max_tokens": budget["configured_max_tokens"],
+                "effective_max_tokens": budget["effective_max_tokens"],
             }
+            if recovered_turn:
+                response_data["refusal_recovery"] = "accepted"
+                response_data["refusal_recovery_stage"] = recovered_stage
             if not tool_use_blocks:
                 response_data["no_tool_retry"] = no_tool_attempt
                 response_data["no_tool_retry_limit"] = 3
@@ -5822,14 +8773,34 @@ async def thinking_agentic_loop(
                 if tool_use_blocks:
                     action_label = ", ".join(b["name"] for b in tool_use_blocks)
                     response_status = "complete"
-                    response_message = f"Step {tool_call_count + 1}: LLM → {action_label} (stop: {stop_reason})"
+                    response_message = (
+                        (
+                            f"Step {tool_call_count + 1}: OpenAI retry with fresh context "
+                            f"accepted; continuing with {action_label}."
+                            if recovered_stage == "fresh"
+                            else f"Step {tool_call_count + 1}: shorter OpenAI retry "
+                            f"accepted; continuing with {action_label}."
+                        )
+                        if recovered_turn
+                        else f"Step {tool_call_count + 1}: LLM → {action_label} (stop: {stop_reason})"
+                    )
                 else:
                     response_status = "retrying"
                     response_kind = (
                         "empty response" if no_usable_content else "text-only response"
                     )
                     response_message = (
-                        f"Step {tool_call_count + 1}: LLM returned {response_kind} "
+                        (
+                            f"Step {tool_call_count + 1}: OpenAI retry with fresh context "
+                            f"was accepted but returned {response_kind} without a tool "
+                            f"call; asking again ({no_tool_attempt}/3)."
+                            if recovered_stage == "fresh"
+                            else f"Step {tool_call_count + 1}: shorter OpenAI retry was "
+                            f"accepted but returned {response_kind} without a tool call; "
+                            f"asking again ({no_tool_attempt}/3)."
+                        )
+                        if recovered_turn
+                        else f"Step {tool_call_count + 1}: LLM returned {response_kind} "
                         f"without a tool call (native stop: {stop_reason}); "
                         f"retrying {no_tool_attempt}/3"
                     )
@@ -5849,13 +8820,40 @@ async def thinking_agentic_loop(
             # Append the assistant turn to the growing conversation. Preserve a
             # non-empty marker when a provider returns no usable blocks so the
             # checkpoint itself remains valid for every messages API on resume.
-            assistant_content = raw_content or [
-                {
-                    "type": "text",
-                    "text": "[The model returned no usable content blocks.]",
-                }
-            ]
+            assistant_content = (
+                _repair_tool_use_inputs(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": [
+                                _canonical_content_block(block) for block in raw_content
+                            ],
+                        }
+                    ]
+                )[0]["content"]
+                if isinstance(raw_content, list) and raw_content
+                else [
+                    {
+                        "type": "text",
+                        "text": "[The model returned no usable content blocks.]",
+                    }
+                ]
+            )
             messages.append({"role": "assistant", "content": assistant_content})
+
+            # Save the model turn before any requested tool runs. A process can
+            # be killed while a browser, shell, or source tool is executing, in
+            # which case the normal post-tool checkpoint and finally block do
+            # not run. On resume, a trailing assistant tool call is repaired
+            # with an interrupted result so the model can reassess it safely.
+            if on_checkpoint:
+                try:
+                    await on_checkpoint(messages, tool_call_count)
+                except Exception:
+                    log.warning(
+                        "thinking_agentic_loop: pre-tool checkpoint failed",
+                        exc_info=True,
+                    )
 
             if not tool_use_blocks:
                 # OpenAI-style reasoning models occasionally narrate the next step instead
@@ -5906,7 +8904,7 @@ async def thinking_agentic_loop(
                                     text_only_repair_message
                                     or (
                                         "Your previous response did not call a tool, so no scan action "
-                                        "was executed. Continue by calling exactly one tool now. Use "
+                                        "was executed. Continue by calling a tool now. Use "
                                         "http_request, browser, context_tool, write_finding, forge_jwt, "
                                         "decode_jwt, credential_check, or register_account for the next "
                                         "assessment step. Call done only if the assessment is genuinely "
@@ -5944,6 +8942,12 @@ async def thinking_agentic_loop(
                     break
 
                 if tool_input_error:
+                    if str(stop_reason or "").lower() in _OUTPUT_LIMIT_STOP_REASONS:
+                        tool_input_error = (
+                            "This tool call was cut off because the response reached "
+                            "the output token limit, so it was not run. Call it again, "
+                            "and make fewer or shorter tool calls in each response."
+                        )
                     log.warning(
                         "thinking_agentic_loop: invalid input for tool %r: %s",
                         tool_name,
@@ -6066,16 +9070,31 @@ async def thinking_agentic_loop(
                 )
                 if len(result_str) > limit:
                     omitted = len(result_str) - limit
-                    result_str = (
-                        result_str[:limit]
-                        + f"\n[{omitted} chars omitted — use context_tool/history_search for details]"
-                    )
+                    result_str = result_str[:limit] + _tool_result_omitted_note(omitted)
 
                 tool_results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
                         "content": result_str,
+                    }
+                )
+
+            # Providers require a result for every tool call in a response, so
+            # calls skipped after `done` or a stop request still get one.
+            answered_ids = {r.get("tool_use_id") for r in tool_results}
+            for block in tool_use_blocks:
+                skipped_id = block.get("id") or ""
+                if skipped_id in answered_ids:
+                    continue
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": skipped_id,
+                        "content": (
+                            "Not run: an earlier call in this response ended the "
+                            "step. Call this tool again if you still need it."
+                        ),
                     }
                 )
 

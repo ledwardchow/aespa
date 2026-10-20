@@ -1,11 +1,37 @@
+import { fmtDate } from "../../shared/lib/dates.js";
 import * as statisticsApi from "../../shared/api/statistics.js";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { fmtTok } from "../../shared/ui/TokenUsageBar.jsx";
+import { fmtUsd } from "../../shared/lib/money.ts";
 
 function currentMonth() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function localDate(value = new Date()) {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+}
+
+function shiftDate(day, amount) {
+  const [year, month, date] = day.split("-").map(Number);
+  return localDate(new Date(year, month - 1, date + amount));
+}
+
+function dateLabel(day) {
+  const [year, month, date] = day.split("-").map(Number);
+  return new Date(year, month - 1, date).toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function weekStart(day) {
+  const [year, month, date] = day.split("-").map(Number);
+  const weekday = new Date(year, month - 1, date).getDay();
+  return shiftDate(day, -(weekday === 0 ? 6 : weekday - 1));
 }
 
 function shiftMonth(month, amount) {
@@ -22,11 +48,6 @@ function monthLabel(month) {
   });
 }
 
-function fmtUsd(value) {
-  if (value === null || value === undefined) return "—";
-  return `$${Number(value).toFixed(4)}`;
-}
-
 function fmtCount(value) {
   return Number(value || 0).toLocaleString();
 }
@@ -38,11 +59,14 @@ function providerLabel(provider) {
     openai_compatible: "OpenAI-compatible",
     anthropic: "Anthropic",
     google: "Google",
+    google_vertex: "Google Vertex AI",
     bedrock: "Amazon Bedrock",
     bedrock_mantle: "Amazon Bedrock Mantle",
     github_copilot: "GitHub Copilot",
     factory_droid: "Factory Droid",
+    claude_cli: "Claude CLI",
     openai_codex: "OpenAI Codex subscription",
+    openai_chatgpt_plan: "ChatGPT plan",
     azure_openai: "Azure OpenAI",
     azure_foundry: "Azure AI Foundry",
     azure_foundry_openai: "Azure AI Foundry",
@@ -69,7 +93,13 @@ function PriceEditor({ row, month, onSaved, onCancel }) {
     setBusy(true);
     setError(null);
     try {
-      const payload = { month, provider: row.provider, model: row.model, ...form };
+      const payload = {
+        month,
+        provider: row.provider,
+        model: row.model,
+        service_tier: row.service_tier || "",
+        ...form,
+      };
       for (const key of [
         "input_price_usd_per_million",
         "output_price_usd_per_million",
@@ -140,13 +170,12 @@ function PriceEditor({ row, month, onSaved, onCancel }) {
   );
 }
 
-function UsageSummary({ title, stats = {}, headerContent }) {
+function UsageSummary({ title, stats = {} }) {
   return (
-    <div className="panel">
+    <div className="panel usage-summary">
       <div className="panel-header">
         <h2>{title}</h2>
         <span className="subtle">{fmtCount(stats.requests)} calls</span>
-        {headerContent}
       </div>
       <div className="stats-grid">
         <div className="stat-card">
@@ -183,21 +212,187 @@ function UsageSummary({ title, stats = {}, headerContent }) {
   );
 }
 
+function rowKey(row) {
+  return `${row.month}:${row.provider}:${row.model}:${row.service_tier || ""}`;
+}
+
+function groupByProvider(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    if (!groups.has(row.provider)) groups.set(row.provider, []);
+    groups.get(row.provider).push(row);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => providerLabel(a).localeCompare(providerLabel(b)))
+    .map(([provider, providerRows]) => ({
+      provider,
+      rows: providerRows.sort(
+        (a, b) =>
+          a.model.localeCompare(b.model) ||
+          b.month.localeCompare(a.month) ||
+          (a.service_tier || "").localeCompare(b.service_tier || ""),
+      ),
+    }));
+}
+
+function UsageTable({ provider, rows, onSaved }) {
+  const [editing, setEditing] = useState(null);
+  const calls = rows.reduce((sum, row) => sum + (row.requests || 0), 0);
+  const pricedRows = rows.filter((row) => row.estimated_total_cost_usd != null);
+  const cost = pricedRows.length
+    ? pricedRows.reduce((sum, row) => sum + row.estimated_total_cost_usd, 0)
+    : null;
+  const missingPrices = rows.some(
+    (row) => row.provider !== "google_antigravity" && row.estimated_total_cost_usd == null,
+  );
+  return (
+    <div className="panel stats-provider-panel">
+      <div className="panel-header stats-provider-header">
+        <h2>{providerLabel(provider)}</h2>
+        <span className="subtle">{fmtCount(calls)} calls</span>
+        <div className="stats-provider-total">
+          <span>Estimated cost</span>
+          <strong>{provider === "google_antigravity" ? "Included" : fmtUsd(cost)}</strong>
+          {missingPrices && <small>Some models have no price</small>}
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table className="stats-table">
+          <colgroup>
+            <col className="stats-provider-col" />
+            <col className="stats-calls-col" />
+            <col className="stats-token-col" />
+            <col className="stats-token-col" />
+            <col className="stats-token-col" />
+            <col className="stats-token-col" />
+            <col className="stats-credit-col" />
+            <col className="stats-cost-col" />
+            <col className="stats-action-col" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Calls</th>
+              <th>Input</th>
+              <th>Output</th>
+              <th>Cache read</th>
+              <th>Cache write</th>
+              <th>Native credits</th>
+              <th>Cost</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <React.Fragment key={rowKey(row)}>
+                <tr>
+                  <td>
+                    <div className="mono">{row.model}</div>
+                    <div className="subtle">{monthLabel(row.month)}</div>
+                    {row.service_tier && (
+                      <span className="stats-tier-label">
+                        {["fast", "priority"].includes(row.service_tier)
+                          ? "Fast mode"
+                          : row.service_tier}
+                      </span>
+                    )}
+                    {row.base_url && (
+                      <div className="mono subtle stats-base-url" title={row.base_url}>
+                        {row.base_url}
+                      </div>
+                    )}
+                  </td>
+                  <td>{fmtCount(row.requests)}</td>
+                  <td>{fmtTok(row.input_tokens)}</td>
+                  <td>{fmtTok(row.output_tokens)}</td>
+                  <td>{fmtTok(row.cache_read_tokens)}</td>
+                  <td>{fmtTok(row.cache_write_tokens)}</td>
+                  <td>
+                    {row.ai_credits > 0
+                      ? `${fmtCount(row.ai_credits)} Copilot`
+                      : row.factory_credits > 0
+                        ? `${fmtCount(row.factory_credits)} Factory`
+                        : "—"}
+                  </td>
+                  <td title={row.prices?.confidence || ""}>
+                    {row.provider === "google_antigravity"
+                      ? "Included"
+                      : fmtUsd(row.estimated_total_cost_usd)}
+                  </td>
+                  <td>
+                    {row.provider === "google_antigravity" ? (
+                      <span className="subtle">Included</span>
+                    ) : (
+                      <button
+                        className="btn ghost sm"
+                        onClick={() => setEditing(editing === rowKey(row) ? null : rowKey(row))}
+                      >
+                        Prices
+                      </button>
+                    )}
+                  </td>
+                </tr>
+                {editing === rowKey(row) && (
+                  <tr>
+                    <td colSpan="9">
+                      <PriceEditor
+                        row={row}
+                        month={row.month}
+                        onSaved={() => {
+                          setEditing(null);
+                          onSaved();
+                        }}
+                        onCancel={() => setEditing(null)}
+                      />
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function StatisticsPage() {
+  const [view, setView] = useState("monthly");
   const [month, setMonth] = useState(currentMonth);
+  const [day, setDay] = useState(localDate);
+  const [start, setStart] = useState(localDate);
+  const [end, setEnd] = useState(localDate);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [editing, setEditing] = useState(null);
+  const requestId = useRef(0);
+
+  const selection = useMemo(() => {
+    if (view === "monthly") return { view, month };
+    if (view === "weekly" || view === "daily") return { view, date: day };
+    if (view === "custom") return { view, start, end };
+    return { view };
+  }, [view, month, day, start, end]);
+  const invalidRange = view === "custom" && (!start || !end || start > end);
 
   const load = useCallback(async () => {
+    const id = ++requestId.current;
+    if (invalidRange) {
+      setData(null);
+      setError(null);
+      return;
+    }
     try {
       setError(null);
-      setData(await statisticsApi.getLLMStatistics(month));
+      const result = await statisticsApi.getLLMStatistics(selection);
+      if (id === requestId.current) setData(result);
     } catch (e) {
-      setError(e.message);
+      if (id === requestId.current) {
+        setData(null);
+        setError(e.message);
+      }
     }
-  }, [month]);
+  }, [selection, invalidRange]);
   useEffect(() => {
     load();
   }, [load]);
@@ -239,41 +434,25 @@ export function StatisticsPage() {
     }
   };
 
+  const rows = data?.rows || [];
+  const providers = groupByProvider(rows);
   const totals = data?.totals || {};
-  const lifetime = data?.lifetime || {};
-  const monthlyHeader = (
-    <>
-      <span className="stats-month-controls">
-        <button className="btn ghost" onClick={() => setMonth((m) => shiftMonth(m, -1))}>
-          ‹
-        </button>
-        <select
-          value={month}
-          onChange={(e) => setMonth(e.target.value)}
-          aria-label="Statistics month"
-        >
-          {months.map((value) => (
-            <option key={value} value={value}>
-              {monthLabel(value)}
-            </option>
-          ))}
-        </select>
-        <button className="btn ghost" onClick={() => setMonth((m) => shiftMonth(m, 1))}>
-          ›
-        </button>
-      </span>
-      <span className="subtle stats-price-meta">
-        Price data:{" "}
-        {data?.price_feed?.fetched_at
-          ? new Date(data.price_feed.fetched_at).toLocaleString()
-          : "not downloaded"}
-      </span>
-    </>
-  );
+  const periodLabel =
+    view === "all_time"
+      ? "All-time"
+      : view === "monthly"
+        ? monthLabel(month)
+        : view === "daily"
+          ? dateLabel(day)
+          : view === "weekly"
+            ? `${dateLabel(weekStart(day))} - ${dateLabel(shiftDate(weekStart(day), 6))}`
+            : start && end
+              ? `${dateLabel(start)} - ${dateLabel(end)}`
+              : "Custom range";
   return (
     <>
       <div className="topbar">
-        <div className="topbar-title">LLM Statistics</div>
+        <div className="topbar-title">Usage</div>
         <div className="topbar-actions">
           <button className="btn secondary" onClick={refresh} disabled={busy}>
             {busy ? "Working…" : "Refresh prices"}
@@ -286,128 +465,124 @@ export function StatisticsPage() {
       <div className="content scroll-content">
         <div className="page-body">
           {error && <div className="error-banner">{error}</div>}
-          <UsageSummary
-            title="Lifetime"
-            stats={lifetime}
-            headerContent={
-              <span className="subtle stats-summary-meta">
-                {fmtCount(lifetime.months)} month{lifetime.months === 1 ? "" : "s"}
-              </span>
-            }
-          />
-          <UsageSummary
-            title={`Monthly · ${monthLabel(month)}`}
-            stats={totals}
-            headerContent={monthlyHeader}
-          />
-          <div className="panel">
-            <div className="panel-header">
-              <h2>Provider and model breakdown</h2>
-              <span className="subtle">{fmtCount(totals.requests)} calls</span>
-            </div>
-            {!data || data.rows.length === 0 ? (
-              <div className="empty-state">
-                <strong>No usage recorded for {monthLabel(month)}</strong>
-                <span>LLM calls will appear here as they complete.</span>
+          <div className="panel stats-period-panel">
+            <div className="stats-period-toolbar">
+              <div className="stats-view-tabs" role="group" aria-label="Usage period">
+                {[
+                  ["all_time", "All-time"],
+                  ["monthly", "Monthly"],
+                  ["weekly", "Weekly"],
+                  ["daily", "Daily"],
+                  ["custom", "Custom"],
+                ].map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className="stats-view-button"
+                    aria-pressed={view === value}
+                    onClick={() => setView(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
-            ) : (
-              <div className="table-wrap">
-                <table className="stats-table">
-                  <colgroup>
-                    <col className="stats-provider-col" />
-                    <col className="stats-calls-col" />
-                    <col className="stats-token-col" />
-                    <col className="stats-token-col" />
-                    <col className="stats-token-col" />
-                    <col className="stats-token-col" />
-                    <col className="stats-credit-col" />
-                    <col className="stats-cost-col" />
-                    <col className="stats-action-col" />
-                  </colgroup>
-                  <thead>
-                    <tr>
-                      <th>Provider / model</th>
-                      <th>Calls</th>
-                      <th>Input</th>
-                      <th>Output</th>
-                      <th>Cache read</th>
-                      <th>Cache write</th>
-                      <th>Native credits</th>
-                      <th>Cost</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.rows.map((row) => (
-                      <React.Fragment key={`${row.provider}:${row.model}`}>
-                        <tr>
-                          <td>
-                            <div>{providerLabel(row.provider)}</div>
-                            <div className="mono subtle">{row.model}</div>
-                            {row.base_url && (
-                              <div className="mono subtle stats-base-url" title={row.base_url}>
-                                {row.base_url}
-                              </div>
-                            )}
-                          </td>
-                          <td>{fmtCount(row.requests)}</td>
-                          <td>{fmtTok(row.input_tokens)}</td>
-                          <td>{fmtTok(row.output_tokens)}</td>
-                          <td>{fmtTok(row.cache_read_tokens)}</td>
-                          <td>{fmtTok(row.cache_write_tokens)}</td>
-                          <td>
-                            {row.ai_credits > 0
-                              ? `${fmtCount(row.ai_credits)} Copilot`
-                              : row.factory_credits > 0
-                                ? `${fmtCount(row.factory_credits)} Factory`
-                                : "—"}
-                          </td>
-                          <td title={row.prices?.confidence || ""}>
-                            {row.provider === "google_antigravity"
-                              ? "Included"
-                              : fmtUsd(row.estimated_total_cost_usd)}
-                          </td>
-                          <td>
-                            {row.provider === "google_antigravity" ? (
-                              <span className="subtle">Included</span>
-                            ) : (
-                              <button
-                                className="btn ghost sm"
-                                onClick={() =>
-                                  setEditing(
-                                    editing === `${row.provider}:${row.model}`
-                                      ? null
-                                      : `${row.provider}:${row.model}`,
-                                  )
-                                }
-                              >
-                                Prices
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                        {editing === `${row.provider}:${row.model}` && (
-                          <tr>
-                            <td colSpan="9">
-                              <PriceEditor
-                                row={row}
-                                month={month}
-                                onSaved={() => {
-                                  setEditing(null);
-                                  load();
-                                }}
-                                onCancel={() => setEditing(null)}
-                              />
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
+              {view === "monthly" && (
+                <div className="stats-period-controls">
+                  <button
+                    className="btn ghost stats-period-arrow"
+                    aria-label="Previous month"
+                    onClick={() => setMonth((m) => shiftMonth(m, -1))}
+                  >
+                    ‹
+                  </button>
+                  <select
+                    value={month}
+                    onChange={(e) => setMonth(e.target.value)}
+                    aria-label="Statistics month"
+                  >
+                    {months.map((value) => (
+                      <option key={value} value={value}>
+                        {monthLabel(value)}
+                      </option>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                  </select>
+                  <button
+                    className="btn ghost stats-period-arrow"
+                    aria-label="Next month"
+                    onClick={() => setMonth((m) => shiftMonth(m, 1))}
+                  >
+                    ›
+                  </button>
+                </div>
+              )}
+              {(view === "weekly" || view === "daily") && (
+                <div className="stats-period-controls">
+                  <button
+                    className="btn ghost stats-period-arrow"
+                    aria-label={`Previous ${view === "weekly" ? "week" : "day"}`}
+                    onClick={() => setDay((d) => shiftDate(d, view === "weekly" ? -7 : -1))}
+                  >
+                    ‹
+                  </button>
+                  <label>
+                    {view === "weekly" ? "Week containing" : "Date"}
+                    <input type="date" value={day} onChange={(e) => setDay(e.target.value)} />
+                  </label>
+                  <button
+                    className="btn ghost stats-period-arrow"
+                    aria-label={`Next ${view === "weekly" ? "week" : "day"}`}
+                    onClick={() => setDay((d) => shiftDate(d, view === "weekly" ? 7 : 1))}
+                  >
+                    ›
+                  </button>
+                </div>
+              )}
+              {view === "custom" && (
+                <div className="stats-period-controls">
+                  <label>
+                    Start date
+                    <input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
+                  </label>
+                  <label>
+                    End date
+                    <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
+                  </label>
+                  {invalidRange && (
+                    <span className="error-text">
+                      Choose an end date on or after the start date.
+                    </span>
+                  )}
+                </div>
+              )}
+              <span className="subtle stats-price-meta">
+                Price data:{" "}
+                {data?.price_feed?.fetched_at
+                  ? fmtDate(data.price_feed.fetched_at)
+                  : "not downloaded"}
+              </span>
+            </div>
           </div>
+          {view !== "all_time" && view !== "monthly" && data?.legacy_months?.length > 0 && (
+            <div className="stats-history-note">
+              Older usage in {data.legacy_months.map(monthLabel).join(", ")} was saved by month only
+              and is not included in this date range. See Monthly or All-time for those totals.
+            </div>
+          )}
+          <UsageSummary title={periodLabel} stats={totals} />
+          {providers.length === 0 ? (
+            <div className="panel empty-state">
+              <strong>
+                {invalidRange
+                  ? "Choose a valid date range"
+                  : `No usage recorded for ${periodLabel}`}
+              </strong>
+              <span>LLM calls will appear here as they complete.</span>
+            </div>
+          ) : (
+            providers.map(({ provider, rows: providerRows }) => (
+              <UsageTable key={provider} provider={provider} rows={providerRows} onSaved={load} />
+            ))
+          )}
         </div>
       </div>
     </>

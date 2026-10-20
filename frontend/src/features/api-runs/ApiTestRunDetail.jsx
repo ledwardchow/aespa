@@ -3,7 +3,10 @@ import { useState, useEffect } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
-import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { PageHeader, Breadcrumbs } from "../../shared/ui/PageHeader.jsx";
+import { useRecordName } from "../../shared/hooks/useRecordName.ts";
+import * as apiCollectionsApi from "../../shared/api/apiCollections.js";
+import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import { formatPhase, formatTerminalReason } from "../../shared/runs/presentation.jsx";
 import { ApiRunStatusTab } from "./ApiRunStatusTab.jsx";
 import { ApiRunFindingsTab } from "./ApiRunFindingsTab.jsx";
@@ -12,48 +15,41 @@ import { ApiRunSessionsTab } from "./ApiRunSessionsTab.jsx";
 import { ApiRunTrafficTab } from "./ApiRunTrafficTab.jsx";
 import { ApiRunEndpointsTab } from "./ApiRunEndpointsTab.jsx";
 import { ApiRunWorkProgramTab } from "./ApiRunWorkProgramTab.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
+// Same order as web run tabs: overview, what was found to test, coverage,
+// sessions, results, raw traffic, imported SAST leads.
 const API_RUN_TABS = [
-  {
-    key: "status",
-    label: "Status",
-  },
-  {
-    key: "findings",
-    label: "Findings",
-  },
-  {
-    key: "leads",
-    label: "SAST Leads",
-  },
-  {
-    key: "sessions",
-    label: "Sessions",
-  },
-  {
-    key: "traffic",
-    label: "Traffic Log",
-  },
-  {
-    key: "endpoints",
-    label: "Endpoints",
-  },
-  {
-    key: "workprogram",
-    label: "OWASP Coverage",
-  },
+  { key: "status", label: "Status" },
+  { key: "endpoints", label: "Endpoints" },
+  { key: "workprogram", label: "OWASP Coverage" },
+  { key: "sessions", label: "Sessions" },
+  { key: "findings", label: "Findings" },
+  { key: "traffic", label: "Traffic Log" },
+  { key: "leads", label: "SAST Leads" },
 ];
 
 // Reuse the same alice session management infrastructure as TestRunDetail but
 // bound to the /api/api-test-runs/{id}/* alias routes.
 
-export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
+export function ApiTestRunDetail({
+  runId,
+  initialTab,
+  initialFindingRef,
+  findingIds,
+  coverageReturn,
+  initialLeadRef,
+  initialTrafficCoverage,
+}) {
   const [run, setRun] = useState(null);
   const [error, setError] = useState(null);
   const [scanStatus, setScanStatus] = useState(null);
   const [scanBusy, setScanBusy] = useState(false);
   const [coverageMode, setCoverageMode] = useState("track");
+  const [tokenUsage, setTokenUsage] = useState(null);
+  const [tokenExpanded, setTokenExpanded] = useState(false);
   const tab = API_RUN_TABS.some((item) => item.key === initialTab) ? initialTab : "status";
+  const collectionName = useRecordName(apiCollectionsApi.getApiCollection, run?.collection_id);
   useEffect(() => {
     apiRunsApi
       .getApiRun(runId)
@@ -67,6 +63,23 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
       .then(setScanStatus)
       .catch(() => {});
   }, [runId]);
+
+  useEffect(() => {
+    let active = true;
+    const loadUsage = () =>
+      apiRunsApi
+        .getApiTokenUsage(runId)
+        .then((usage) => {
+          if (active) setTokenUsage(usage);
+        })
+        .catch(() => {});
+    loadUsage();
+    const timer = setInterval(loadUsage, scanStatus?.running ? 3000 : 30000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [runId, scanStatus?.running]);
 
   // Poll scan status while scanning.
   useEffect(() => {
@@ -88,6 +101,15 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
     }, 3000);
     return () => clearInterval(t);
   }, [scanStatus?.running, runId]);
+
+  const scanEnded = scanStatus != null && !scanStatus.running;
+  useEffect(() => {
+    if (!scanEnded) return;
+    apiRunsApi
+      .getApiRun(runId)
+      .then(setRun)
+      .catch(() => {});
+  }, [scanEnded, runId]);
   const onStartScan = async () => {
     setScanBusy(true);
     try {
@@ -137,7 +159,7 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
   };
   const onDelete = async () => {
     if (!run) return;
-    if (!confirm(`Delete test run "${run.name}"?`)) return;
+    if (!confirm(`Delete run "${run.name}"?`)) return;
     try {
       await apiRunsApi.deleteApiRun(runId);
       nav(`#/apis/${run.collection_id}`);
@@ -162,30 +184,26 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
       <PageHeader
         title={
           <>
-            <Crumb href={run ? `#/apis/${run.collection_id}` : "#/apis"}>API collection</Crumb>
-            <Sep />
-            {run ? run.name : "…"}
+            <Breadcrumbs
+              items={[
+                { label: "APIs", href: "#/apis" },
+                run && {
+                  label: collectionName || "API collection",
+                  href: `#/apis/${run.collection_id}`,
+                },
+                { label: run ? run.name : "…" },
+              ]}
+            />
             {run && (
-              <>
-                {" "}
-                <StatusBadge status={run.status} />
-                {run.phase && run.phase !== "created" && (
-                  <span className="run-status-badge" style={{ marginLeft: 6, opacity: 0.85 }}>
-                    phase: {formatPhase(run.phase)}
-                  </span>
-                )}
-                {run.terminal_reason && (
-                  <span
-                    className="run-status-badge"
-                    style={{
-                      marginLeft: 6,
-                      color: run.outcome === "complete" ? "var(--ok)" : "var(--warn)",
-                    }}
-                  >
-                    reason: {formatTerminalReason(run.terminal_reason)}
-                  </span>
-                )}
-              </>
+              <StatusBadge
+                status={run.status}
+                title={[
+                  run.phase && run.phase !== "created" ? `Phase: ${formatPhase(run.phase)}` : "",
+                  run.terminal_reason ? `Ended: ${formatTerminalReason(run.terminal_reason)}` : "",
+                ]
+                  .filter(Boolean)
+                  .join("\n")}
+              />
             )}
           </>
         }
@@ -193,11 +211,11 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
           <>
             {scanRunning ? (
               <button className="btn danger-outline" disabled={scanBusy} onClick={onStopScan}>
-                {scanBusy ? "Stopping…" : "Stop Scan"}
+                {scanBusy ? "Stopping…" : "Stop scan"}
               </button>
             ) : run.status === "paused" ? (
               <button className="btn" disabled={scanBusy} onClick={onResumeScan}>
-                {scanBusy ? "Resuming…" : "Resume Scan"}
+                {scanBusy ? "Resuming…" : "Resume scan"}
               </button>
             ) : (
               <>
@@ -209,7 +227,7 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
                     gap: 6,
                     fontSize: 12,
                   }}
-                  title="Quick: observe coverage as the scan runs. Standard: require the configured percentage of applicable coverage cells. Full: drive every applicable endpoint × category to covered or skipped-with-reason. SAST Validate: validate only imported SAST leads."
+                  title="Quick: observe coverage as the scan runs. Standard: require the configured percentage of applicable coverage cells. Full: drive every applicable endpoint × category to covered or skipped-with-reason. Check SAST leads only: test only the leads imported from a SAST scan."
                 >
                   Scan mode:
                   <select
@@ -217,14 +235,18 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
                     disabled={scanBusy}
                     onChange={(e) => setCoverageMode(e.target.value)}
                   >
-                    <option value="track">Quick</option>
-                    <option value="standard">Standard</option>
-                    <option value="enforce">Full</option>
-                    <option value="sast_validate">SAST Validate</option>
+                    <optgroup label="Scan depth">
+                      <option value="track">Quick</option>
+                      <option value="standard">Standard</option>
+                      <option value="enforce">Full</option>
+                    </optgroup>
+                    <optgroup label="Other">
+                      <option value="sast_validate">Check SAST leads only</option>
+                    </optgroup>
                   </select>
                 </label>
                 <button className="btn" disabled={scanBusy} onClick={onStartScan}>
-                  {scanBusy ? "Starting…" : "Start Scan"}
+                  {scanBusy ? "Starting…" : "Start scan"}
                 </button>
               </>
             )}
@@ -247,12 +269,20 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
           </button>
         ))}
       </div>
+      <TokenUsageBar
+        tokenUsage={tokenUsage}
+        tokenExpanded={tokenExpanded}
+        setTokenExpanded={setTokenExpanded}
+      />
       <div
         className={
           "content no-padding" + (tab === "status" ? " flex-fill-noscroll" : " scroll-content")
         }
       >
-        {error && <div className="alert error">{error}</div>}
+        <PageError error={error} onDismiss={() => setError(null)} />
+        {run?.status === "failed" && run.error_message ? (
+          <div className="alert error">{run.error_message}</div>
+        ) : null}
         {tab === "status" && <ApiRunStatusTab runId={runId} scanRunning={scanRunning} />}
         {tab === "findings" && (
           <ApiRunFindingsTab
@@ -260,11 +290,21 @@ export function ApiTestRunDetail({ runId, initialTab, initialFindingRef }) {
             scanRunning={scanRunning}
             run={run}
             initialFindingRef={initialFindingRef}
+            findingIds={findingIds}
+            coverageReturn={coverageReturn}
           />
         )}
-        {tab === "leads" && <ApiRunLeadsTab runId={runId} scanRunning={scanRunning} />}
+        {tab === "leads" && (
+          <ApiRunLeadsTab runId={runId} scanRunning={scanRunning} initialLeadRef={initialLeadRef} />
+        )}
         {tab === "sessions" && <ApiRunSessionsTab runId={runId} scanRunning={scanRunning} />}
-        {tab === "traffic" && <ApiRunTrafficTab runId={runId} scanRunning={scanRunning} />}
+        {tab === "traffic" && (
+          <ApiRunTrafficTab
+            runId={runId}
+            scanRunning={scanRunning}
+            coverageFilter={initialTrafficCoverage}
+          />
+        )}
         {tab === "endpoints" && <ApiRunEndpointsTab run={run} />}
         {tab === "workprogram" && (
           <ApiRunWorkProgramTab runId={runId} scanRunning={scanRunning} run={run} />

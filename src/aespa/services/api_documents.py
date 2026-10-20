@@ -13,7 +13,7 @@ from pathlib import Path
 from sqlmodel import Session, select
 
 from aespa.config import get_settings
-from aespa.models import ApiCollection, ApiDocument
+from aespa.models import ApiCollection, ApiDocument, ApiEndpoint
 
 # 25 MiB per-file cap for v1.
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -165,13 +165,22 @@ def read_document_bytes(
 def delete_document(session: Session, collection_id: int, document_id: int) -> None:
     doc = get_document(session, collection_id, document_id)
     path = Path(doc.stored_path)
+    # Endpoints parsed from this document stay in the collection; they only
+    # lose their link to the deleted source file.
+    for endpoint in session.exec(
+        select(ApiEndpoint).where(ApiEndpoint.source_doc_id == document_id)
+    ).all():
+        endpoint.source_doc_id = None
+        session.add(endpoint)
+    session.flush()
+    session.delete(doc)
+    session.commit()
+    # Remove the file only after the database change succeeded.
     try:
         if path.is_file():
             path.unlink()
     except OSError:
         pass
-    session.delete(doc)
-    session.commit()
 
 
 def count_documents(session: Session, collection_id: int) -> int:

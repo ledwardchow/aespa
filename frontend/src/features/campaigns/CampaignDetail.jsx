@@ -9,6 +9,7 @@ import { CampaignRunsTab } from "./CampaignRunsTab.jsx";
 import { CampaignFindingsTab } from "./CampaignFindingsTab.jsx";
 import { CampaignActivityTab } from "./CampaignActivityTab.jsx";
 import { campaignDisplayStatus } from "../../shared/runs/campaignPresentation.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const CAMPAIGN_TABS = [
   { key: "runs", label: "Runs" },
@@ -24,10 +25,11 @@ const CAMPAIGN_TABS = [
 // controls, then the six tabs. Each tab owns its own data/state — this
 // shell only owns the campaign record and the actions that mutate its
 // lifecycle, so it never grows into a prop-bag monolith.
-export function CampaignDetail({ applicationId, campaignId, initialTab, initialFindingRef }) {
+export function CampaignDetail({ systemId, campaignId, initialTab, initialFindingRef }) {
   const {
     campaign,
     error,
+    setError,
     busy,
     load,
     start,
@@ -38,7 +40,7 @@ export function CampaignDetail({ applicationId, campaignId, initialTab, initialF
     rebuildConnections,
     continueToLive,
     isActive,
-  } = useCampaign(applicationId, campaignId);
+  } = useCampaign(systemId, campaignId);
   const tab = CAMPAIGN_TABS.some((t) => t.key === initialTab) ? initialTab : "runs";
 
   if (!campaign) {
@@ -69,7 +71,7 @@ export function CampaignDetail({ applicationId, campaignId, initialTab, initialF
       <PageHeader
         title={
           <>
-            <Crumb href={`#/applications/${applicationId}/campaigns`}>{"Campaigns"}</Crumb>
+            <Crumb href={`#/systems/${systemId}/campaigns`}>{"Campaigns"}</Crumb>
             <Sep />
             {campaign.name}
           </>
@@ -107,24 +109,18 @@ export function CampaignDetail({ applicationId, campaignId, initialTab, initialF
           <button
             key={t.key}
             className={"tab-btn" + (tab === t.key ? " active" : "")}
-            onClick={() => nav(`#/applications/${applicationId}/campaigns/${campaignId}/${t.key}`)}
+            onClick={() => nav(`#/systems/${systemId}/campaigns/${campaignId}/${t.key}`)}
           >
             {t.label}
           </button>
         ))}
       </div>
       <div className="content scroll-content">
-        {tab !== "runs" && error && (
-          <div className="alert error" style={{ marginBottom: 16 }}>
-            {error}
-          </div>
-        )}
-        {tab === "components" && (
-          <CampaignComponentsTab applicationId={applicationId} campaign={campaign} />
-        )}
+        <PageError error={error} onDismiss={() => setError(null)} />
+        {tab === "components" && <CampaignComponentsTab systemId={systemId} campaign={campaign} />}
         {tab === "connections" && (
           <CampaignConnectionsTab
-            applicationId={applicationId}
+            systemId={systemId}
             campaignId={campaignId}
             campaign={campaign}
             rebuildConnections={rebuildConnections}
@@ -133,7 +129,7 @@ export function CampaignDetail({ applicationId, campaignId, initialTab, initialF
         )}
         {tab === "review" && (
           <CampaignReviewTab
-            applicationId={applicationId}
+            systemId={systemId}
             campaignId={campaignId}
             campaign={campaign}
             onSubmitted={load}
@@ -144,9 +140,8 @@ export function CampaignDetail({ applicationId, campaignId, initialTab, initialF
         )}
         {tab === "runs" && (
           <CampaignRunsTab
-            applicationId={applicationId}
+            systemId={systemId}
             campaign={campaign}
-            error={error}
             resumeSource={resumeSource}
             resumeTarget={resumeTarget}
             busy={busy}
@@ -154,17 +149,13 @@ export function CampaignDetail({ applicationId, campaignId, initialTab, initialF
         )}
         {tab === "findings" && (
           <CampaignFindingsTab
-            applicationId={applicationId}
+            systemId={systemId}
             campaignId={campaignId}
             initialFindingRef={initialFindingRef}
           />
         )}
         {tab === "activity" && (
-          <CampaignActivityTab
-            applicationId={applicationId}
-            campaignId={campaignId}
-            campaign={campaign}
-          />
+          <CampaignActivityTab systemId={systemId} campaignId={campaignId} campaign={campaign} />
         )}
       </div>
     </>

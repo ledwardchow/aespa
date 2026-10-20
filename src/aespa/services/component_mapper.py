@@ -16,7 +16,6 @@ from sqlmodel import Session, select
 from aespa.config import get_settings
 from aespa.db import get_engine
 from aespa.models import (
-    ApplicationComponent,
     AssessmentCampaign,
     CampaignSourceMember,
     ComponentConnection,
@@ -25,11 +24,15 @@ from aespa.models import (
     SastRun,
     ScanLead,
     ScanLeadComponentProvenance,
+    SystemComponent,
 )
 from aespa.services import events as events_svc
 from aespa.services import llm as llm_svc
 from aespa.services import settings as settings_svc
-from aespa.services.component_facts import interface_fact_fingerprint
+from aespa.services.component_facts import (
+    interface_fact_fingerprint,
+    request_role_for_fact,
+)
 from aespa.services.prompts.component_mapper import (
     COMPONENT_MAPPER_SYSTEM_PROMPT,
     COMPONENT_MAPPER_TOOLS,
@@ -212,6 +215,8 @@ def _merge_detail(existing: dict, incoming: dict) -> dict:
             merged[key] = sorted(str(value) for value in values)[:8]
     if incoming.get("credential_kind"):
         merged["credential_kind"] = str(incoming["credential_kind"])
+    if incoming.get("request_role"):
+        merged["request_role"] = incoming["request_role"]
     return merged
 
 
@@ -363,7 +368,7 @@ def _load_component_context(
 ) -> tuple[
     AssessmentCampaign,
     CampaignSourceMember,
-    ApplicationComponent,
+    SystemComponent,
     ComponentSnapshot,
     SastRun,
 ]:
@@ -374,7 +379,7 @@ def _load_component_context(
             raise ComponentMappingError(
                 "Campaign source member does not belong to campaign"
             )
-        component = session.get(ApplicationComponent, member.component_id)
+        component = session.get(SystemComponent, member.component_id)
         snapshot = session.get(ComponentSnapshot, member.snapshot_id)
         run = session.get(SastRun, member.sast_run_id) if member.sast_run_id else None
         if component is None or snapshot is None or run is None:
@@ -419,6 +424,11 @@ def _validate_fact(
             continue
         supporting.append(f"{parsed[0]}:{parsed[1]}")
     detail = dict(raw.get("detail")) if isinstance(raw.get("detail"), dict) else {}
+    # Keep request roles in the bounded detail document.  Explicit invalid
+    # roles are rejected; missing roles remain unknown for legacy evidence.
+    request_role = request_role_for_fact(fact_type, detail)
+    if request_role is not None:
+        detail["request_role"] = request_role
     for key in (
         "handler_locations",
         "route_locations",

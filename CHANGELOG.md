@@ -6,43 +6,450 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
+- **OpenAI refusal recovery**: Global settings now has an option to retry a web or API scan step with shorter instructions when ChatGPT-plan or Codex blocks it for cybersecurity risk. If that retry is also refused, AESPA tries once more with fresh context from saved scan data. The option starts off. The first request, target, and tools stay the same. The activity log shows each retry and whether the provider accepts it or leaves the test unresolved. Repeated refusals can be skipped without a fixed count limit; other scan limits still apply.
+
+- **Site settings export**: The Export button lets you download a site's settings and saved accounts without its test runs or results, or download everything. Importing a settings-only file creates a site ready for new runs, including when saved workflows have blank instructions.
+
+- **Local authentication**: AESPA now requires an authentication key for its interface and management API. After the startup splash, the console tells you to press C to copy the key. C works in every console view. The bottom legend confirms when the key has been copied, except on the logo screen. Server Settings/Authentication shows the key and lets you copy or rotate it. Rotation asks for confirmation and saves the new key. Browser sessions need the new key on their next request. Keys supplied through `AESPA_AUTH_KEY_FILE` must be changed in that file. The legend also lists the tilde/backtick browser shortcut. Browsers remember sign-in for 30 days, and the Authentication Key tab under Settings > Global shows or copies the key in the same layout as other Global settings. Desktop apps sign in automatically. The API extension keeps its existing tokens and can use an optional separate port outside Docker. Docker keeps the integration API on its normal port and publishes the management port on localhost by default.
+
+- **API for other tools**: A new API extension, off by default, lets CI pipelines and other apps create Sites, run web scans and SAST scans from a ZIP file or a source such as a GitHub repository, choose a scan profile, follow progress, and get results as findings, a pass/fail summary, or SARIF. Apps can receive signed callbacks and resume paused web and SAST scans. Tokens have separate SAST, web, and Sites permissions, can see only their own scans or all scans, and can be edited, turned off, given a new value, or shown again on the extension's settings page. Remote integrations can use the separate integration port outside Docker, or expose only the extension's API through a reverse proxy or tunnel.
+
+- **API definitions for extensions**: An extension's settings page now shows its OpenAPI 3.1 definition when the extension publishes one. The page shows the base URL, lists each endpoint with its fields, responses, and required permissions, describes callback payloads, lets you open nested objects such as a Site's accounts in place or in a list of all data objects, shows example curl calls and example responses for each endpoint and example bodies for each callback, and offers the definition as a download for Postman, Insomnia, or client generators. Extension authors can also ask AESPA to create and control SAST and web runs through new core run services instead of writing to AESPA's database.
+
+- **LLM budgets for web runs**: You can set a dollar budget when creating a web test run, or change it later from Edit run, or from the run page at any time, including during a scan. The page shows estimated spend against the budget next to the token count, and warns when a model has no price set, because that model's spend counts as $0. When less than $1 remains, the scanner stops starting tests and wraps up with analysis of saved results. Wrap-up calls may take the run over budget. Other LLM work on the run pauses at the limit, including the crawler and A.L.I.C.E. The run page then shows a notice where you can raise the budget and resume paused work, or remove the limit. Spend is estimated from model prices, not taken from your provider's bill.
+
+- **Test a site login**: On a site's Credentials tab, **Test login** tries an account's login with the values in the form, before you save, and shows whether it worked. A failed test shows the message from the page, the page it ended on, and a screenshot. **Test all logins** checks every account in turn. The test uses the crawl's browser, proxy, and HTTP header settings, and asks the crawler model for help when filling the form isn't enough. A result clears when you change the account. Accounts that use "Log in myself in a browser" are still checked when a crawl starts.
+
+### Updates
+
+- **Site page tabs**: A site's page now has Test runs, Saved crawls, and Site details tabs. The base URL, login setting, and account count appear under the site name. Site details holds the site settings that used to open on a separate Edit site page, and saves without leaving the page; unsaved changes are kept while you look at another tab and can be discarded. Old Edit site links open the Site details tab. Test runs now fills the space below the tabs, so it stays visible in short windows, and each run takes one line with its profile in its own column, matching the API test runs list. Saved crawls uses the same table layout as other lists.
+
+- **Clearer labels across the app**: Run pages now show the run's status, such as Completed, Stopped, or Crawl failed, instead of Active or Inactive, and show Running while any agent works. Status badges start with a capital letter. Agent panels on web and API runs use Running, Idle, and Done in place of upper-case labels such as STANDBY and COMPLETE. The SAST Validate scan mode is now called "Check SAST leads only" and sits apart from Quick, Standard, and Full in the scan mode list. The SAST scans list labels its Light and Deep column as Analysis. In Settings, the Global tabs Feature Visibility and Debug Settings are now General and Debugging. The sidebar groups Active Jobs and Usage under Activity, and the Reporting and Benchmark Labs under Labs. On the Findings tab, the source column shows Test Lead or Specialist instead of Dynamic or Specialist agent, and the "#" column is now Count. A.L.I.C.E.'s welcome message no longer names a specific scan button.
+
+- **Scan benchmarks**: The DAST, API, and SAST pages open on scans that need a benchmark, with search and filters for status and date. DAST and API also have an application filter. Selecting scans opens the benchmark setup. Saved results have their own list, and result review shows missing and partial findings first with search and a focused detail panel. Earlier SAST evaluations remain available from SAST saved results.
+
+- **SAST activity log**: The Log tab now shows the newest events first. Display options let you change the order and filter by event type. New scans show which agent or system process wrote each event; older events without saved agent details are marked as unknown.
+
+- **Usage time views**: The Usage page now shows all-time, monthly, weekly, daily, and custom date ranges. Choose a start and end date for a custom range. Usage tables are grouped by provider, with an estimated cost for each provider. Fast mode calls appear beside standard calls for the same provider. New usage is recorded by day so shorter ranges can show exact totals. A one-time backfill tool can recover some older daily usage from saved call records, monthly records confined to one day, and SAST runs completed on the day they started. Usage that cannot be dated stays in the monthly and all-time views, and the page flags it when a shorter range overlaps that month.
+
+- **Scanner log display**: The Log tab now shows the newest entries first by default, with a pop-out menu to change the order and filter for Test Lead, Specialist, Reporting, and Validator. A separate LLM Errors tab groups repeated refusals for the same scanner step into one trace that shows the preceding test, one item per request and its result, and the next recorded action. It counts successful and failed retries, with pending outcomes shown separately. Each new refusal saves its full prompt for viewing and copying. Original log events remain available in each trace, with their full data collapsed until opened. Other LLM errors appear below the traces.
+
+- **Workflow activity**: Continuing a workflow now shows the Crawler as active until all running workflows finish. The Activity Log shows each retry's browser steps and whether it reached the workflow, needs more test data, failed, or was stopped.
+
+- **Crawl Data tab**: The Intelligence tab on a web run's Attack Surface page is now called Crawl Data, and its panel heading changed from Target Intelligence to Crawl Data.
+
+- **Site map side panel order**: The Display section now appears at the top of the site map side panel, above Users.
+
+- **Saved site workflows**: Workflows found during a crawl now appear in the site's Workflows list for future runs, including workflows that need input. Saving an older crawl to the site also adds its workflows. Sample data is saved only when you choose to save it after a successful retry. If the site already has 20 workflows, the retry still finishes and shows that its sample data could not be saved.
+
+- **Site form tabs**: Adding or editing a site now uses Site, Credentials, Workflows, and Instructions tabs instead of one long page, with Save always visible at the bottom. Accounts are listed beside the selected account's settings, and each login field takes one row. Login methods use plain names, such as "Form fill + TOTP code" and "Log in myself in a browser". The per-account login page is under **Override login page URL**. The Workflows tab appears once a crawl has saved a workflow for the site. If a value is missing on another tab when you save, the form opens that tab and marks it.
+
+- **Benchmark model badges**: Benchmark results show which Daybreak program an OpenAI scan used, and Mythos results show a Glasswing badge. Published results include the Daybreak program for the main scan model. Codex checks available programs for each model before requesting one. ChatGPT plan requests for GPT-6 Sol let OpenAI choose the program automatically. A one-time script can label older saved benchmark results after showing a preview and making a database backup. ChatGPT text streams and Codex tool calls save the program used by the run.
+
+- **Benchmark prices for Fast mode scans**: Published results use Normal mode prices for Fast mode calls so scan costs can be compared. The result comment also shows the estimated scan cost with Fast mode.
+
+- **Workflow retries during crawls**: You can continue an unfinished workflow while the main crawl is still running. Its progress stays separate from crawl progress. Payment and transfer workflows can open a signed-in browser and use account choices shown by the site. AESPA can also reuse clearly labeled account, address, or profile values from a live page opened with the same saved account. Payment amounts, card details, passwords, and verification codes still need values you supply. Stopping or deleting a run stops active workflow retries.
+
+- **Fast mode usage counted separately**: Calls made with Fast speed on a ChatGPT plan model are now recorded apart from standard calls, because Fast costs more. The Usage page labels them as Fast mode rows in their provider's table, and the token breakdown on run pages lists them under Fast mode. Fast prices come from the downloaded price data when it includes them. Otherwise AESPA estimates them at twice the model's standard price. You can set your own Fast prices from the Prices button on that row without changing the standard price. Usage recorded before this update stays in the standard list.
+
+- **Testing business-logic flaws in forms**: During a web scan, AESPA can now change a form value that the page does not let a shopper edit — a hidden field, a disabled option, or a value the page never shows at all — and then submit the real form. This lets it test for flaws where the server trusts a value from the browser, such as a checkout that charges a total sent by the page, a saved payment method that belongs to another account, or a coupon reused by changing the order email. It drives the page's own form so the request stays valid, instead of replaying a captured request that the site would reject.
+
+- **Workflows on grouped pages**: Workflows found on one example page can use different items from the same group. AESPA checks the chosen item before trying the action, saves it for retries, and keeps it reserved while other workflows run. Retries work when the example item was discovered but was not one of the pages crawled. Shipping workflows skip orders that are already shipped. Named DAST workflow tests use the same item selection. Delete workflows remain blocked during crawling.
+
+- **ChatGPT Plan Usage tables**: The Readings and Measured intervals tables now show 10 rows at a time, with Previous and Next buttons when there are more.
+
+- **Finding review after web scans**: AESPA reviews batches of findings concurrently, up to the saved DAST LLM request limit. Failed requests and missing verdicts leave the affected findings unvalidated.
+
+### Fixes
+
+- **Scans no longer stop when the model is overloaded**: When a provider replies that its servers are overloaded, a web, API, or SAST scan now waits about a minute and tries the same step again, instead of stopping. It keeps retrying for a few minutes and only pauses if the provider stays overloaded, which you can clear by resuming the scan. The activity log shows each retry.
+
+- **Run names and saved crawls**: A new run could be given the same automatic name as an existing run on the site after an earlier run was deleted. New runs are now numbered after the highest existing "Run #" name. The Saved crawls list now shows the name of the run each crawl came from, instead of its internal ID, so it matches the run list.
+
+- **Benchmark comparisons with large findings**: Limit finding text sent to the evaluation model so large saved evidence does not exceed its prompt limit. Saved benchmark results still include the full findings.
+
+- **Benchmark uploads with locked results**: Publishing continues when the results site protects locked entries, and the result message shows how many were skipped. Failed uploads now say how many results AESPA confirmed.
+
+- **SAST activity log height**: The log fills the available space on the Activity tab instead of stopping after 520 pixels.
+
+- **Crawl and scan workflow warning**: Starting a crawl that will scan afterward no longer warns that saved workflows have not been crawled. Starting a scan without a new crawl still shows the warning.
+
+- **Crawl-only run status**: The Sites run list shows "Crawled" when a run has finished crawling but has not completed a scan.
+
+- **Workflow input notice**: Starting a scan with unfinished workflows now hides their Needs input count, including when the scan starts automatically after crawling. A later workflow attempt still shows a new notice.
+
+- **Findings dropped during web scans**: A finding with no selected object check can now be saved when the Test Lead sends `0` for that optional field. Invalid check links and missing evidence are reported as rejections instead of duplicates. A.L.I.C.E. also reports whether its finding was saved, already existed, or was rejected.
+
+- **Workflow progress during crawls**: While a crawl tried workflows that it had not reached, the Activity Log showed only the start and the result of each workflow, and the crawler card on the Agents view did not change. Each step, such as signing in, opening the starting page, or choosing the next action, now appears in both places, along with how many workflows the crawler model suggested.
+
+- **Scans no longer fail on a single refused request**: When the model provider refused one request during a web or API scan, the whole run stopped and was marked failed. AESPA now retries a refused request once, and if it is refused again, skips that line of investigation and continues the scan on a different target. Anthropic responses with a `content_filtered` stop reason appear in LLM Errors and get two retries before AESPA moves to another test.
+
+- **Scans pause instead of failing when the LLM provider can't be reached**: A short network drop, such as Wi-Fi reconnecting or a computer waking from sleep, could stop a long web, API, or SAST scan and mark it failed. This included failures to refresh AWS credentials for Amazon Bedrock. AESPA now retries the request several times over about four minutes. If the provider still can't be reached, the scan is paused at its last saved step and can be resumed once the connection is back.
+
+- **A.L.I.C.E. on API runs**: Endpoint lists, coverage, and finding commands in API-run chats no longer fail every time. Steering an active goal on an API run now works instead of returning a server error.
+
+- **API run sessions**: Renaming or turning off a saved session on an API run no longer fails, and the response hides cookie values, header values, and secret session details, as other session views already did.
+
+- **Deleting runs, findings, pages, and API documents**: Deleting a web run, API run, or campaign, removing or merging findings, deleting crawled pages, starting a recrawl, and deleting an API document could fail with a database error when workflow checks or campaign findings referred to the deleted items. These actions now complete. Workflow checks keep their results without the link, and endpoints from a deleted API document stay in the collection. The document file is removed only after the delete succeeds.
+
+- **API coverage by HTTP method**: When several methods share a path, such as `GET`, `PUT`, and `DELETE /users/{id}`, probes and findings now update the coverage cells for the method actually used instead of the first endpoint on that path. Findings from SAST lead validation scans on API runs now get their OWASP API category.
+
+- **Finding validation requests**: Requests sent while validating findings now follow the run's target scope and the scan mode's allowed HTTP methods. Redirects that leave the target scope are not followed. These requests also use the configured testing proxy and global HTTP headers. The fallback validation probes, which previously failed without sending anything, now send their requests.
+
+- **Deleting saved logins and clearing API data**: Removing a site login that an earlier crawl or session had used no longer fails with a database error; past runs keep their records without the link. Clearing an API collection's endpoints and credentials now works after the collection has been scanned, and also removes those endpoints' test results from earlier API runs. Adding an API credential for an endpoint now checks that the endpoint belongs to the same collection.
+
+- **Clearing traffic**: Clearing a web run's traffic no longer fails when deep scan probes are linked to those requests. The Clear button on an API run's Traffic tab now deletes the run's traffic instead of hiding it until the next refresh.
+
+- **Guided logins**: The "I'm Ready" and confirm buttons for a guided login now act only on the run they were clicked in, and each run lists only its own pending logins.
+
+- **SAST source preparation**: If a SAST scan could not start after its repository was downloaded, the prepared source was deleted and the run could not be started or prepared again. The prepared source is now kept, so the scan can be started once the problem is fixed.
+
+- **Campaigns**: Stopping a SAST run now also stops a retry of that campaign component. Campaign activity that resumes after a SAST scan finishes now appears in the campaign's log instead of the SAST run's.
+
+- **A.L.I.C.E. replies after a long answer**: Reopening a chat whose reply was too long to keep in full now shows the reply as finished.
+
+- **Run pages**: The Findings tab count on a web run is shown as soon as the run opens. Lead links on API runs open the lead in that API run instead of a web run, and links to a specific lead expand it. Links to a campaign finding now open its group. In campaign review, saving the frontend path guidance twice in a row no longer fails with a conflict, and the Approve and Reject buttons show saved decisions.
+
+### Housekeeping
+
+- **README screenshots**: Updated the screenshots to show the current web, API, SAST, and system screens with fictional example data.
+
+- **Shared run services**: Creating, starting, and stopping web and SAST runs now uses shared services for both AESPA's own API and extensions, so both follow the same checks. Existing API behaviour is unchanged.
+
+- **Documentation cleanup**: Removed unused and duplicate documentation screenshots, along with finished planning notes. The screenshot capture script no longer creates the duplicates. Implementation plans are no longer included in the repository.
+
+## [PR #283] October 16 - Workflow detection, grouped page routes
+
+### New features
+
+- **ChatGPT plan usage**: An optional extension estimates the API value of ChatGPT plan usage for the ChatGPT plan and Codex CLI providers. It tracks tokens used in AESPA and reads the plan's 5-hour and weekly usage percentages from the Codex CLI, including when a scan using either provider starts and ends. Readings where the percentage changed while AESPA used no tokens are left out. Stats → ChatGPT Plan Usage shows usage over time, estimated cost, and tokens per percentage point. Reading intervals are configurable. Usage outside AESPA affects the estimates; prices come from the Usage page.
+
+- **Crawler workflows**: After the page crawl, AESPA tries identified workflows it missed, with up to three separate signed-in browser sessions. All identified ordinary workflows are tried with generated sample data, with up to three running at once. Successful values are saved for later crawls and retries. Payment details, existing passwords, verification codes, and other real secrets require supplied values. When a retry needs these values, it stays at **Needs input** without showing an error. Deletion actions stay blocked. A **Needs input** notice opens a panel where you can provide missing values or instructions without leaving the run. The workflow view lists identified workflows, with **Needs input** or **Not reached** beside unfinished ones. Ordinary pages stay in page coverage, even when they contain forms or business logic. Reached workflows get separate checks for skipped or reordered steps and, where applicable, access by another account, repeated submission, changed amounts or prices, cross-site request forgery, and sensitive changes without signing in again. The category cells show testing progress and open the individual checks. Before a new scan starts, a warning lists workflows that have not been crawled and may miss testing. Resume actions do not show this warning. Full scans require each check to be tested or marked blocked with a reason.
+
+- **Grouped page crawl**: The optional **Group similar pages** setting samples pages with similar layouts and keeps the discovered links available for security testing. Expand a group in Attack Surface to search its links and see which accounts found or accessed them. OWASP Coverage shows the selected object checks inside each route, including checks on uncrawled records. Progress counts the checks actually attempted, so one tested record cannot complete a whole group. Access control and IDOR checks can use records outside the crawl sample without indexing every page. Saved crawls retain the link inventory. The setting is off by default.
+
+- **External scanner leads**: Import SARIF 2.1.0 and structured Markdown reports into web or API runs, preview their leads before saving, and skip repeated findings. Imported reports keep their scanner, rule, location, and evidence details, and DAST treats them as unverified leads. Markdown import also accepts AESPA lead exports; a template is available in the import dialog.
+
+- **Fast mode for ChatGPT plan models**: Models that offer faster responses on your ChatGPT plan show a Speed setting in their model settings. Choose Fast (or another speed the model lists) for each model separately; it uses your plan's usage limits more quickly. Load models for an existing ChatGPT plan provider again to see the speed options.
+
+- **Crawl then pentest**: Start a web crawl and have AESPA begin the selected pentest mode automatically when the crawl finishes successfully.
+
+- **Saved benchmark analyses**: Open analyses from graphs or results lists and group findings by OWASP category or severity. Comments appear on graph cards and can be included in published summaries. Signed-in users can edit comments on the private benchmark site; the public graph site displays them.
+
+- **Custom CA bundles**: Connectivity settings now accept separate PEM CA bundles for application and testing traffic. Application requests include LLM calls and Benchmark Lab; testing requests include session checks and vulnerable-library updates. CLI providers receive the application CA path. Browser tests continue accepting certificate errors.
+
+- **Saved crawls**: Save a finished crawl to its site and load it into a new run to skip crawling again. The site page lets you rename, import, download, or delete saved crawls. Saved crawls include workflow history and captured session data. On a run, **Save crawl** saves the crawl to its site or downloads it as a file; this replaces the separate Export crawl menu item.
+
+- **Outdated JavaScript library checks**: Web scans use the Retire.js list to flag captured libraries with known vulnerabilities. Findings show the affected version, location, CVEs, and upgrade version. The check runs in passive mode too and can be managed under Settings → Global → Vulnerable Libraries.
+
+### Updates
+
+- **Sites list**: The Sites table no longer has an Auth column. The Credentials column shows how many accounts each site has.
+
+- **Coverage findings**: Finding markers in OWASP coverage tables now open the Findings table filtered to that cell. Use Back to coverage or the browser Back button to return to the coverage table.
+
+- **Benchmark publishing**: Choose which applications to publish before sending results to AESPA Benchmarks Online. Benchmark Lab lists each ground truth that has saved results, with a result count, and only the selected ones are uploaded. Publishing now defaults to `benchmarks.aespa.app`; existing upload tokens also work with the original `chatgpt.site` address. Results edited on the site are protected from later scanner uploads, and Benchmark Lab reports how many were skipped when publishing.
+
+- **Loading models for a new provider**: Load models from API now saves a new provider straight away, so you can open and configure its models without saving and reopening the provider first.
+
+- **Findings toolbar**: Web and API findings now show Validate findings (web only) and Review with AI as buttons. Export findings, Import findings, and Clear all findings are in the **⋯** menu beside them.
+
+- **Attack Surface**: Removed the Signals and Access Observations sections from the display and renamed Observed Technologies to Tech Stack. Route access is still shown in the route inventory.
+
+- **Site map**: Run settings and attack scope now sit above the site map. Users, grouped pages, and display settings have moved to a collapsible side panel, giving the graph more room. AESPA remembers the panel setting; on narrow windows it starts collapsed. The panel shows the unauthenticated crawl alongside saved accounts and whether each account's login succeeded. Page counts appear in the progress summary instead of in each user tile.
+
+- **SAST findings in live tests**: Web and API scans now have a searchable dialog for importing source scan leads, with scan details and counts of new leads. You can also start a SAST Validate run from a finding using a saved Site or API collection.
+
+- **SAST findings page**: Export findings as Markdown or SARIF from the Findings page; the run actions menu still offers both formats. The wider findings list shows each finding's reference and sorts by it by default. Finding writeups use a full-width view with larger text. You can move between findings and return to the list without losing its filters, sort order, or scroll position.
+
+- **Scan usage on every tab**: Token usage stays visible while you switch between tabs in web, API, and source scan runs. Web runs also keep the cost of linked source scans visible, without showing a source cost error when no linked source has been found.
+
+- **Python execution request limit**: New setups now allow up to 50 HTTP requests per Python execution by default. Existing saved settings can still be changed in Agent Settings.
+
+- **Benchmark comparison charts**: Compare scan cost or date with matched findings or a severity-weighted score. Charts default to cost and score and hide $0 scans unless you choose **Show local model ($0) results**. Scores use ground-truth severity and give extra weight to High and Critical matches in selected OWASP categories. Point details show matches by category.
+
+- **Portable installation data**: AESPA keeps databases, uploads, and extension data together in `aespa_data` and moves existing databases there on first start. The console's Data Folder setting lets source and desktop users choose another location on the next launch. Copying the folder to another installation preserves uploaded-file references.
+
+- **Smaller console log database**: LLM requests and responses are stored once when console logging is on. Continued agent conversations save only new messages, reducing log growth during long scans.
+
+- **More consistent screens**: Each sidebar item has its own icon, and sidebar names now match page titles (Usage, SAST Scans, ChatGPT Plan Usage, LLM Configuration). Web, API, and SAST runs share the same breadcrumb (for example, Sites / Bank of Ed / run name), button wording (Start scan, Resume scan, Stop scan), and tab order. An API run's phase and end reason now appear when you hover over its status. Every list puts its create button in the page header in the same style, row Delete buttons stay muted until you point at them, and the default LLM profile is marked with a badge. Buttons and headings use sentence case (for example, Save crawler settings), delete prompts name the run the same way on every run type, and the scan policy option for finishing every remaining test now reads Require full test coverage before finishing. The Full scan mode is described as running every applicable test. Action errors and confirmations appear in the lower-right corner instead of shifting page content or opening browser pop-ups; form errors appear beside Save, and page-load errors remain on the page. The OWASP, Attack Surface, Workflows, and Intelligence tabs in a web run line up with the Status tab's Agents, Workers, and Log tabs and use the same spacing.
+
+- **Findings lists**: Web and API runs now show findings in the same table, grouped by title with severity, source, OWASP category, and count. Unconfirmed, low-confidence, and deterministic-check findings appear in labelled sections below the main list. Opening an API finding now shows the same details as a web finding, including structured evidence, proof commands, and screenshots. The findings buttons now read Export findings, Import findings, Validate findings, and Review with AI, with Validate findings as the main action. API findings can also be deleted by title, removing every instance at once, and both run types show the same message when there are no findings yet.
+
+- **Dates, costs, and statuses**: Lists use one short date and time format, costs show two decimal places with thousands separators, and finished runs read "completed" on every run type.
+
+### Fixes
+
+- **Bedrock scans after context compaction**: Fixed scans stopping with an invalid thinking signature after older conversation messages were shortened. Affected saved scans can be resumed.
+
+- **Benchmark Lab filters and links**: On narrow windows, the model and scan type filter menus no longer open partly behind the sidebar. **Open results site** now appears only when the saved address is an `http` or `https` link.
+
+- **Log times**: SAST activity, SAST agent events, API run logs, campaign activity, and the vulnerable-library list's last update time could appear shifted by your time zone offset. They now show the correct local time, and activity and agent logs use the same 24-hour format.
+
+- **A.L.I.C.E. chat**: Each chat tab now works on its own. Sending a message in one tab no longer locks the others or cancels A.L.I.C.E.'s work there, so you can run several requests on the same run at once. A dot marks tabs that are still working, the chat stop button stops only the open tab, and Stop A.L.I.C.E. at the top of the run stops all of them. For users ahead of UTC, reopening a web run could also restore an older copy of the chat saved in the browser instead of newer messages saved by AESPA; the chat now loads whichever copy is newer.
+
+- **Display fixes**: Number fields and most drop-down menus no longer appear as bright white boxes in the dark theme. Hover highlights, panel backgrounds, borders, and code fonts that referred to missing theme colors now use the app's standard colors, and success and warning colors are the same green and amber everywhere. Column headings, site names, status labels, and OWASP coverage headings are no longer cut off when there is space to show them, and sidebar items no longer shift slightly when you move between sections.
+
+- **Site credentials**: Saving a site's settings while a scan was running could stop that scan from finding its saved credentials, because the credential records were re-created with new IDs. Saving now keeps the IDs of existing credentials, so pages and runs linked to those accounts continue to recognize them.
+
+- **Subtab links**: Web, API, and source scan subtabs, SAST phases, Benchmark Lab tabs, and Reporting Lab tabs now keep the selected view in the URL, so refreshing or using browser history returns to that view.
+
+- **Docker image**: Fixed the Docker image build. New Docker images are published alongside the binary releases again.
+
+- **Resuming SAST runs from a repository or extension source**: A failed or cancelled SAST run whose source code was already downloaded now offers the normal resume and start actions. Previously, AESPA always showed **Resume source preparation** for these runs, even when the source was ready.
+
+- **Expired ChatGPT sign-in**: When ChatGPT rejects a saved sign-in, AESPA stops the affected run, marks the account signed out, and asks you to sign in again in LLM settings. Temporary ChatGPT outages still show an error without signing you out.
+
+- **Next.js page data in the site map**: Next.js page-data requests no longer fill the site map as separate API endpoints.
+
+- **GitHub Copilot CLI path**: The provider now respects `COPILOT_CLI_PATH` and automatically finds `copilot` on `PATH` for requests and sign-in, using the installed CLI instead of attempting an unnecessary download.
+
+- **Finding order**: SAST, campaign, and reporting debug findings handle severity labels with extra spacing or alternate wording and keep findings of the same severity in a consistent title order.
+
+- **Model order**: Reversing the provider sort now also reverses model name order within each provider.
+
+- **Bedrock benchmark evaluation**: Fixed requests with a Claude reasoning level failing because Bedrock rejected the reasoning setting. This also affects scans using the same Bedrock model settings.
+
+- **LLM scan errors**: Scan logs now show the exception type when an LLM error has no message. ChatGPT access-check timeouts identify the model being checked. ChatGPT connections that time out before a request is sent now retry twice before failing the scan.
+
+- **Upgrading older databases**: AESPA no longer fails to start when upgrading a database created before database versioning was introduced. Several recent upgrade steps assumed the LLM and connectivity settings tables already existed. An interrupted upgrade can now resume safely on the next start.
+
+- **Factory Droid tool approvals**: Droid scans could not use AESPA's testing tools with newer releases of the Droid SDK because the tool approval check failed. AESPA's own tools are approved again, and other tools are still refused.
+
+- **SAST duplicate merging**: Two confirmed SAST findings that share a fix location are no longer merged when the validators describe different root causes, so neither finding is hidden from the report.
+
+- **Finding updates during scans**: When later testing provides stronger proof of an issue already reported, AESPA updates the saved finding with the new severity, evidence, and write-up. The finding keeps its reference and is validated again.
+
+- **Claude Code CLI requests**: On macOS, signed-in accounts no longer fail with a false "Not logged in" error. When a CLI request does fail, scan logs show its reported reason, such as an unavailable model or a sign-in problem, instead of only `exit 1`.
+
+- **Thinking levels for new models**: Adding a model from a provider's model list no longer copies the thinking level from another model. Previously this could save a level the model does not accept, such as `xhigh` for Nemotron on Bedrock Mantle, and every LLM request in the scan then failed. AESPA now refuses to save a thinking level the model does not list. Models with no listed levels must use Default, so an existing model with an unsupported level must be changed to Default the next time it is edited.
+
+- **LLM scan startup**: Fixed scans failing immediately with an `http_client` error when using current Anthropic SDK releases. SDK requests now use the supported HTTP client, including Bedrock Mantle requests and model lookups signed with AWS credentials.
+
+- **SAST deletion with older benchmarks**: Deleting a collection or campaign now reports a clear conflict when one of its SAST runs is still referenced by an older Benchmark Lab evaluation.
+
+- **Existing Benchmark Lab data**: Older Benchmark Lab extension databases now load saved dates correctly when reused from another installation.
+
+- **Console startup on occupied ports**: When the requested port is in use, AESPA starts on port 9000 or the next available higher port instead of exiting.
+
+### Housekeeping
+
+- **Tests**: The backend test suite runs faster. End-to-end tests are updated for the current site map side panel, Benchmark Lab analysis pages, Connectivity settings tab, Attack Surface section names, automatic sidebar collapse on narrow windows, and per-workflow progress.
+
+- **Code cleanup**: Removed redundant comments and replaced several lint suppressions with explicit database comparisons and a non-security SHA-1 call for Retire.js matching.
+
+- **SAST scan maintenance**: Light and Deep scans now share archive extraction, source file tools, and candidate-state helpers, keeping those behaviors consistent across both modes.
+
+- **Benchmark Lab extension cleanup**: Removed the retired core Benchmark Lab API and scan service. Existing evaluations still import into the extension when it is enabled.
+
+## [PR #278] October 8 - Public Benchmarking, Claude CLI and ChatGPT plan LLM providerse
+
+### New features
+
+- **AESPA Benchmarks Online**: Publish compact benchmark graph summaries to a private results site from Benchmark Lab. Create separate upload-only tokens on the results site and revoke them individually. Configure the site URL and one upload token generated on the results site in the Benchmark Lab extension settings, where you can also view the saved token. Repeated uploads update existing results with scan dates and token counts, without sending scan names, findings, or evidence.
+
+- **Claude CLI provider**: Use a signed-in Claude CLI account for scans. 
+
+- **Re-validate SAST findings**: Completed SAST runs now show a Re-validate button for inconclusive findings. It runs a fresh validator check for the selected finding and updates its result and report.
+
+- **ChatGPT plan provider**: Announced as part of OpenAI DevDay 2026, you can now use "Sign in with ChatGPT" to use the OpenAI API directly with the Oauth2 flow. This performs significantly better than the existing Codex CLI provider and doesn't leave session logs all over your Codex interface.
+
+### Updates
+
+- **Benchmark cost graphs**: Hide scans without a recorded cost without showing a warning.
+
+- **More useful XSS leads**: Web scans now read discovered JavaScript for possible unsafe rendering even when automatic security checks are off. The Test Lead sees likely fields and rendering contexts early in the scan and can log in as another configured account in a fresh browser to check stored payloads. Automatic checks no longer create an XSS finding just because a payload appears in a response; browser execution still needs confirmation.
+
+- **Clearer XSS validation**: The validator now accounts for browser checks already recorded by the scanner and checks escaping in the right rendering context. XSS findings filed under the wrong category no longer receive an access control verdict.
+
+### Fixes
+
+- **Stopped scan labels**: The run status badge now says Stopped when a scan stops (instead of the erroneous Crawl stopped).
+
+- **Benchmarking stopped scans**: Benchmark Lab used to allow benchmarking a stopped state scan when using the new analysis tab, but not on the DAST/SAST tables. Now it'll let you do it on either.
+
+### Housekeeping
+
+- **Architecture documentation**: Corrected event streaming, run lifecycle, scan defaults, crawl phases, JavaScript analysis, extension storage and routes, and campaign matching descriptions.
+
+- **Dependency security updates**: Updated PyJWT to 2.15.0, urllib3 to 2.8.0, and the frontend's brace-expansion dependency to 1.1.21.
+
+- **Dependabot version updates**: Weekly Python dependency updates now open grouped pull requests against develop. Security updates continue to target main.
+
+## [PR #275] October 3 Update - extensions, Benchmark Lab and scan improvements
+
+### New features
+
+- **Extension LLM catalogs**: Extensions can keep CLI and SDK based LLM providers, models, and profiles in their own storage and show them in LLM Settings with an Extension storage label. Their profiles can be selected for web, API, SAST, and campaign scans or set as the default. Extension code can also resolve those profiles for its own LLM calls without copying credentials or model settings into AESPA's database.
+
+- **Share Benchmark Lab data**: Export datasets, saved results, reviews, and comparisons to a JSON file and import it on another installation. Repeated imports skip duplicates, identical datasets are combined, and conflicting edits keep the existing record and are reported. Filter results by dataset to compare scans from multiple hosts. Imported scan details remain available without linking to unrelated local scans.
+
+- **Manage ground truth datasets**: Benchmark Lab now lists saved datasets in a Settings tab, where you can also save a default model for all benchmark runs. Model and dataset settings use the same compact forms, spacing, and controls as the rest of the app. Assign a dataset to an app or API, add a custom label, or delete an unused dataset. Datasets used by saved benchmarks or comparisons are protected from deletion.
+
+- **Extensions**: Extensions can now provide API routes under an isolated `/extension/<extension-id>/` prefix and maintain their own SQLite database. Manifest-declared data namespaces enforce extension-specific table prefixes, while disabling an extension removes its routes and closes its database without disrupting AESPA or other extensions.
+- **Benchmark Lab**: Built-in benchmarking; supply a file containing known vulnerabilities in the application and it'll compare your scan result with that ground truth. Scan results plot on graphs - cost vs # of ground truth findings, and # findings vs date of scan.
+- **Google Vertex AI provider**: AESPA can use Google Cloud Application Default Credentials with a selected project and location. Gemini models use the native Google content API, while other serverless publisher models use Vertex AI's OpenAI-compatible Responses API so tool arguments are preserved. Grok conversations use stable, agent-specific cache routing and replay encrypted reasoning between tool steps using Vertex-compatible request fields. Each Grok call records whether the prompt cache was used, token reuse, cache-key fingerprints, and the provider system fingerprint so inconsistent cache reuse can be diagnosed. The provider supports the existing vision and thinking workflows, preserves numeric tool-schema constraints required by Vertex AI, and does not store Google credentials. Deployed endpoints and tuned model resources are excluded.
+
+- **.NET support in SAST scans**: Light and Deep scans now understand ASP.NET Core and ASP.NET applications. They find controller actions with their full routes, minimal API routes, Razor Pages and Blazor pages, SignalR hubs and Azure Functions, and request values such as `[FromBody]`, `[FromQuery]` and `Request.Query`. They also look for common .NET risks, including raw SQL through ADO.NET, Entity Framework and Dapper, `Process.Start`, file paths built from input, `HttpClient` requests, `Html.Raw` in Razor views, unsafe deserialization settings, weak cryptography and `ILogger` calls. `[Authorize]` and `[AllowAnonymous]` are recorded as access checks. Deep scans read NuGet packages from project files and `packages.config`, and flag `TypeNameHandling.All`, disabled certificate checks and debug settings in `web.config`.
+
+### Updates
+
+- **SAST costs in DAST runs**: The web DAST token counter shows the estimated cost of each SAST run that supplied imported leads on a separate line. These costs do not change the DAST run's token or cost totals. Missing or incomplete cost estimates are shown as unavailable.
+
+- **Markdown ground truth imports**: Benchmark Lab now keeps API categories, severity, source line numbers, finding IDs, root causes, operations, and multiple expected evidence entries when importing Markdown files.
+
+- **AWS profiles for Bedrock**: Bedrock Runtime and Mantle providers can save a named AWS profile for model loading and scan requests. Leave the field blank to use the existing AWS credential settings.
+
+- **Consistent input token counts**: Scan and campaign usage now show input tokens excluding cache reads and writes for every provider, including the per-model breakdown. Cache counts remain separate, and recorded usage and cost estimates are preserved.
+
+- **Bulk Benchmark Lab comparisons**: The parent DAST, APIs, and SAST tabs now list all completed scans and whether each has a saved benchmark. Select saved ground truth or upload JSON or Markdown, then select individual scans with checkboxes or select all unbenchmarked scans. DAST and API scans can also be selected together by application. All selected scans start their benchmark comparisons at once. Existing results are skipped, individual failures are reported, and retries process only the remaining scans. Site, API, and SAST scan lists show an Evaluated tag for saved benchmarks, including earlier completed SAST evaluations, with a link to the result. The Results tab keeps the Summary, Analyses, and New screens. The completed-scan tables label each scan with the model that used the most input and output tokens. DAST scans with linked SAST leads are labelled DAST with SAST Leads in the tables and saved analyses.
+
+- **SAST code parsing**: Light and Deep scans now parse PHP, JavaScript, TypeScript, Python, Java, Go, C# and Ruby code to find functions and the calls between them. Checks for database queries, commands, file access, outbound requests, code evaluation and logging no longer count matches inside comments or plain strings. Each check now names the function it is in and whether that function can be reached from a route or request input, with the chain of calls that reaches it. Scan agents use this to review reachable code first; unreached code is still reviewed. Deep scans also use the parsed code to build their application model, so routes, risky calls and access checks in PHP, Java, Go, C#, Ruby and TypeScript code are mapped in the same way as Python. The SAST Coverage tab shows a Code map panel with files parsed, functions, calls and how many risky calls can be reached. Parsing runs locally, with no downloads.
+- **Codex tool calls**: Codex models may now make several tool calls in one response, such as reading multiple files at once, instead of being limited to one call per response. Scans using Codex need fewer model requests and use less of the Codex allowance.
+- **Larger tool results**: Agents now see up to 24,000 characters of each tool result, up from 8,000 (16,000 for A.L.I.C.E.), and up to 30,000 characters from context lookups. Full source file reads are no longer cut short. Longer results sent to the model can raise the cost of each call, especially for large HTTP responses.
+- **Fewer false SAST checks**: Light and Deep scans are much more precise when finding code that may need a security check. Code evaluation, command execution, file access, outbound request and cryptography checks no longer match ordinary JavaScript functions, DOM class changes, database result fetches or similarly named methods. On a typical PHP and JavaScript application this cuts the number of checks by more than half, making scans faster and cheaper without missing the real calls. PDO `exec()` calls are now reviewed as database queries, and `file_get_contents()` with a variable URL is also reviewed as an outbound request.
+- **SAST candidate validation**: Light and Deep scans now evaluate missing or ineffective security controls against the reachable operation and its shared controls, so these leads can be confirmed without an unrelated source-to-sink data path.
+- **SAST Light mode revamp**: The SAST Light scan mode has been revamped; it now outperforms results from Deep mode (prior to this change). Deep mode also inherits the improvements. SAST Deep mode is now an experimental feature: turn on **SAST Deep Mode** under Settings → Global → Feature Visibility to choose it when creating a SAST scan. New SAST scans use Light mode otherwise. Existing Deep scans still open and display as before.
+- **DAST and SAST LLM concurrency**: The DAST Test Lead and SAST settings now have separate limits for concurrent LLM requests. The limits apply across each run, including DAST reporting and SAST discovery and validation agents.
+- **Settings navigation**: Settings screens have been consolidated into one item.
+- **Fewer duplicate SAST findings**: Light and Deep scan workers must now give the input and affected code lines, where the fix belongs, and the root cause for every lead. After recording a lead, a worker is shown related open leads and can merge one into another when a single change fixes both. A new review step groups leads that one code change would fix, before and after validation, even when they have different titles or categories. Confirmed findings are also merged when validators name the same fix location. The same problem reported from several routes should now appear as one finding.
+- **SAST reporting**: Every lead the validator confirms is now reported in Light and Deep scans. Previously, confirmed leads were hidden when the validator gave them a confidence below 0.7 (Light) or below the Minimum confidence setting (Deep), often because of severity or deployment unknowns rather than doubt about the code. The Minimum confidence setting has been removed from SAST settings. Confidence is still recorded on each lead.
+- **Per-model LLM pacing**: TPM and RPM limits have been moved to per-model instead of the previous per-provider.
+- **Unfinished SAST validation**: Light and Deep scans now pause when a validator fails or stops without giving a verdict, and resuming the scan checks those leads again. Leads the validator marks inconclusive are kept as final results and are not checked again.
+
+### Fixes
+
+- **SAST validator status**: Finding Validators no longer appears active after a scan pauses or stops. Existing scans with stale activity logs show unfinished validation as paused.
+
+- **Codex SAST scans**: When Codex runs out of open files, AESPA queues scan workers, lowers their shared concurrency limit, and retries from saved steps. If the error persists, the scan pauses with unfinished work available to resume. Resume Failed Work now appears whenever saved worker or validator work remains and continues every unfinished worker. The error no longer incorrectly asks for a CLI upgrade.
+
+- **Codex scans**: If a Codex model tries to call one of its own tools during a scan, AESPA retries the turn in a fresh session. Repeated attempts still stop the scan.
+
+- **Bedrock model compatibility**: Scans now send explicit prompt-cache markers only to models known to support them. Grok and other unsupported models no longer receive cache markers that can cause Bedrock to reject the request. Encrypted reasoning is preserved across streamed replies, tool calls, and saved conversations without adding conflicting reasoning fields.
+
+- **SAST validation progress**: The validation step of Light and Deep scans now shows how many leads are queued and how many validators have finished, updating as each one completes. Previously it showed one lead and zero complete until the whole step ended.
+- **SAST workers missing assigned checks**: A SAST worker's list of assigned checks now shows unfinished checks in full and finished ones briefly, so long lists are no longer cut off before the last checks. When a worker tries to finish early, it is told the file, line and type of each remaining check instead of only its number. Previously, workers could repeat the same request many times and close checks they had not reviewed.
+- **Tool calls after an early finish**: When a model finishes or is stopped partway through a response with several tool calls, the remaining calls now receive a result. The next request to the provider no longer fails because those calls were left unanswered.
+- **Resuming GitHub SAST sources**: GitHub authentication failures while preparing a repository now explain how to restore access and remain visible in the SAST Activity log. After signing in again, source preparation can be resumed on the same run and the scan starts automatically when the snapshot is ready.
+- **Replies cut off by the output limit**: When a model's reply reaches its output token limit partway through a tool call, the unfinished call is no longer sent back to the provider, which Bedrock rejected with a validation error that stopped the scan. The model is told the call was cut off and asked to repeat it with fewer or shorter calls. Paused scans affected by this error can be resumed.
+- **Bedrock input token totals**: Scan usage now includes input tokens read from and written to the prompt cache. The monthly usage breakdown and cost estimates continue to price cached tokens separately.
+- **Copilot cost estimates**: Scan and usage totals now price Copilot AI credits at $0.01 each without adding a separate token cost for the same calls.
+- **SAST proof gaps**: Text returned for a proof gap now stays together when validation fails, and existing character-split gaps display as readable text with an accurate count.
+- **Windows terminal shutdown**: Ctrl+C now quits AESPA promptly when it is started with `uv run aespa` in PowerShell, including when browser event streams remain open.
+- **Resuming partial Light SAST scans**: Resume Failed Work now retries failed discovery workers even when the earlier run reached its report, then refreshes validation and the report with the recovered results.
+- **Automatic frontend builds on Windows**: Starting AESPA now launches the Windows npm command correctly when frontend files have changed. macOS and Linux builds continue to use the standard npm command.
+- **Bedrock Mantle model calls**: Claude models now use streamed Messages calls, including for large output limits, and multi-step conversations no longer send SDK-only response fields back to Mantle. OpenAI models use Responses, and supported third-party text models use Chat Completions. Model discovery shows the selected API and unrecognized model families fail before an LLM request is sent. Mantle project attribution also works for Claude calls.
+- **Duplicate SAST leads**: SAST scans now merge far more repeat reports of the same issue. Leads described in plain language (for example "accepts another user's ID" or "returns stack traces") are recognised as the same kind of weakness, reports a few lines apart in the same file are joined even when workers chose different OWASP categories, and new reports can join a lead that already has an inconclusive or confirmed validation result. Dismissed leads still do not absorb new evidence.
+- **Model thinking levels**: Editing a model now loads available thinking levels on the first open when its saved provider data has a context window but no thinking-level list.
+- **Traffic coverage filters**: Opening the Traffic Log from an OWASP coverage item now refreshes the table rows and closes any previously selected request, so the visible rows match the filtered count.
+- **OWASP coverage tracking**: Test Lead HTTP requests now identify whether they are setup, reconnaissance, or active security tests. Active tests require an OWASP category and are rejected with guidance when it is missing, while setup and reconnaissance requests can remain uncategorized.
+- **Visible startup failures**: When the backend cannot start, the terminal console now restores the normal prompt, prints the captured startup error, and exits with a failure status instead of hiding the cause.
+- **Provider model cleanup**: Removing a model from a provider now removes its unused saved model settings as well. Models assigned to a scan profile cannot be removed until that profile is updated, and loading a fresh model list from the provider API keeps those assigned models.
+
+### Housekeeping
+
+- **Dependency updates**: Updated AnyIO to 4.14.2 and PyJWT to 2.14.0, matching the Dependabot updates already merged into main.
+
+- **Scan reference documents**: Scan reports, comparisons, and ground-truth files now live in the vulnerable-app-info repository. Links from the README and project site point to their new locations.
+- **Bank of Ed ground truth**: Added an expanded 35-finding benchmark dataset, preserving the original 23 IDs and adding 12 findings supported by saved scan evidence and source review. Intentional seeded administrator credentials, the shared customer password, and address-book nickname self-XSS are excluded. Companion notes explain the evidence, source-only confirmations, and claims excluded from the dataset.
+- **Test suite cleanup**: Repeated coverage, specialist dispatch, scan mode, and proof-of-concept checks now share test cases. Redundant and overly specific console animation checks have been removed.
+- **Frontend build output**: Generated frontend files are no longer stored in Git. Frontend checks and desktop packaging continue to build the bundle from the Vite source when needed.
+
+## [PR #272] September 18 Update - mostly UI fixes
+
+### New features
+
+- **Optional console log database**: Terminal console settings can now write Agent, Errors, LLM, and HTTP entries to a separate `logs.db` file. The feature is disabled by default. Stored LLM entries include the complete request or response payload. Testing Traffic remains in the main scanner database and is not copied.
+- **New experimental DAST modes**: Team and Deep. Team does 3 test passes, deep does test planning and spawns a swarm of agents which run simultaneously. Both modes hidden by default, not quite ready for use yet.
+
+### Updates
+
+- **LLM settings navigation**: Models are now configured inside the Provider settings. 
+- **Site Map interface revamp**: The site map display has been cleaned up, with only page nodes showing by default. 
+- **Independent upstream proxies**: Testing traffic and LLM requests can now use separate upstream proxy URLs. Existing proxy settings are copied to both traffic types during upgrade so current routing continues unchanged, and crawler model requests use the configured LLM proxy.
+
+### Fixes
+
+- **UI cleanup**: Lots of UI fixes everywhere - fixing alignment, content boxes that inexplicably don't take up all available space, responsive layout not compressing elements appropriately.
+- **Playwright browser install soft fail**: If Playwright can't install its browser, it soft-fails and allows the user to use their Chrome instead of blocking the launch.
+- **Resumable Deep SAST worker failures**: When deep SAST runs error out/terminate early they are now resumable.
+- **Console mouse scrolling**: The terminal console now captures the mouse wheel and scrolls through AESPA's buffered output instead of moving into the terminal's earlier command history.
+- **A.L.I.C.E. finding edits**: Requests to ALICE to review and change findings sometimes entered the read-only info mode of operation, which would make editing findings fail. Now they don't. 
+- **Fewer false access-control findings on public pages**: Scans now recognise when a public page renders the same content for signed-in and signed-out visitors. Public landing-page examples and product mockups are no longer treated as protected account data, and matching generic page text cannot automatically confirm an access-control finding.
+- **Desktop release builds**: The GitHub actions packaging broke because I moved scripts, it's fixed now. 
+
+## [PR #269] September 11 Update - SAST rework and fixes
+
+### New features
+
+- **Light and Deep SAST modes**: Choose Light for the original lower-cost workflow or Deep for repository modelling, threat-directed coverage, candidate reconciliation, and semantic closure. Deep scans build a language-neutral source and dependency inventory, identify assets, identities, trust boundaries, and threat scenarios, then combine baseline, threat-directed, sink-first, and deterministic analysis in one candidate ledger. Evidence and completeness checks prevent unsupported repository facts and incomplete threat reviews from being reported as full coverage. SQL schemas and common database clients provide deterministic navigation hints across supported languages. Codex sessions can run model-assisted phases without a separate API key, and reconciliation failures are shown when the provider is unavailable. Closure review can recover missed candidates for independent validation. Scanner policy controls finding classes, minimum severity and confidence, and phase budgets. The selected mode and completed phases are saved when a run is paused, resumed, rerun, exported, or imported. Existing runs are migrated as Light.
+
+- **Benchmark Lab for SAST**: Enable Benchmark Lab under System Settings → Feature Visibility to compare ordinary completed SAST runs with separately stored ground truth imported from canonical JSON or numbered vulnerability Markdown. Deterministic, model-assisted, and human-reviewed matching remain isolated from scan execution. Repeated-run comparisons show median and range metrics, per-item detection frequency, contamination exclusions, and configurable regression thresholds alongside manual adjudication, audit provenance, and JSON, CSV, or Markdown exports.
+
+- **SARIF export for SAST scans**: SAST results can now be exported in standard OASIS SARIF 2.1.0 format for direct integration with GitHub Code Scanning, GitLab SAST, SonarQube, and VS Code SARIF viewers. The export provides file locations, highlighted snippets, step-by-step source-to-sink taint flows (`codeFlows`), and confidence scores via SARIF's native `rank` property. Candidates discovered during the run are included, with unconfirmed or inconclusive candidates annotated with standard SARIF `suppressions` records. Verification metadata, including validator reasoning, confidence scores, counterevidence, proof gaps, and dynamic attack path guidance, is preserved in both formatted Markdown messages and machine-readable result property bags. In the SAST run ellipsis menu, Export Markdown and Export SARIF options are now available.
+
 - **A.L.I.C.E. goal mode**: Start a site or API chat with `/goal <objective>` to keep A.L.I.C.E. working until the outcome is verified or a specific blocker prevents further progress. Goals save checkpoints, survive browser navigation, and pause across restarts and provider limits. You can guide a running goal or use the pause, resume, edit, and clear controls.
-- **Interactive terminal console**: Running AESPA from a terminal now opens separate views for server requests, Python errors, LLM traffic, agent activity, and requests sent to test targets. Use the arrow keys and Enter to inspect target requests and responses, number keys to switch views, and Page Up and Page Down to browse buffered output. Position indicators help you keep your place, and the layout adjusts when the terminal is resized.
-- **Desktop console access**: The macOS menu bar and Windows system tray menus can now open the AESPA console in a terminal window. Activity is buffered continuously, so logs, the selected view, and scrollback are preserved when you close and reopen the terminal. Active scans continue running.
-- **Console database operations**: The console Settings menu now has separate Server Settings and Database Operations screens. You can back up the complete SQLite database, clear scan runs while keeping targets and configuration, or reset the database. Clearing and resetting require an exact typed confirmation and are unavailable while scan or agent work is active.
-- **Console port settings**: The terminal console now includes a Settings view showing the active listening address. You can choose an available port, restart the listener immediately, and save the choice for future launches.
+
+- **Interactive terminal console**: Running AESPA from a terminal now opens separate views for server requests, Python errors, LLM traffic, agent activity, and requests sent to test targets. LLM calls are grouped by call number, and calls and target traffic can be expanded to inspect their metadata, requests, and responses. The console supports keyboard navigation, scrollback, resize-aware layouts, and a ready state showing the listening address. The Agent view shows an adaptive AESPA logo until activity begins. Settings can restart the listener on a different port and save the choice, back up the SQLite database, clear scan runs while keeping targets and configuration, or reset the database. Destructive database actions require typed confirmation and are disabled while work is active. The macOS menu bar and Windows system tray can reopen the console without stopping scans or losing buffered activity, the selected view, or scroll position.
+
 - **Sandboxed Python for agent workflows**: A.L.I.C.E., specialist agents, and Test Leads can now run limited Python programs in a network-isolated Docker sandbox for payload generation, parsing, and multi-step tests. Target requests pass through AESPA's scope and scan-policy checks and appear in the Traffic Log with links to the execution, agent, batch, and coverage records. The feature is disabled by default and can be configured under Agent Settings → Python Sandbox. The default image is `ledwardchow/aespa-python-executor:0.1`, which supports Intel/AMD64 and Apple Silicon/ARM64 systems.
+
 - **GitHub Copilot account sign-in and selection**: Copilot providers can now start device-code sign-in from AESPA and select a locally authenticated Copilot CLI account. Credentials stay in Copilot CLI's credential store and are never sent to the browser.
 
 ### Updates
 
+- **Clearer SAST runs and progress**: SAST run pages show the full scan lifecycle, repository facts and mapping warnings, protected assets, data stores, threat scenarios, required security checks, closure outcomes, and phase-level efficiency. Analysis tabs explain when data is pending, being generated, paused, or incomplete, and reports and portable exports retain the same analysis. The Activity view now focuses on live agent panes for repository and threat modelling, analysis workers, validators, closure review, and attack-path analysis. Worker groups can be expanded to inspect each worker's task, result, and history, and saved runs restore this state after navigation or restart. The scan list now supports direct deletion and no longer shows the unused Linked Scan column. SAST notifications can be dismissed, and the five Light-mode progress stages use the full page width.
+
+- **Automatic SQLite space recovery**: New databases now enable full auto-vacuum on first launch, allowing unused pages to be returned to disk after data is deleted.
+
+- **Smaller default model response limit**: New model profiles now use a 16,384-token response limit, leaving more room for prompts, tools, and scan history within the model context window. Existing saved profiles keep their configured limit.
+
+- **Traffic purpose and coverage links**: Requests now show the sending agent, OWASP category, test label, and reason. The traffic user remains the authenticated account or session used for the request. Traffic generated for an OWASP coverage item is linked to that item, and clicking a coverage matrix cell opens the Traffic Log filtered to its requests.
+
+- **Streaming A.L.I.C.E. replies**: Site and API chats now show text while Anthropic, OpenAI-compatible, Google, and AWS Bedrock models are generating it. Tool calls still wait for complete arguments, and reconnecting after a long response restores the current reply even when older stream events have expired.
+
+- **Application campaign validation cases**: Campaigns now trace each approved backend SAST finding to a specific frontend page or action and browser request before live testing begins. Frontend analysis follows custom request wrappers, imported helpers, state-held route values, async event callbacks, and server-template form actions across common JavaScript, TypeScript, React, Vue, Angular, Axios, HTML, Thymeleaf, and Spring MVC patterns. Traces inspect all relevant interface facts and can cross a frontend request, same-application server route, proxy call, and downstream service route without confusing browser and server requests. Equivalent paths are combined, paths stay attached to the site that owns them, and multi-step findings must begin at their stated first endpoint. Backend ownership without a proven frontend path stays unresolved, so unresolved, ambiguous, stale, or wrong-target paths do not enter the scan queue. Re-running context matching clears generated leads, mappings, validation cases, and review decisions, then rebuilds them from the frozen source snapshots. Campaign pages show the resolved path, readiness blockers, live request binding, and validation outcome for each case.
+
+- **New OpenAI model support**: OpenAI connections can now use GPT-6 Astra and GPT-5.6 Luna, Terra, Sol, and the Sol alias for scans and agent workflows. These models use the Responses API with tool calls. The model form shows their supported reasoning levels and context windows, including the 1,050,000-token context window for GPT-5.6 models.
+
 - **Linux display detection**: AESPA now warns when a Linux host cannot access X11 or Wayland. Guided login and visible browser mode are disabled until a graphical display is available.
-- **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser, Reporting Lab, and Applications options are grouped under Feature Visibility.
+
+- **Tabbed System Settings**: System Settings now separates feature visibility controls from debug settings. Browser and lab options are grouped under Feature Visibility, while Applications scanning and DAST Deep Scan Mode are grouped under Experimental Features. Settings tabs support keyboard navigation.
+
 - **Configurable Standard scan mode**: Standard scans now continue until the Test Lead has tested the configured percentage of applicable OWASP coverage items. Set the target in the Test Lead agent settings; the default is 60%.
+
 - **Recovery guidance for stalled scans**: The Mentor now receives a limited set of failure details with credentials removed. It can recommend browser inspection, a retry, signing in again, an HTTP probe, a Python workflow, or a different approach. Browser agents can inspect hidden, disabled, or obstructed controls and retry a normal click without forcing it through an overlay.
-- **Easier LLM request inspection**: Console LLM calls are grouped by call number and collapsed to a header that shows when the request started and which run made it. Use the arrow keys and Enter to expand requests and responses. Each payload identifies its operation, request type, direction, provider, model, run, and call number.
-- **Agent console logo**: The Agent screen now shows a shaded, red-orange AESPA logo based on the macOS icon while waiting for activity. It uses a compact layout in narrow terminals and is replaced by the activity log when work starts.
-- **Visible console listening address**: The Agents view now opens with a ready message showing the host and port where AESPA is listening.
-- **Keyboard navigation in Settings**: Settings tabs now support keyboard navigation.
 
 ### Fixes
 
+- **More reliable Deep SAST runs**: Repository reconciliation now combines repeated relationships before saving, so duplicate model output does not stop a scan. Retrying or deleting a run removes threat, obligation, repository relationship, worker, campaign mapping, and validation records in a safe order. Tool calls are saved before execution, allowing application shutdowns and unexpected errors to pause a scan at its last step while an explicit Stop still cancels it. SAST usage now includes repository modelling and threat analysis, and activity shows pending input-token estimates separately from completed usage.
+
+- **Web runs with page-linked traffic can be deleted**: Run cleanup now removes requests and other page-linked scan data before deleting crawled pages, avoiding a foreign-key error on completed scans.
+
+- **Long scans stay within model context limits**: Scanner conversations now use one bounded history journal, compact short and resumed conversations correctly, account for reasoning and structured tool data, and reduce individual output allowances when necessary. Large supporting prompts are bounded while fixed instructions and recent evidence are retained. Models set to Auto keep discovered context-window values, combine them with independently discovered reasoning capabilities, and follow refreshed provider metadata. Missing metadata uses the conservative fallback without changing the model to manual configuration.
+
+- **More accurate finding evidence**: Anonymous and alternate-user probes now isolate headers and cookies from the primary session. Missing-authentication findings require explicit credential-free evidence, authenticated 200 responses cannot be turned into access-control findings during reporting, and cosmetic report prefixes no longer bypass deduplication. Findings stay attached to the endpoint, page, and evidence that produced them. Query-string payloads are recorded exactly without creating duplicate site-map pages, and related coverage, specialist handoffs, and validation share the same page association.
+
+- **Campaign progress stays current after a resumed scan**: Campaign pages continue refreshing after an interrupted child scan and remove the old interruption message when matching resumes.
+
+- **Long Bedrock scan requests no longer time out while the model is working**: Agent scans now read Bedrock responses as a stream and allow long reasoning requests to remain idle for up to one hour. Tool calls, reasoning signatures, usage totals, and provider diagnostics are retained from the stream.
+
+- **Reliable usage statistics**: Automated tests now use an isolated database for all model calls, preventing test usage from appearing in your statistics. Models without recorded prices show an unavailable estimate instead of a zero cost.
+
 - **Clearer Python sandbox setup errors**: The settings page and terminal console now distinguish a missing executor image from a Docker service that is stopped or cannot be reached.
-- **Run tabs follow browser navigation**: Browser back and forward now restore the selected web and SAST run tabs.
-- **A.L.I.C.E. chat history keeps its place**: Incoming and streaming messages no longer move the chat to the bottom after you scroll up. The chat follows new messages again when you return to the bottom.
-- **Crawls continue past unclickable overlays**: Dialog and login control clicks now have short attempt limits and a total time budget. Stale, obscured, or repeatedly re-rendered controls no longer keep a crawl stuck on one page.
-- **Reliable Python sandbox startup**: Sandbox workspaces now use the correct user and group IDs with private permissions. AESPA checks the full offline container configuration before reporting the runtime ready and shows the Docker runner exit code if no result is returned.
-- **Consistent Python Sandbox settings layout**: Python Sandbox settings now use the same content width as other Agent Settings pages.
-- **More reliable Codex connections**: Codex processes now retain the Windows environment needed for DNS and HTTPS access. Temporary response-stream interruptions wait for Codex's announced reconnect attempt before failing the call.
-- **Independent Codex model allowances**: An exhausted Spark allowance no longer blocks other Codex models that still have capacity.
+
 - **Clearer crawler login errors**: Unavailable models, exhausted allowances, and malformed model responses during login now produce error events showing the affected model and reset time when available.
-- **Clearer startup port errors**: Terminal startup now reports when the configured address is already in use and explains how to select another port.
-- **More reliable desktop startup**: The macOS and Windows apps reserve their selected local port until the backend starts, preventing another process from taking it during launch. Startup failures are reported sooner, and database upgrades have more time to finish on slower systems.
+
+- **Clearer startup port errors**: Terminal startup now reports when the configured address is already in use.
 
 ### Housekeeping
 
+- **Build script organisation**: Build, signing, packaging, and Docker publishing scripts now live in `scripts/`. Release workflows use the new paths, and scripts resolve inputs from the repository root even when launched from another directory.
+
 - **Findings and settings maintenance**: Web and API findings now share editing and detail components. Regression checks cover saved changes, cancelled edits, and drafts retained across web-run tabs. Settings and saved-run data handling have been split into smaller modules, preserving existing formats and defaults.
+
 - **Frontend maintenance**: The UI has been reorganized into feature modules with shared components, API clients, and styles. Automated checks now cover routing, forms, and browser rendering.
+
 - **Multi-architecture Python sandbox publishing**: A release script can publish the optional Python executor to Docker Hub under one tag for Intel/AMD64 and Apple Silicon/ARM64 systems, with build provenance and a software bill of materials.
 
 ## [PR #267] August 30 update - SAST, API scan and UI improvements
@@ -867,7 +1274,7 @@ Four targeted fixes addressing ALICE session persistence, job visibility, token 
 
 **Merged:** 2026-05-30 22:49 AEST | Branch: `tester-chat → main`
 
-Introduces A.L.I.C.E. (AI LLM-Integrated Chat Engine), an interactive user-directed pentesting agent embedded directly in the scan UI. Covers the full feature from initial chat interface through background task persistence, stream resume after page refresh, server-side session storage, and a suite of correctness fixes (~40 files changed).
+Introduces ALICE: LLM-Integrated Chat Engine, an interactive user-directed pentesting agent embedded directly in the scan UI. Covers the full feature from initial chat interface through background task persistence, stream resume after page refresh, server-side session storage, and a suite of correctness fixes (~40 files changed).
 
 ### Architecture
 

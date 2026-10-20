@@ -1,0 +1,536 @@
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+import math
+import re
+from datetime import datetime, timezone
+from urllib.parse import urlsplit
+
+import httpx
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, SecretStr
+from sqlmodel import Session, select
+
+from aespa.db import get_engine
+from aespa.services.settings import get_upstream_proxy_config
+from aespa.services.tls import httpx_verify
+
+from .models import Dataset, PublishingSettings, PublishingUploadToken, ScanResult
+from .transfer import dataset_key, identity
+
+DEFAULT_SITE_URL = "https://benchmarks.aespa.app"
+SITE_URL_ALIASES = frozenset(
+    {DEFAULT_SITE_URL, "https://aespa-benchmarks.maranthis.chatgpt.site"}
+)
+
+
+def same_site_url(left: str, right: str) -> bool:
+    return left == right or {left, right} == SITE_URL_ALIASES
+
+
+def site_url(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or not (
+            parsed.hostname.endswith(".chatgpt.site")
+            or parsed.hostname == "benchmarks.aespa.app"
+        )
+        or parsed.username
+        or parsed.password
+        or parsed.port not in (None, 443)
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "Enter the benchmarks.aespa.app URL or an HTTPS Sites URL without a path"
+        )
+    return f"https://{parsed.hostname}"
+
+
+def timestamp(value) -> str | None:
+    if value is None:
+        return None
+    parsed = (
+        value
+        if isinstance(value, datetime)
+        else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    )
+    return (
+        parsed.replace(tzinfo=timezone.utc).isoformat()
+        if parsed.tzinfo is None
+        else parsed.astimezone(timezone.utc).isoformat()
+    )
+
+
+def model_summary(value, *, include_daybreak: bool = False) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    summary = {
+        key: str(value[key]) if value.get(key) is not None else None
+        for key in ("model", "name", "provider")
+    }
+    programs = value.get("daybreak_programs")
+    if include_daybreak and isinstance(programs, list):
+        summary["daybreak_programs"] = sorted(
+            set(programs) & {"daybreak_blue", "daybreak_red"}
+        )
+    return summary
+
+
+def token_counts(core, row, models: dict) -> dict | None:
+    totals = {key: 0 for key in ("input", "output", "cache_read", "cache_write")}
+    recorded = False
+    for _, entry in run_usage(core, row, models):
+        for key in totals:
+            value = entry.get(key)
+            if type(value) is int and value >= 0:
+                totals[key] += value
+                recorded = True
+    return totals if recorded else None
+
+
+def run_usage(core, row, models: dict):
+    from aespa.models import ApiTestRun, SastRun, TestRun
+
+    if row.run_id <= 0:
+        return
+    run_type = {"site": TestRun, "api": ApiTestRun, "sast": SastRun}.get(row.run_kind)
+    if run_type is None:
+        return
+    runs = [core.get(run_type, row.run_id)]
+    if row.run_kind != "sast":
+        source_ids = {
+            source.get("run_id")
+            for source in models.get("sast", [])
+            if isinstance(source, dict) and isinstance(source.get("run_id"), int)
+        }
+        runs.extend(core.get(SastRun, source_id) for source_id in sorted(source_ids))
+    for run in runs:
+        usage = json.loads(run.token_usage_json or "{}") if run else {}
+        if not isinstance(usage, dict):
+            continue
+        for key, entry in usage.items():
+            if isinstance(entry, dict):
+                yield key, entry
+
+
+def published_price_and_comment(core, row, models: dict, result: dict):
+    from aespa.services.statistics import _rates_for, estimate_usage_cost
+
+    cost = result.get("scan_cost_usd")
+    comment = result.get("comment") or ""
+    fast_cost = 0.0
+    normal_cost = 0.0
+    fast_found = False
+    complete = True
+    for key, entry in run_usage(core, row, models):
+        if not entry.get("service_tier"):
+            continue
+        fast_found = True
+        recorded = entry.get("estimated_total_cost_usd")
+        if (
+            not entry.get("estimated_cost_available")
+            or type(recorded) not in (int, float)
+            or not math.isfinite(recorded)
+        ):
+            complete = False
+            continue
+        fast_cost += recorded
+        provider = entry.get("provider")
+        model = entry.get("model") or key.split("#", 1)[0]
+        if not provider or not model:
+            complete = False
+            continue
+        standard = estimate_usage_cost(
+            provider,
+            input_tokens=entry.get("input", 0),
+            output_tokens=entry.get("output", 0),
+            cache_read_tokens=entry.get("cache_read", 0),
+            cache_write_tokens=entry.get("cache_write", 0),
+            ai_credits=entry.get("ai_credits", 0),
+            factory_credits=entry.get("factory_credits", 0),
+            rates=_rates_for(core, provider, model),
+        )
+        if not standard["estimated_cost_available"]:
+            complete = False
+            continue
+        normal_cost += standard["estimated_total_cost_usd"]
+    if not fast_found:
+        return cost, comment
+    price_available = complete and type(cost) in (int, float) and math.isfinite(cost)
+    note = (
+        f"Run used Fast mode. Estimated scan cost with Fast mode: ${cost:.8f}. "
+        "Published scan cost uses Normal mode pricing."
+        if price_available
+        else "Run used Fast mode. A complete Fast mode price is unavailable."
+    )
+    if note not in comment:
+        comment = f"{comment.rstrip()}\n\n{note}".strip()
+    return (
+        round(cost - fast_cost + normal_cost, 8) if price_available else None,
+        comment,
+    )
+
+
+def graph_bundle(store, dataset_ids: set[int] | None = None) -> dict:
+    from .router import result_out
+
+    output = []
+    with store.session() as session, Session(get_engine()) as core:
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        query = select(ScanResult).order_by(ScanResult.id)
+        if dataset_ids is not None:
+            query = query.where(ScanResult.dataset_id.in_(sorted(dataset_ids)))
+        for row in session.exec(query):
+            result = result_out(row, core)
+            dataset = session.get(Dataset, row.dataset_id)
+            if dataset is None:
+                continue
+            models = result.get("scan_models") or {}
+            sources = models.get("sast") or []
+            published_cost, comment = published_price_and_comment(
+                core, row, models, result
+            )
+            output.append(
+                {
+                    "id": identity(session, "results", row).key,
+                    "dataset": {"key": dataset_key(dataset), "name": dataset.name},
+                    "scan_type": "SAST"
+                    if row.run_kind == "sast"
+                    else "DAST with SAST Leads"
+                    if sources
+                    else "DAST",
+                    "primary": model_summary(
+                        models.get("primary"), include_daybreak=True
+                    ),
+                    "sast": [
+                        {"model": model_summary(source.get("model"))}
+                        for source in sources
+                    ]
+                    if row.run_kind != "sast"
+                    else [],
+                    "scan_started_at": timestamp(result.get("scan_started_at")),
+                    "scan_cost_usd": published_cost,
+                    "tokens": token_counts(core, row, models),
+                    "summary": result["summary"],
+                    "score": result["score"],
+                    "category_counts": result["category_counts"],
+                    "category_totals": result["category_totals"],
+                    "comment": comment,
+                    "updated_at": timestamp(row.updated_at),
+                }
+            )
+        session.commit()
+    return {"version": 1, "results": output}
+
+
+CONNECTION_PREFIX = "aespa_publish_v1_"
+
+
+def connection_token(url: str, service: str, upload: str) -> str:
+    value = json.dumps(
+        {"site_url": url, "service_token": service, "upload_token": upload},
+        separators=(",", ":"),
+    )
+    return CONNECTION_PREFIX + base64.urlsafe_b64encode(value.encode()).decode().rstrip(
+        "="
+    )
+
+
+def decode_connection_token(value: str, url: str) -> tuple[str, str]:
+    error = "Enter an upload token generated on the results site"
+    if len(value) > 32768 or not value.startswith(CONNECTION_PREFIX):
+        raise ValueError(error)
+    encoded = value[len(CONNECTION_PREFIX) :]
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
+        raise ValueError(error)
+    try:
+        data = json.loads(
+            base64.b64decode(
+                encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
+            )
+        )
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        raise ValueError(error) from None
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"site_url", "service_token", "upload_token"}
+        or not all(isinstance(v, str) for v in data.values())
+    ):
+        raise ValueError(error)
+    if not same_site_url(data["site_url"], url):
+        raise ValueError("This token was generated for a different site")
+    service, upload = data["service_token"], data["upload_token"]
+    if not re.fullmatch(r"[\x21-\x7e]{1,8192}", service) or not re.fullmatch(
+        r"aespa_upload_[a-f0-9]{64}", upload
+    ):
+        raise ValueError(error)
+    return service, upload
+
+
+class PublishingIn(BaseModel):
+    site_url: str = Field(max_length=300)
+    token: SecretStr | None = Field(default=None)
+    service_token: SecretStr | None = Field(default=None)
+    upload_token: SecretStr | None = Field(default=None)
+
+
+class PublishIn(BaseModel):
+    dataset_ids: list[int] | None = Field(default=None, max_length=1000)
+
+
+def register_publishing(router: APIRouter, store) -> None:
+    @router.get("/publishing")
+    def get_publishing() -> dict:
+        with store.session() as session:
+            saved = session.get(PublishingSettings, 1)
+            return {
+                "site_url": saved.site_url
+                if saved and saved.site_url
+                else DEFAULT_SITE_URL,
+                "token_saved": bool(saved and saved.service_token),
+                "upload_token_saved": bool(
+                    (upload := session.get(PublishingUploadToken, 1)) and upload.token
+                ),
+            }
+
+    @router.post("/publishing/token")
+    def reveal_publishing_token() -> JSONResponse:
+        with store.session() as session:
+            saved = session.get(PublishingSettings, 1)
+            if not saved or not saved.service_token:
+                raise HTTPException(404, "No service token has been saved")
+            upload = session.get(PublishingUploadToken, 1)
+            if not upload or not upload.token:
+                raise HTTPException(404, "No upload token has been saved")
+            return JSONResponse(
+                {
+                    "token": connection_token(
+                        saved.site_url, saved.service_token, upload.token
+                    )
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+
+    @router.put("/publishing")
+    def save_publishing(payload: PublishingIn) -> dict:
+        try:
+            url = site_url(payload.site_url)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        with store.session() as session:
+            saved = session.get(PublishingSettings, 1) or PublishingSettings()
+            token = (
+                payload.service_token.get_secret_value().strip()
+                if payload.service_token is not None
+                else None
+            )
+            upload = session.get(PublishingUploadToken, 1) or PublishingUploadToken()
+            upload_token = (
+                payload.upload_token.get_secret_value().strip()
+                if payload.upload_token is not None
+                else None
+            )
+            if payload.token is not None:
+                if (
+                    payload.service_token is not None
+                    or payload.upload_token is not None
+                ):
+                    raise HTTPException(422, "Send only the generated upload token")
+                try:
+                    token, upload_token = decode_connection_token(
+                        payload.token.get_secret_value().strip(), url
+                    )
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from None
+            # Never reuse a site's credential for a different site.
+            if saved.site_url and not same_site_url(saved.site_url, url) and not token:
+                raise HTTPException(422, "Enter a token generated for the new site")
+            if (
+                saved.site_url
+                and not same_site_url(saved.site_url, url)
+                and not upload_token
+            ):
+                raise HTTPException(422, "Enter a token generated for the new site")
+            if upload_token is not None:
+                if not re.fullmatch(r"aespa_upload_[a-f0-9]{64}", upload_token):
+                    raise HTTPException(422, "Enter a valid upload token")
+                upload.token = upload_token
+            if not upload.token:
+                raise HTTPException(
+                    422, "Create an upload token on the results site and enter it here"
+                )
+            if token is not None:
+                if (
+                    not token
+                    or len(token) > 8192
+                    or any(char.isspace() for char in token)
+                ):
+                    raise HTTPException(422, "Enter a valid service token")
+                saved.service_token = token
+            if not saved.service_token:
+                raise HTTPException(
+                    422, "Enter an upload token generated on the results site"
+                )
+            saved.site_url = url
+            session.add(saved)
+            session.add(upload)
+            session.commit()
+        return {"site_url": url, "token_saved": True, "upload_token_saved": True}
+
+    @router.get("/graph-export")
+    def export_graphs() -> dict:
+        return graph_bundle(store)
+
+    @router.post("/publish")
+    async def publish_graphs(payload: PublishIn | None = None) -> dict:
+        dataset_ids = (
+            set(payload.dataset_ids)
+            if payload is not None and payload.dataset_ids is not None
+            else None
+        )
+        if dataset_ids is not None and not dataset_ids:
+            raise HTTPException(422, "Choose at least one application to publish")
+        with store.session() as session:
+            if dataset_ids is not None:
+                found = set(
+                    session.exec(
+                        select(Dataset.id).where(Dataset.id.in_(sorted(dataset_ids)))
+                    )
+                )
+                if found != dataset_ids:
+                    raise HTTPException(422, "A selected ground truth no longer exists")
+            saved = session.get(PublishingSettings, 1)
+            if not saved or not saved.site_url or not saved.service_token:
+                raise HTTPException(422, "Save the site connection first")
+            try:
+                url = site_url(saved.site_url)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            upload = session.get(PublishingUploadToken, 1)
+            if not upload or not upload.token:
+                raise HTTPException(
+                    422,
+                    "Create an upload token on the results site and save it in connection settings",
+                )
+            token = saved.service_token
+            upload_token = upload.token
+        results = graph_bundle(store, dataset_ids)["results"]
+        if dataset_ids is not None and not results:
+            raise HTTPException(
+                422, "The selected applications have no results to publish"
+            )
+        batches, batch = [], []
+        for result in results:
+            candidate = [*batch, result]
+            if (
+                len(candidate) > 100
+                or len(
+                    json.dumps(
+                        {"version": 1, "results": candidate}, ensure_ascii=False
+                    ).encode()
+                )
+                > 262144
+            ):
+                if batch:
+                    batches.append(batch)
+                batch = [result]
+            else:
+                batch = candidate
+            if (
+                len(
+                    json.dumps(
+                        {"version": 1, "results": batch}, ensure_ascii=False
+                    ).encode()
+                )
+                > 262144
+            ):
+                raise HTTPException(422, "A result is too large to publish")
+        if batch:
+            batches.append(batch)
+        stored = skipped = protected = locked = sent = 0
+        with Session(get_engine()) as core:
+            network = get_upstream_proxy_config(core)
+        client_options = {
+            "timeout": 30,
+            "follow_redirects": False,
+            "trust_env": False,
+        }
+        if network.proxy_llm and network.llm_proxy_url:
+            client_options["proxy"] = network.llm_proxy_url
+        try:
+            client_options["verify"] = httpx_verify(network.llm_ca_bundle_path, True)
+            client = httpx.AsyncClient(**client_options)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                502, "The configured CA bundle could not be loaded"
+            ) from exc
+        async with client:
+            for batch in batches:
+                try:
+                    response = await client.post(
+                        f"{url}/api/v1/results",
+                        headers={
+                            "OAI-Sites-Authorization": f"Bearer {token}",
+                            "X-AESPA-Upload-Token": upload_token,
+                            "Content-Type": "application/json",
+                        },
+                        content=json.dumps(
+                            {"version": 1, "results": batch},
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        ).encode(),
+                    )
+                    if response.status_code in (401, 403):
+                        raise HTTPException(
+                            502,
+                            f"Site access was rejected. Check the upload token. If access still fails, generate a new token on the results site. {sent} results sent.",
+                        )
+                    if not response.is_success:
+                        raise HTTPException(
+                            502,
+                            f"The site rejected the upload (HTTP {response.status_code}). {sent} results sent. You can retry safely.",
+                        )
+                    report = response.json()
+                    if (
+                        not isinstance(report, dict)
+                        or report.get("received") != len(batch)
+                        or not all(
+                            isinstance(report.get(key), int) and report[key] >= 0
+                            for key in ("stored", "skipped_stale")
+                        )
+                        or not isinstance(report.get("skipped_site_edits", 0), int)
+                        or report.get("skipped_site_edits", 0) < 0
+                        or not isinstance(report.get("skipped_locked", 0), int)
+                        or report.get("skipped_locked", 0) < 0
+                        or report["stored"]
+                        + report["skipped_stale"]
+                        + report.get("skipped_site_edits", 0)
+                        + report.get("skipped_locked", 0)
+                        != len(batch)
+                    ):
+                        raise ValueError("Invalid upload receipt")
+                except (httpx.HTTPError, ValueError, TypeError) as exc:
+                    raise HTTPException(
+                        502,
+                        f"The upload could not be confirmed. {sent} results confirmed. You can retry safely.",
+                    ) from exc
+                sent += len(batch)
+                stored += report["stored"]
+                skipped += report["skipped_stale"]
+                protected += report.get("skipped_site_edits", 0)
+                locked += report.get("skipped_locked", 0)
+        return {
+            "received": sent,
+            "stored": stored,
+            "skipped_stale": skipped,
+            "skipped_site_edits": protected,
+            "skipped_locked": locked,
+            "site_url": url,
+        }

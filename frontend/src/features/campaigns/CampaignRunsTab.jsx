@@ -1,16 +1,23 @@
 import * as apiRunsApi from "../../shared/api/apiRuns.js";
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useState, useEffect } from "react";
 
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
 import {
   campaignDisplayStatus,
+  campaignDisplayWarnings,
   campaignMemberDisplayStatus,
-  safeParseJson,
+  isTerminalPause,
 } from "../../shared/runs/campaignPresentation.js";
+import {
+  ValidationCaseList,
+  ValidationCaseSummary,
+  validationCasesFromResponse,
+} from "./ValidationCases.jsx";
 
 // ── CampaignRunsTab ──────────────────────────────────────────────────────────
 // Every child SAST/web/API run this campaign created, with a deep link to its
@@ -18,25 +25,16 @@ import {
 // state lifecycle is duplicated here — the campaign record (already loaded by
 // the shell) is the only source of truth; this only additionally resolves
 // component/target names for readability.
-export function CampaignRunsTab({
-  applicationId,
-  campaign,
-  error,
-  resumeSource,
-  resumeTarget,
-  busy,
-}) {
+export function CampaignRunsTab({ systemId, campaign, resumeSource, resumeTarget, busy }) {
   const [tokenUsage, setTokenUsage] = useState(null);
   const [tokenExpanded, setTokenExpanded] = useState(false);
   const [componentNames, setComponentNames] = useState({});
   const [targetNames, setTargetNames] = useState({});
+  const [validationCases, setValidationCases] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([
-      applicationsApi.listAppComponents(applicationId),
-      applicationsApi.listAppTargets(applicationId),
-    ])
+    Promise.all([systemsApi.listSystemComponents(systemId), systemsApi.listSystemTargets(systemId)])
       .then(([comps, tgts]) => {
         if (cancelled) return;
         const cMap = {};
@@ -54,7 +52,24 @@ export function CampaignRunsTab({
     return () => {
       cancelled = true;
     };
-  }, [applicationId]);
+  }, [systemId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    systemsApi
+      .getCampaignValidationCases(systemId, campaign.id)
+      .then((value) => {
+        if (!cancelled) setValidationCases(validationCasesFromResponse(value));
+      })
+      .catch(() => {
+        // A missing endpoint is expected while reading older campaigns. The
+        // existing run tables remain useful in that case.
+        if (!cancelled) setValidationCases([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [systemId, campaign.id, campaign.updated_at, campaign.status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,6 +88,7 @@ export function CampaignRunsTab({
       if (cancelled) return;
       const totals = {
         total_input: 0,
+        total_uncached_input: 0,
         total_output: 0,
         total_cache_read: 0,
         total_cache_write: 0,
@@ -85,18 +101,23 @@ export function CampaignRunsTab({
         estimated_total_cost_usd: 0,
         estimated_cost_available: false,
         by_model: {},
+        by_model_fast: {},
       };
       for (const r of results) {
         if (!r) continue;
         for (const key of Object.keys(totals)) {
-          if (key === "by_model") continue;
+          if (key === "by_model" || key === "by_model_fast") continue;
           if (key === "estimated_cost_available") totals[key] = totals[key] || r[key];
           else totals[key] += r[key] || 0;
         }
-        for (const [model, usage] of Object.entries(r.by_model || {})) {
-          const aggregate = (totals.by_model[model] ||= { provider: usage.provider });
+        for (const [list, model, usage] of [
+          ...Object.entries(r.by_model || {}).map(([m, u]) => ["by_model", m, u]),
+          ...Object.entries(r.by_model_fast || {}).map(([m, u]) => ["by_model_fast", m, u]),
+        ]) {
+          const aggregate = (totals[list][model] ||= { provider: usage.provider });
           for (const key of [
             "input",
+            "uncached_input",
             "output",
             "cache_read",
             "cache_write",
@@ -128,7 +149,7 @@ export function CampaignRunsTab({
     campaignDisplayStatus(campaign),
   );
   const resumable = (status) => ["pending", "failed", "skipped", "incomplete"].includes(status);
-  const warnings = safeParseJson(campaign.warnings_json, []);
+  const warnings = campaignDisplayWarnings(campaign);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -140,8 +161,9 @@ export function CampaignRunsTab({
         />
       </div>
 
-      {error && <div className="alert error">{error}</div>}
-      {campaign.error_message && <div className="alert error">{campaign.error_message}</div>}
+      {campaign.error_message && isTerminalPause(campaignDisplayStatus(campaign)) && (
+        <div className="alert error">{campaign.error_message}</div>
+      )}
       {warnings.length > 0 && (
         <div className="alert warning">
           <div style={{ fontWeight: 700, marginBottom: 4 }}>Partial-context warnings</div>
@@ -151,6 +173,24 @@ export function CampaignRunsTab({
             ))}
           </ul>
         </div>
+      )}
+
+      {validationCases?.length > 0 && (
+        <section className="campaign-validation-cases">
+          <div className="row spread" style={{ gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div>
+              <div className="form-section-title" style={{ margin: 0 }}>
+                Validation cases
+              </div>
+              <div className="subtle" style={{ fontSize: 12, marginTop: 4 }}>
+                Each case is tied to one source assertion and target path. Readiness controls what
+                can enter a live scan.
+              </div>
+            </div>
+            <ValidationCaseSummary cases={validationCases} />
+          </div>
+          <ValidationCaseList cases={validationCases} />
+        </section>
       )}
 
       <div>
@@ -166,7 +206,11 @@ export function CampaignRunsTab({
             </thead>
             <tbody>
               {sourceRuns.map((m) => (
-                <tr key={m.id}>
+                <NavigationRow
+                  key={m.id}
+                  href={m.sast_run_id ? `#/sast-runs/${m.sast_run_id}/progress` : undefined}
+                  label={`Open ${componentNames[m.component_id] || `Component #${m.component_id}`}`}
+                >
                   <td>{componentNames[m.component_id] || `Component #${m.component_id}`}</td>
                   <td>
                     <StatusBadge status={campaignMemberDisplayStatus(m)} />
@@ -191,7 +235,7 @@ export function CampaignRunsTab({
                       </button>
                     )}
                   </td>
-                </tr>
+                </NavigationRow>
               ))}
               {sourceRuns.length === 0 && (
                 <tr>
@@ -218,7 +262,17 @@ export function CampaignRunsTab({
             </thead>
             <tbody>
               {targetRuns.map((m) => (
-                <tr key={m.id}>
+                <NavigationRow
+                  key={m.id}
+                  href={
+                    m.test_run_id
+                      ? `#/runs/${m.test_run_id}/status`
+                      : m.api_test_run_id
+                        ? `#/api-runs/${m.api_test_run_id}/status`
+                        : undefined
+                  }
+                  label={`Open ${targetNames[m.target_id] || `Target #${m.target_id}`}`}
+                >
                   <td>{targetNames[m.target_id] || `#${m.target_id}`}</td>
                   <td>{m.target_type === "site" ? "Web" : "API"}</td>
                   <td>
@@ -249,7 +303,7 @@ export function CampaignRunsTab({
                       </button>
                     )}
                   </td>
-                </tr>
+                </NavigationRow>
               ))}
               {targetRuns.length === 0 && (
                 <tr>

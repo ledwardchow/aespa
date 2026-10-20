@@ -4,7 +4,9 @@ import { parseRoute } from "./parseRoute.ts";
 test.each([
   ["#/", { name: "list" }],
   ["#/sites/new", { name: "site-new" }],
-  ["#/sites/7/edit", { name: "site-edit", id: 7 }],
+  ["#/sites/7/edit", { name: "site-detail", id: 7, tab: "details" }],
+  ["#/sites/7/details", { name: "site-detail", id: 7, tab: "details" }],
+  ["#/sites/7/saved-crawls", { name: "site-detail", id: 7, tab: "saved-crawls" }],
   ["#/sites/7/runs/new", { name: "run-new", siteId: 7 }],
   ["#/sites/7", { name: "site-detail", id: 7 }],
   ["#/apis", { name: "api-list" }],
@@ -17,6 +19,7 @@ test.each([
     "#/api-runs/7/findings?finding=F-12.",
     { name: "api-run-detail", id: 7, tab: "findings", findingRef: "F-12" },
   ],
+  ["#/api-runs/7/leads?lead=L-4", { name: "api-run-detail", id: 7, tab: "leads", leadRef: "L-4" }],
   ["#/runs/7/alice-popout", { name: "alice-popout", id: 7 }],
   [
     "#/runs/7/findings?finding=F-12&lead=L-3",
@@ -24,17 +27,66 @@ test.each([
   ],
   ["#/sast-runs/7/progress", { name: "sast-run-detail", id: 7, tab: "progress" }],
   ["#/sast-runs/new", { name: "sast-run-new" }],
+  ["#/systems/3/campaigns/new", { name: "campaign-new", id: 3 }],
   ["#/applications/3/campaigns/new", { name: "campaign-new", id: 3 }],
   [
-    "#/applications/3/campaigns/7/findings?finding=F-9",
+    "#/systems/3/campaigns/7/findings?finding=F-9",
     { name: "campaign-detail", id: 3, campaignId: 7, tab: "findings", findingRef: "F-9" },
   ],
   ["#/stats/usage", { name: "stats" }],
   ["#/settings", { name: "settings" }],
+  ["#/settings/profiles", { name: "settings", tab: "profiles", screen: "list" }],
+  ["#/settings/profiles/new", { name: "settings", tab: "profiles", screen: "new" }],
+  ["#/settings/profiles/7/edit", { name: "settings", tab: "profiles", screen: "edit", id: 7 }],
+  ["#/settings/providers", { name: "settings", tab: "providers", screen: "list" }],
+  ["#/settings/providers/new", { name: "settings", tab: "providers", screen: "new" }],
+  ["#/settings/providers/7/edit", { name: "settings", tab: "providers", screen: "edit", id: 7 }],
+  [
+    "#/settings/models/new?provider_id=3&model=vendor%2Fmodel-1",
+    {
+      name: "settings",
+      tab: "models",
+      screen: "new",
+      providerId: 3,
+      modelName: "vendor/model-1",
+    },
+  ],
+  ["#/settings/models/7/edit", { name: "settings", tab: "models", screen: "edit", id: 7 }],
   ["#/scan-policy", { name: "scan-policy" }],
-  ["#/external-integrations", { name: "external-integrations" }],
-  ["#/debug", { name: "debug" }],
+  ["#/external-integrations", { name: "scan-policy", tab: "global", subTab: "proxy" }],
+  ["#/scan-policy/global/features", { name: "scan-policy", tab: "global", subTab: "features" }],
+  [
+    "#/scan-policy/global/openai-refusals",
+    { name: "scan-policy", tab: "global", subTab: "openai-refusals" },
+  ],
+  ["#/scan-policy/global/debug", { name: "scan-policy", tab: "global", subTab: "debug" }],
+  ["#/scan-policy/global/proxy", { name: "scan-policy", tab: "global", subTab: "proxy" }],
+  ["#/scan-policy/global/libraries", { name: "scan-policy", tab: "global", subTab: "libraries" }],
+  [
+    "#/scan-policy/global/authentication",
+    { name: "scan-policy", tab: "global", subTab: "authentication" },
+  ],
+  ["#/settings/authentication", { name: "scan-policy", tab: "global", subTab: "authentication" }],
+  ["#/scan-policy/systems", { name: "scan-policy", tab: "systems" }],
+  ["#/scan-policy/sast", { name: "scan-policy", tab: "sast" }],
+  ["#/scan-policy/dast/headers", { name: "scan-policy", tab: "dast", subTab: "headers" }],
+  ["#/scan-policy/dast/validator", { name: "scan-policy", tab: "dast", subTab: "validator" }],
+  ["#/extensions", { name: "extensions" }],
+  [
+    "#/extensions/aespa.burpsuite/settings",
+    { name: "extension-settings", extensionId: "aespa.burpsuite" },
+  ],
+  ["#/debug", { name: "scan-policy" }],
   ["#/reporting-debug", { name: "reporting-debug" }],
+  ["#/benchmark-lab", { name: "benchmark-lab" }],
+  ["#/stats/chatgpt-plan", { name: "chatgpt-plan-usage" }],
+  ["#/benchmark-lab/evaluations/new", { name: "benchmark-evaluation-new" }],
+  ["#/benchmark-lab/evaluations/12", { name: "benchmark-evaluation-detail", id: 12 }],
+  [
+    "#/benchmark-lab/evaluations/12/coverage",
+    { name: "benchmark-evaluation-detail", id: 12, tab: "coverage" },
+  ],
+  ["#/benchmark-lab/comparisons/4", { name: "benchmark-comparison-detail", id: 4 }],
   ["#/does-not-exist", { name: "not-found" }],
 ])("%s resolves without changing existing identifiers", (hash, expected) => {
   expect(parseRoute(hash)).toMatchObject(expected);
@@ -48,4 +100,44 @@ test("run links round-trip run kind and encoded references", async () => {
   expect(
     parseRoute(runHref({ runKind: "sast", runId: 7 }, "candidates", { lead: "L-7" })),
   ).toMatchObject({ name: "sast-run-detail", id: 7, leadRef: "L-7" });
+  expect(
+    parseRoute(
+      runHref({ runKind: "web", runId: 9 }, "traffic", {
+        coverage_cells: "12,13",
+        coverage_category: "A03",
+        test_class: "sqli",
+      }),
+    ),
+  ).toMatchObject({
+    name: "run-detail",
+    id: 9,
+    tab: "traffic",
+    trafficCoverage: { cellIds: [12, 13], category: "A03", testClass: "sqli" },
+  });
+});
+
+test("opens saved benchmark results", () => {
+  expect(parseRoute("#/benchmark-lab/results/42")).toEqual({ name: "benchmark-lab", id: 42 });
+  expect(parseRoute("#/benchmark-lab/scoring-guide")).toEqual({ name: "benchmark-scoring-guide" });
+});
+
+test("coverage finding links retain valid IDs and return context", async () => {
+  const { runHref } = await import("./links.ts");
+  const href = runHref({ runKind: "web", runId: 7 }, "findings", {
+    finding_ids: "31,32,31",
+    from: "workflows",
+  });
+  expect(parseRoute(href)).toMatchObject({
+    name: "run-detail",
+    tab: "findings",
+    findingIds: [31, 32],
+    coverageReturn: "workflows",
+  });
+  expect(
+    parseRoute("#/api-runs/9/findings?finding_ids=0,-1,3.5,nope,42&from=coverage"),
+  ).toMatchObject({
+    name: "api-run-detail",
+    findingIds: [42],
+    coverageReturn: "owasp",
+  });
 });

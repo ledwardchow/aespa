@@ -1,7 +1,11 @@
 import { req } from "./request.ts";
 
-export const getLLMStatistics = (month) =>
-  req(`/api/statistics/llm${month ? `?month=${encodeURIComponent(month)}` : ""}`);
+export const getLLMStatistics = (selection = {}) => {
+  const params = new URLSearchParams(
+    typeof selection === "string" ? { month: selection } : selection,
+  );
+  return req(`/api/statistics/llm${params.size ? `?${params}` : ""}`);
+};
 
 export const refreshLLMPrices = () => req("/api/statistics/llm/prices/refresh", { method: "POST" });
 

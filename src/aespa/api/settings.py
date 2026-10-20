@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlmodel import Session, select
 
@@ -11,8 +12,6 @@ from aespa.schemas import (
     PROVIDER_DEFAULT_MODELS,
     BrowserDebugConfigIn,
     BrowserDebugConfigOut,
-    BurpRestApiConfigIn,
-    BurpRestApiConfigOut,
     CloudflareAccessConfigIn,
     CloudflareAccessConfigOut,
     CodeExecutionConfigIn,
@@ -24,6 +23,8 @@ from aespa.schemas import (
     ComponentMapperConfigOut,
     CrawlerConfigIn,
     CrawlerConfigOut,
+    DeepScanConfigIn,
+    DeepScanConfigOut,
     GlobalHttpHeaderConfigIn,
     GlobalHttpHeaderConfigOut,
     LLMConfigExport,
@@ -36,6 +37,7 @@ from aespa.schemas import (
     LLMProfileOut,
     LLMProviderConfigIn,
     LLMProviderConfigOut,
+    OpenAIRefusalRecoveryIn,
     ReportingDebugConfigIn,
     ReportingDebugConfigOut,
     ScannerPolicyIn,
@@ -47,7 +49,6 @@ from aespa.schemas import (
     ValidatorConfigIn,
     ValidatorConfigOut,
 )
-from aespa.services import burp_rest as burp_rest_svc
 from aespa.services import crawler as crawler_svc
 from aespa.services import settings as settings_service
 from aespa.services import settings_integrations as integration_settings
@@ -61,6 +62,11 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 def _model_discovery_error(api_format: str) -> HTTPException:
+    if api_format == "openai_chatgpt_plan":
+        return HTTPException(
+            status_code=502,
+            detail="Could not load models for this ChatGPT account. Check that it is signed in.",
+        )
     if api_format == "openai_compatible":
         return HTTPException(
             status_code=502,
@@ -137,6 +143,78 @@ async def logout_codex() -> dict:
     return await codex_provider.logout()
 
 
+@router.get("/llm/chatgpt-plan/status")
+def chatgpt_plan_status() -> dict:
+    from aespa.services import chatgpt_plan
+
+    return chatgpt_plan.status()
+
+
+@router.post("/llm/chatgpt-plan/check-access")
+async def check_chatgpt_plan_access(payload: dict[str, str | bool]) -> dict:
+    from aespa.services import chatgpt_plan
+
+    client_id = payload.get("client_id")
+    if not isinstance(client_id, str) or not client_id:
+        raise HTTPException(
+            status_code=400, detail="Select a signed-in ChatGPT account"
+        )
+    try:
+        return await chatgpt_plan.check_access(
+            client_id, force=payload.get("force") is True
+        )
+    except (RuntimeError, httpx.HTTPError) as exc:
+        raise HTTPException(
+            status_code=502, detail="Could not check ChatGPT model access"
+        ) from exc
+
+
+@router.post("/llm/chatgpt-plan/login")
+async def start_chatgpt_plan_login(
+    payload: dict[str, str | None] | None = None,
+) -> dict:
+    from aespa.services import chatgpt_plan
+
+    try:
+        return await chatgpt_plan.start_login((payload or {}).get("client_id"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/llm/chatgpt-plan/login/{login_id}")
+def chatgpt_plan_login_status(login_id: str) -> dict:
+    from aespa.services import chatgpt_plan
+
+    try:
+        return chatgpt_plan.login_status(login_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="ChatGPT sign-in was not found"
+        ) from exc
+
+
+@router.post("/llm/chatgpt-plan/select")
+async def select_chatgpt_plan_account(payload: dict[str, str]) -> dict:
+    from aespa.services import chatgpt_plan
+
+    try:
+        await chatgpt_plan.select_account(payload.get("client_id", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return chatgpt_plan.status()
+
+
+@router.post("/llm/chatgpt-plan/logout")
+async def logout_chatgpt_plan(payload: dict[str, str]) -> dict:
+    from aespa.services import chatgpt_plan
+
+    try:
+        await chatgpt_plan.sign_out(payload.get("client_id", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return chatgpt_plan.status()
+
+
 @router.get("/llm/copilot/accounts")
 def list_copilot_accounts() -> dict[str, list[dict]]:
     from aespa.services import copilot_provider
@@ -210,21 +288,27 @@ def list_llm_models(session: Session = Depends(get_session)) -> list[LLMConfigOu
 
 
 @router.post("/llm/model-configs", response_model=LLMConfigOut)
-def create_llm_model(
+async def create_llm_model(
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = profile_settings.create_llm_profile(session, payload)
+    discovered = await settings_service.discover_effort_capability(
+        session, payload.provider_id, payload.model, payload.reasoning_effort
+    )
+    cfg = profile_settings.create_llm_profile(session, payload, discovered)
     return settings_service.llm_profile_out_model(session, cfg)
 
 
 @router.put("/llm/model-configs/{model_id}", response_model=LLMConfigOut)
-def update_llm_model(
+async def update_llm_model(
     model_id: int,
     payload: LLMConfigIn,
     session: Session = Depends(get_session),
 ) -> LLMConfigOut:
-    cfg = profile_settings.update_llm_profile(session, model_id, payload)
+    discovered = await settings_service.discover_effort_capability(
+        session, payload.provider_id, payload.model, payload.reasoning_effort
+    )
+    cfg = profile_settings.update_llm_profile(session, model_id, payload, discovered)
     return settings_service.llm_profile_out_model(session, cfg)
 
 
@@ -301,6 +385,14 @@ def list_llm_providers(
     return provider_settings.list_llm_providers(session)
 
 
+@router.get("/llm/extension-catalog")
+def list_extension_llm_catalog() -> dict[str, list[dict]]:
+    """Read extension-owned LLM settings for display in the settings screen."""
+    from aespa.extensions import get_extension_manager
+
+    return get_extension_manager().llm_catalog_items()
+
+
 @router.post("/llm/providers", response_model=LLMProviderConfigOut)
 def create_llm_provider(
     payload: LLMProviderConfigIn,
@@ -341,12 +433,22 @@ async def default_models(
         api_key = p.api_key if p else None
         base_url = p.base_url if p else None
         username = p.username if p else None
+        project_id = p.project_id if p else None
+        location = p.location if p else None
+        aws_profile = p.aws_profile if p else None
         try:
-            discovered = await settings_service.discover_models_for_format(
+            discovery_kwargs = dict(
                 api_format=fmt,
                 api_key=api_key,
                 base_url=base_url,
                 username=username,
+            )
+            if fmt == "google_vertex":
+                discovery_kwargs.update(project_id=project_id, location=location)
+            if fmt in {"bedrock", "bedrock_mantle"}:
+                discovery_kwargs["aws_profile"] = aws_profile
+            discovered = await settings_service.discover_models_for_format(
+                **discovery_kwargs
             )
             if discovered:
                 models[fmt] = discovered
@@ -366,6 +468,9 @@ async def discover_llm_models(
     api_key = payload.api_key
     base_url = payload.base_url
     username = payload.username
+    project_id = payload.project_id
+    location = payload.location
+    aws_profile = payload.aws_profile
 
     if not api_key or api_key.startswith("••"):
         db_prov = (
@@ -383,13 +488,26 @@ async def discover_llm_models(
                 base_url = db_prov.base_url
             if not username:
                 username = db_prov.username
+            if not project_id:
+                project_id = db_prov.project_id
+            if not location:
+                location = db_prov.location
+            if aws_profile is None:
+                aws_profile = db_prov.aws_profile
 
     try:
-        discovered = await settings_service.discover_models_for_format(
+        discovery_kwargs = dict(
             api_format=api_format,
             api_key=api_key,
             base_url=base_url,
             username=username,
+        )
+        if api_format == "google_vertex":
+            discovery_kwargs.update(project_id=project_id, location=location)
+        if api_format in {"bedrock", "bedrock_mantle"}:
+            discovery_kwargs["aws_profile"] = aws_profile
+        discovered = await settings_service.discover_models_for_format(
+            **discovery_kwargs
         )
         if discovered:
             return discovered
@@ -397,11 +515,13 @@ async def discover_llm_models(
         log.warning(
             "Explicit model discovery for format '%s' failed: %s", api_format, exc
         )
-        if api_format == "openai_compatible":
+        if api_format in {"openai_compatible", "openai_chatgpt_plan"}:
             raise _model_discovery_error(api_format) from exc
 
     fallback = list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
-    if api_format == "openai_compatible" and not fallback:
+    if api_format == "openai_chatgpt_plan" or (
+        api_format == "openai_compatible" and not fallback
+    ):
         raise _model_discovery_error(api_format)
     return fallback
 
@@ -416,6 +536,9 @@ async def discover_llm_model_options(
     api_key = payload.api_key
     base_url = payload.base_url
     username = payload.username
+    project_id = payload.project_id
+    location = payload.location
+    aws_profile = payload.aws_profile
     if not api_key or api_key.startswith("••"):
         db_prov = (
             session.get(LLMProviderConfig, payload.provider_id)
@@ -430,13 +553,26 @@ async def discover_llm_model_options(
             api_key = db_prov.api_key or api_key
             base_url = base_url or db_prov.base_url
             username = username or db_prov.username
+            project_id = project_id or db_prov.project_id
+            location = location or db_prov.location
+            if aws_profile is None:
+                aws_profile = db_prov.aws_profile
     try:
-        result = await settings_service.discover_model_options_for_format(
+        discovery_kwargs = dict(
             api_format=api_format,
             api_key=api_key,
             base_url=base_url,
             username=username,
         )
+        if api_format == "google_vertex":
+            discovery_kwargs.update(project_id=project_id, location=location)
+        if api_format in {"bedrock", "bedrock_mantle"}:
+            discovery_kwargs["aws_profile"] = aws_profile
+        result = await settings_service.discover_model_options_for_format(
+            **discovery_kwargs
+        )
+        if api_format == "openai_chatgpt_plan" and not result.get("models"):
+            raise _model_discovery_error(api_format)
         capabilities = dict(result.get("capabilities", {}))
         for model in payload.models:
             if model not in capabilities:
@@ -446,12 +582,13 @@ async def discover_llm_model_options(
         return LLMModelDiscoveryOut(
             models=list(result.get("models", [])),
             capabilities=capabilities,
+            catalog_complete=bool(result.get("catalog_complete", True)),
         )
     except Exception as exc:
         log.warning(
             "Structured model discovery for format '%s' failed: %s", api_format, exc
         )
-        if api_format == "openai_compatible":
+        if api_format in {"openai_compatible", "openai_chatgpt_plan"}:
             raise _model_discovery_error(api_format) from exc
         models = payload.models or list(PROVIDER_DEFAULT_MODELS.get(api_format, []))
         capabilities = {
@@ -492,6 +629,36 @@ def upsert_scanner_policy(
     session: Session = Depends(get_session),
 ) -> ScannerPolicyOut:
     return integration_settings.upsert_scanner_policy(session, payload)
+
+
+@router.put("/scanner-policy/openai-refusal-recovery", response_model=ScannerPolicyOut)
+def set_openai_refusal_recovery(
+    payload: OpenAIRefusalRecoveryIn,
+    session: Session = Depends(get_session),
+) -> ScannerPolicyOut:
+    return integration_settings.set_openai_refusal_recovery(session, payload.enabled)
+
+
+@router.get("/retire-list")
+def get_retire_list_status() -> dict:
+    from aespa.services import js_libraries
+
+    return js_libraries.list_status()
+
+
+@router.post("/retire-list/refresh")
+async def refresh_retire_list() -> dict:
+    """Download the latest Retire.js list now, even when automatic updates are off."""
+    from datetime import timedelta
+
+    from aespa.services import js_libraries, retire_repository
+
+    result = await retire_repository.ensure_fresh(enabled=True, max_age=timedelta(0))
+    return {
+        **js_libraries.list_status(),
+        "status": result.get("status"),
+        "error": result.get("error"),
+    }
 
 
 @router.get("/code-execution", response_model=CodeExecutionConfigOut)
@@ -553,30 +720,6 @@ def upsert_component_mapper_config(
     return integration_settings.upsert_component_mapper_config(session, payload)
 
 
-@router.get("/burp-rest-api", response_model=BurpRestApiConfigOut)
-def get_burp_rest_api_config(
-    session: Session = Depends(get_session),
-) -> BurpRestApiConfigOut:
-    return integration_settings.get_burp_rest_api_config(session)
-
-
-@router.put("/burp-rest-api", response_model=BurpRestApiConfigOut)
-def upsert_burp_rest_api_config(
-    payload: BurpRestApiConfigIn,
-    session: Session = Depends(get_session),
-) -> BurpRestApiConfigOut:
-    return integration_settings.upsert_burp_rest_api_config(session, payload)
-
-
-@router.post("/burp-rest-api/test-connection")
-async def test_burp_rest_api_connection(
-    session: Session = Depends(get_session),
-) -> dict:
-    cfg = integration_settings.get_burp_rest_api_config_model(session)
-    ok, message = await burp_rest_svc.test_connection(cfg)
-    return {"ok": ok, "message": message}
-
-
 @router.get("/upstream-proxy", response_model=UpstreamProxyConfigOut)
 def get_upstream_proxy_config(
     session: Session = Depends(get_session),
@@ -605,6 +748,21 @@ def upsert_specialist_agent_config(
     session: Session = Depends(get_session),
 ) -> SpecialistAgentConfigOut:
     return integration_settings.upsert_specialist_agent_config(session, payload)
+
+
+@router.get("/deep-scan-config", response_model=DeepScanConfigOut)
+def get_deep_scan_config(
+    session: Session = Depends(get_session),
+) -> DeepScanConfigOut:
+    return integration_settings.get_deep_scan_config(session)
+
+
+@router.put("/deep-scan-config", response_model=DeepScanConfigOut)
+def upsert_deep_scan_config(
+    payload: DeepScanConfigIn,
+    session: Session = Depends(get_session),
+) -> DeepScanConfigOut:
+    return integration_settings.upsert_deep_scan_config(session, payload)
 
 
 @router.get("/adversarial-validator-config", response_model=ValidatorConfigOut)

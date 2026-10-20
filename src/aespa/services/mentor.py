@@ -122,8 +122,7 @@ def _redact_and_bound(value: Any, *, key: str = "", depth: int = 0) -> Any:
         }
     if isinstance(value, list):
         return [
-            _redact_and_bound(item, key=key, depth=depth + 1)
-            for item in value[:30]
+            _redact_and_bound(item, key=key, depth=depth + 1) for item in value[:30]
         ]
     if isinstance(value, str):
         text = re.sub(
@@ -131,9 +130,7 @@ def _redact_and_bound(value: Any, *, key: str = "", depth: int = 0) -> Any:
             "[redacted-jwt]",
             value,
         )
-        text = re.sub(
-            r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+", r"\1[redacted]", text
-        )
+        text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+", r"\1[redacted]", text)
         return text[:4000]
     return value
 
@@ -220,9 +217,7 @@ def parse_mentor_response(
         failure_class=(
             failure_class if failure_class in _FAILURE_CLASSES else "unknown"
         ),
-        recovery_kind=(
-            recovery_kind if recovery_kind in _RECOVERY_KINDS else "pivot"
-        ),
+        recovery_kind=(recovery_kind if recovery_kind in _RECOVERY_KINDS else "pivot"),
         raw_response=text,
     )
 

@@ -1,4 +1,4 @@
-const CACHE = "aespa-v10";
+const CACHE = "aespa-v12";
 
 // Versioned assets (cache-busted by ?v=... query param) — cache aggressively
 const STATIC_EXTS = [".js", ".css", ".png", ".ico", ".json"];
@@ -8,8 +8,14 @@ function isStaticAsset(url) {
   return STATIC_EXTS.some((ext) => u.pathname.endsWith(ext));
 }
 
+function isMutableAsset(url) {
+  const pathname = new URL(url).pathname;
+  return pathname === "/app.js" || pathname === "/styles.css";
+}
+
 function isApiCall(url) {
-  return new URL(url).pathname.startsWith("/api/");
+  const pathname = new URL(url).pathname;
+  return pathname.startsWith("/api/") || pathname.startsWith("/extension/");
 }
 
 // Install: pre-cache the shell assets
@@ -51,7 +57,24 @@ self.addEventListener("fetch", (event) => {
   // API — always go to the network
   if (isApiCall(url)) return;
 
-  // Versioned static assets — serve from cache if present, else fetch & cache
+  // The entry script and stylesheet keep stable paths across builds. Fetch them
+  // before using a cached copy so they cannot refer to deleted hashed chunks.
+  if (isMutableAsset(url)) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const clone = response.clone();
+            caches.open(CACHE).then((c) => c.put(request, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
+
+  // Hashed static assets - serve from cache if present, else fetch and cache.
   if (isStaticAsset(url)) {
     event.respondWith(
       caches.match(request).then(

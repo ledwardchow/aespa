@@ -1,16 +1,276 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import text
+from alembic.script import ScriptDirectory
+from sqlalchemy import event, inspect, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa import db, db_legacy
+from aespa.config import Settings
+from aespa.models import DeepScanTask
+from aespa.services import settings_providers
 from alembic import command
+
+HEAD_REVISION = ScriptDirectory.from_config(
+    db._get_alembic_config(create_engine("sqlite://"))
+).get_current_head()
 
 
 def _upgrade_to(engine, revision: str) -> None:
     command.upgrade(db._get_alembic_config(engine), revision)
+
+
+def _downgrade_to(engine, revision: str) -> None:
+    command.downgrade(db._get_alembic_config(engine), revision)
+
+
+def test_sast_analysis_mode_migration_marks_existing_runs_light():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "7c8d9e0f1a23")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO sast_run "
+                    "(id, name, status, leads_count, completion_status, created_at, updated_at) "
+                    "VALUES (999, 'Existing SAST run', 'completed', 0, 'full', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            mode = conn.execute(
+                text("SELECT analysis_mode FROM sast_run WHERE id = 999")
+            ).scalar_one()
+        assert mode == "light"
+    finally:
+        engine.dispose()
+
+
+def test_upstream_proxy_migration_preserves_url_for_both_traffic_types():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "8f0b3d5e7a92")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO upstream_proxy_config "
+                    "(id, proxy_url, proxy_scanner, proxy_llm, updated_at) "
+                    "VALUES (1, 'http://legacy-proxy.local:8080', 1, 1, CURRENT_TIMESTAMP)"
+                )
+            )
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT scanner_proxy_url, llm_proxy_url "
+                    "FROM upstream_proxy_config WHERE id = 1"
+                )
+            ).one()
+            columns = {
+                item[1]
+                for item in conn.execute(
+                    text("PRAGMA table_info(upstream_proxy_config)")
+                )
+            }
+
+        assert row == (
+            "http://legacy-proxy.local:8080",
+            "http://legacy-proxy.local:8080",
+        )
+        assert "proxy_url" not in columns
+    finally:
+        engine.dispose()
+
+
+def test_llm_rate_limit_migration_moves_provider_limits_to_saved_models():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "7b2d4f6a8c10")
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            conn.execute(
+                text(
+                    "INSERT INTO llm_provider_config "
+                    "(id, name, api_format, models_json, max_tpm, max_rpm, "
+                    "updated_at, model_capabilities_json) VALUES "
+                    "(1, 'Legacy provider', 'openai', '[\"gpt-4o\"]', "
+                    "120000, 60, CURRENT_TIMESTAMP, '{}')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO llm_config "
+                    "(id, name, is_active, provider_id, provider, model, max_tokens, "
+                    "use_vision, force_tool_choice, updated_at, max_context_tokens, "
+                    "context_limit_source) VALUES "
+                    "(1, 'Saved model', 1, 1, 'openai', 'gpt-4o', 4096, 0, 0, "
+                    "CURRENT_TIMESTAMP, 128000, 'provider')"
+                )
+            )
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+            limits = conn.execute(
+                text("SELECT max_tpm, max_rpm FROM llm_config WHERE id = 1")
+            ).one()
+            provider_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(llm_provider_config)"))
+            }
+            model_columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(llm_config)"))
+            }
+
+        assert limits == (120_000, 60)
+        assert "max_tpm" not in provider_columns
+        assert "max_rpm" not in provider_columns
+        assert {"max_tpm", "max_rpm"}.issubset(model_columns)
+    finally:
+        engine.dispose()
+
+
+def test_llm_rate_limit_migration_recovers_after_partial_application():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "7b2d4f6a8c10")
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            conn.execute(
+                text(
+                    "INSERT INTO llm_provider_config "
+                    "(id, name, api_format, models_json, max_tpm, max_rpm, "
+                    "updated_at, model_capabilities_json) VALUES "
+                    "(1, 'Legacy provider', 'openai', '[\"gpt-4o\"]', "
+                    "120000, 60, CURRENT_TIMESTAMP, '{}')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO llm_config "
+                    "(id, name, is_active, provider_id, provider, model, max_tokens, "
+                    "use_vision, force_tool_choice, updated_at, max_context_tokens, "
+                    "context_limit_source) VALUES "
+                    "(1, 'Saved model', 1, 1, 'openai', 'gpt-4o', 4096, 0, 0, "
+                    "CURRENT_TIMESTAMP, 128000, 'provider')"
+                )
+            )
+            # This is the state left by the original failed migration: the
+            # model columns and copied values exist, but the provider columns
+            # remain and the Alembic revision has not advanced.
+            conn.execute(text("ALTER TABLE llm_config ADD COLUMN max_tpm INTEGER"))
+            conn.execute(text("ALTER TABLE llm_config ADD COLUMN max_rpm INTEGER"))
+            conn.execute(text("UPDATE llm_config SET max_tpm = 120000, max_rpm = 60"))
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            limits = conn.execute(
+                text("SELECT max_tpm, max_rpm FROM llm_config WHERE id = 1")
+            ).one()
+            provider_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(llm_provider_config)"))
+            }
+
+        assert version == HEAD_REVISION
+        assert limits == (120_000, 60)
+        assert "max_tpm" not in provider_columns
+        assert "max_rpm" not in provider_columns
+    finally:
+        engine.dispose()
+
+
+def test_llm_rate_limit_migration_downgrades_with_foreign_keys_enabled():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "head")
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            conn.execute(
+                text(
+                    "INSERT INTO llm_provider_config "
+                    "(id, name, api_format, models_json, updated_at, "
+                    "model_capabilities_json) VALUES "
+                    "(1, 'Provider', 'openai', '[\"gpt-4o\"]', "
+                    "CURRENT_TIMESTAMP, '{}')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO llm_config "
+                    "(id, name, is_active, provider_id, provider, model, max_tpm, "
+                    "max_rpm, max_tokens, use_vision, force_tool_choice, updated_at, "
+                    "max_context_tokens, context_limit_source) VALUES "
+                    "(1, 'Saved model', 1, 1, 'openai', 'gpt-4o', 120000, 60, "
+                    "4096, 0, 0, CURRENT_TIMESTAMP, 128000, 'provider')"
+                )
+            )
+
+        _downgrade_to(engine, "7b2d4f6a8c10")
+
+        with engine.connect() as conn:
+            assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+            limits = conn.execute(
+                text("SELECT max_tpm, max_rpm FROM llm_provider_config WHERE id = 1")
+            ).one()
+            model_columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(llm_config)"))
+            }
+
+        assert limits == (120_000, 60)
+        assert "max_tpm" not in model_columns
+        assert "max_rpm" not in model_columns
+    finally:
+        engine.dispose()
+
+
+def test_new_sqlite_database_enables_full_auto_vacuum(tmp_path):
+    database_path = tmp_path / "new.db"
+    engine = db._build_engine(Settings(database_url=f"sqlite:///{database_path}"))
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("CREATE TABLE sample (id INTEGER PRIMARY KEY)")
+            assert conn.exec_driver_sql("PRAGMA auto_vacuum").scalar() == 1
+    finally:
+        engine.dispose()
+
+    reopened = create_engine(f"sqlite:///{database_path}")
+    try:
+        with reopened.connect() as conn:
+            assert conn.exec_driver_sql("PRAGMA auto_vacuum").scalar() == 1
+    finally:
+        reopened.dispose()
 
 
 def test_ensure_column_adds_missing_column():
@@ -32,6 +292,48 @@ def test_ensure_column_adds_missing_column():
             }
 
         assert "name" in columns
+    finally:
+        engine.dispose()
+
+
+def test_legacy_upstream_proxy_upgrade_preserves_shared_url():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE upstream_proxy_config ("
+                    "id INTEGER PRIMARY KEY, proxy_url TEXT, "
+                    "proxy_scanner INTEGER NOT NULL DEFAULT 0, "
+                    "proxy_llm INTEGER NOT NULL DEFAULT 0, updated_at DATETIME)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO upstream_proxy_config "
+                    "(id, proxy_url, proxy_scanner, proxy_llm, updated_at) "
+                    "VALUES (1, 'http://legacy-proxy.local:8080', 1, 1, CURRENT_TIMESTAMP)"
+                )
+            )
+
+        db_legacy._ensure_upstream_proxy_config(engine)
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT scanner_proxy_url, llm_proxy_url "
+                    "FROM upstream_proxy_config WHERE id = 1"
+                )
+            ).one()
+
+        assert row == (
+            "http://legacy-proxy.local:8080",
+            "http://legacy-proxy.local:8080",
+        )
     finally:
         engine.dispose()
 
@@ -803,13 +1105,86 @@ def test_alembic_migration_creates_version_table_and_stamps_legacy():
             version = conn.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
+            handoff_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(specialist_handoff)"))
+            }
+            handoff_foreign_keys = {
+                (row[3], row[2], row[4])
+                for row in conn.execute(
+                    text("PRAGMA foreign_key_list(specialist_handoff)")
+                )
+            }
+            deep_config_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(deep_scan_config)"))
+            }
+            provider_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(llm_provider_config)"))
+            }
+            llm_config_columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(llm_config)"))
+            }
+            scanner_policy_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(scanner_policy)"))
+            }
 
         assert "alembic_version" in tables
         assert "site" in tables
         assert "test_run" in tables
+        assert "page_id" in handoff_columns
+        assert ("page_id", "crawled_page", "id") in handoff_foreign_keys
+        assert "max_concurrent_planners" in deep_config_columns
+        assert "location" in provider_columns
+        assert "location" in llm_config_columns
+        assert "dast_max_concurrent_llm_requests" in scanner_policy_columns
+        assert "sast_max_concurrent_llm_requests" in scanner_policy_columns
         assert was_pre_alembic is False
-        # The migration chain now includes replay/session provenance fields.
-        assert version == "91c4e7a2d5b8"
+        assert version == HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_deep_task_finding_timestamp_is_added_and_backfilled():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "6d8f1a2b3c40")
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            conn.execute(
+                text(
+                    "INSERT INTO deep_scan_task_finding "
+                    "(id, run_id, task_id, variant_id, finding_id) "
+                    "VALUES (1, 1, 1, NULL, 1)"
+                )
+            )
+            conn.commit()
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            columns = {
+                row[1]
+                for row in conn.execute(
+                    text("PRAGMA table_info(deep_scan_task_finding)")
+                )
+            }
+            created_at = conn.execute(
+                text("SELECT created_at FROM deep_scan_task_finding WHERE id = 1")
+            ).scalar()
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar()
+
+        assert "created_at" in columns
+        assert created_at is not None
+        assert version == HEAD_REVISION
     finally:
         engine.dispose()
 
@@ -843,10 +1218,15 @@ def test_migrate_skips_legacy_schema_repair_for_versioned_database(monkeypatch):
             "_cleanup_orphaned_sast_extractions",
             lambda: calls.append("workspaces"),
         )
+        monkeypatch.setattr(
+            settings_providers,
+            "repair_chatgpt_plan_models",
+            lambda _session: calls.append("chatgpt_models"),
+        )
 
         db._migrate(engine)
 
-        assert calls == ["validations", "runs", "workspaces"]
+        assert calls == ["validations", "runs", "chatgpt_models", "workspaces"]
     finally:
         engine.dispose()
 
@@ -1035,14 +1415,14 @@ def test_migrate_creates_browser_debug_config_for_legacy_db_missing_table():
         engine.dispose()
 
 
-def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema():
+def test_legacy_db_with_run_identity_but_no_systems_tables_gets_new_schema():
     """A real legacy DB (run_identity present, no alembic_version, predating
-    the Applications/Campaign feature) must still receive every new table.
+    the Systems/Campaign feature) must still receive every new table.
 
     Regression for a bug where the legacy stamp always targeted the literal
     Alembic keyword ``"head"``, which silently drifted forward as new
     migrations were added and caused this exact database shape to skip the
-    entire Applications/Campaign schema forever.
+    entire Systems/Campaign schema forever.
     """
     engine = create_engine(
         "sqlite:///:memory:",
@@ -1074,7 +1454,7 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
                     text("SELECT name FROM sqlite_master WHERE type='table'")
                 )
             }
-        assert "application" not in tables_before
+        assert "system" not in tables_before
         assert "assessment_campaign" not in tables_before
 
         was_pre_alembic = db.run_migrations(engine)
@@ -1093,13 +1473,18 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
                 row[1]
                 for row in conn.execute(text("PRAGMA table_info(assessment_campaign)"))
             }
+            run = conn.execute(
+                text(
+                    "SELECT site_id, name, discovery_completeness FROM test_run WHERE id = 1"
+                )
+            ).one()
 
-        # The full Applications/Campaign schema now exists...
+        # The full Systems/Campaign schema now exists...
         assert {
-            "application",
-            "application_component",
+            "system",
+            "system_component",
             "component_snapshot",
-            "application_target",
+            "system_target",
             "component_target_hint",
             "assessment_campaign",
             "campaign_source_member",
@@ -1107,17 +1492,393 @@ def test_legacy_db_with_run_identity_but_no_applications_tables_gets_new_schema(
             "component_fact",
             "component_connection",
             "lead_target_mapping",
+            "campaign_validation_case",
             "scan_lead_component_provenance",
         } <= tables_after
         assert was_pre_alembic is True
         # ...including the follow-up migration's column.
         assert "interrupted_stage" in campaign_columns
-        assert version == "91c4e7a2d5b8"
+        assert run == (1, "legacy run", "legacy_unknown")
+        assert version == HEAD_REVISION
     finally:
         engine.dispose()
 
 
-def test_current_db_with_applications_tables_stamps_head_without_recreating():
+def test_discovered_targets_migration_preserves_pages_through_downgrade_and_upgrade():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        _upgrade_to(engine, "91c4b6e7a205")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO site "
+                    "(id, name, base_url, requires_auth, created_at, updated_at) "
+                    "VALUES (1, 'Site', 'https://example.test', 0, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO run_identity (id, kind, legacy_id, created_at) "
+                    "VALUES (1, 'web', 1, CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO test_run "
+                    "(id, site_id, name, status, use_screenshots, max_depth, "
+                    "max_pages, scan_mode, scanner_policy_json, pages_discovered, "
+                    "created_at) VALUES "
+                    "(1, 1, 'Run', 'pending', 0, 3, 50, 'safe_active', '{}', 1, "
+                    "CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO crawled_page "
+                    "(id, test_run_id, url, state_key, state_kind, "
+                    "replay_steps_json, depth, status, in_scope, scan_status, "
+                    "accessible_by, owasp_applicable_json, discovered_at) "
+                    "VALUES (1, 1, 'https://example.test/orders/42?view=full', "
+                    "'signed-in', 'page', '[]', 1, 'crawled', 1, 'pending', "
+                    "'[]', '{}', CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO target_intel_item "
+                    "(id, test_run_id, kind, key, value, source, confidence, "
+                    "evidence, item_metadata, discovered_at) VALUES "
+                    "(1, 1, 'endpoint', 'link', 'https://example.test/receipts/7', "
+                    "'dom_link', 1.0, '', '{}', CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO scan_obligation "
+                    "(id, run_kind, run_id, scan_mode, owasp_catalog, "
+                    "owasp_category, vulnerability_technique, route_template, "
+                    "http_method, status, created_at, updated_at) VALUES "
+                    "(99, 'web', 1, 'quick', 'web_2025', 'A01', 'idor', "
+                    "'/orders/{id}', 'GET', 'not_planned', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+        with Session(engine) as session:
+            session.add(
+                DeepScanTask(
+                    run_id=1,
+                    fingerprint="saved-task",
+                    attack_class="idor",
+                    target_url="https://example.test/orders/42",
+                    obligation_id=99,
+                )
+            )
+            session.commit()
+
+        for _ in range(2):
+            _upgrade_to(engine, "head")
+            with engine.connect() as conn:
+                target = conn.execute(
+                    text(
+                        "SELECT url, state_key, state_identity, route_pattern "
+                        "FROM discovered_target WHERE url = "
+                        "'https://example.test/orders/42?view=full'"
+                    )
+                ).one()
+                page = conn.execute(
+                    text("SELECT url, state_key FROM crawled_page WHERE id = 1")
+                ).one()
+                linked_target = conn.execute(
+                    text(
+                        "SELECT state_identity, route_pattern FROM discovered_target "
+                        "WHERE url = 'https://example.test/receipts/7'"
+                    )
+                ).one()
+            assert target == (
+                "https://example.test/orders/42?view=full",
+                "signed-in",
+                '["signed-in"]',
+                "/orders/{id}?view={view}",
+            )
+            assert page == ("https://example.test/orders/42?view=full", "signed-in")
+            assert linked_target == ("[null]", "/receipts/{id}")
+            _downgrade_to(engine, "91c4b6e7a205")
+            with engine.connect() as conn:
+                assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+                assert (
+                    conn.execute(
+                        text(
+                            "SELECT obligation_id FROM deep_scan_task "
+                            "WHERE fingerprint = 'saved-task'"
+                        )
+                    ).scalar_one()
+                    == 99
+                )
+                assert not conn.execute(text("PRAGMA foreign_key_check")).all()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "interrupted_statement",
+    [
+        "create index ix_target_discovery_actor_key",
+        "alter table scan_obligation add column parent_test_class",
+        "alter table _alembic_tmp_scan_obligation rename to scan_obligation",
+        "index uq_specialist_handoff_active_scope",
+    ],
+)
+def test_discovered_targets_migration_recovers_after_interrupted_ddl(
+    interrupted_statement,
+):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        _upgrade_to(engine, "91c4b6e7a205")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO site (id, name, base_url, requires_auth, "
+                    "created_at, updated_at) VALUES "
+                    "(1, 'Site', 'https://example.test', 0, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO run_identity (id, kind, legacy_id, created_at) "
+                    "VALUES (1, 'web', 1, CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO test_run (id, site_id, name, status, "
+                    "use_screenshots, max_depth, max_pages, scan_mode, "
+                    "scanner_policy_json, pages_discovered, created_at) VALUES "
+                    "(1, 1, 'Run', 'pending', 0, 3, 50, 'safe_active', "
+                    "'{}', 1, CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO crawled_page (id, test_run_id, url, state_key, "
+                    "state_kind, replay_steps_json, depth, status, in_scope, "
+                    "scan_status, accessible_by, owasp_applicable_json, "
+                    "discovered_at) VALUES "
+                    "(1, 1, 'https://example.test/orders/42', 'signed-in', "
+                    "'page', '[]', 1, 'crawled', 1, 'pending', '[]', '{}', "
+                    "CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO scan_obligation "
+                    "(id, run_kind, run_id, scan_mode, owasp_catalog, "
+                    "owasp_category, vulnerability_technique, route_template, "
+                    "http_method, status, created_at, updated_at) VALUES "
+                    "(99, 'web', 1, 'quick', 'web_2025', 'A01', 'idor', "
+                    "'/orders/{id}', 'GET', 'not_planned', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+        with Session(engine) as session:
+            session.add(
+                DeepScanTask(
+                    run_id=1,
+                    fingerprint="saved-task",
+                    attack_class="idor",
+                    target_url="https://example.test/orders/42",
+                    obligation_id=99,
+                )
+            )
+            session.commit()
+
+        base_indexes = {
+            table: {index["name"] for index in inspect(engine).get_indexes(table)}
+            for table in (
+                "scan_obligation",
+                "scan_finding",
+                "probe_execution",
+                "specialist_handoff",
+            )
+        }
+
+        interrupted = False
+
+        def interrupt_ddl(conn, cursor, statement, parameters, context, executemany):
+            nonlocal interrupted
+            normalized = statement.replace('"', "").lower()
+            if not interrupted and interrupted_statement in normalized:
+                interrupted = True
+                raise RuntimeError("simulated interruption")
+
+        event.listen(engine, "before_cursor_execute", interrupt_ddl)
+        try:
+            with pytest.raises(RuntimeError, match="simulated interruption"):
+                _upgrade_to(engine, "head")
+        finally:
+            event.remove(engine, "before_cursor_execute", interrupt_ddl)
+        assert interrupted
+
+        with engine.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+                == "91c4b6e7a205"
+            )
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO discovered_target "
+                    "(id, test_run_id, url, state_key, state_identity, "
+                    "route_pattern, discovered_at) VALUES "
+                    "(99, 1, 'https://example.test/saved/9', NULL, '[null]', "
+                    "'/saved/{id}', CURRENT_TIMESTAMP)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO target_discovery "
+                    "(id, test_run_id, target_id, source_key, actor_key, "
+                    "source_kind, discovered_at) VALUES "
+                    "(99, 1, 99, 'saved', 'anonymous', 'seed', "
+                    "CURRENT_TIMESTAMP)"
+                )
+            )
+
+        _upgrade_to(engine, "head")
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE alembic_version SET version_num = '91c4b6e7a205'")
+            )
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+                == HEAD_REVISION
+            )
+            assert conn.execute(
+                text(
+                    "SELECT url, state_identity FROM discovered_target "
+                    "WHERE url = 'https://example.test/orders/42'"
+                )
+            ).one() == ("https://example.test/orders/42", '["signed-in"]')
+            assert conn.execute(
+                text("SELECT url, state_identity FROM discovered_target WHERE id = 99")
+            ).one() == ("https://example.test/saved/9", "[null]")
+            assert conn.execute(
+                text("SELECT target_id, source_key FROM target_discovery WHERE id = 99")
+            ).one() == (99, "saved")
+            assert conn.execute(
+                text(
+                    "SELECT route_template, scope_kind FROM scan_obligation WHERE id = 99"
+                )
+            ).one() == ("/orders/{id}", "route")
+            assert (
+                conn.execute(
+                    text("SELECT url FROM crawled_page WHERE id = 1")
+                ).scalar_one()
+                == "https://example.test/orders/42"
+            )
+            assert not conn.execute(text("PRAGMA foreign_key_check")).all()
+            assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT obligation_id FROM deep_scan_task "
+                        "WHERE fingerprint = 'saved-task'"
+                    )
+                ).scalar_one()
+                == 99
+            )
+
+        inspector = inspect(engine)
+        for table, index_names in base_indexes.items():
+            assert index_names <= {
+                index["name"] for index in inspector.get_indexes(table)
+            }
+        assert "ck_target_access_result" in {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(
+                "target_access_observation"
+            )
+        }
+        assert "ck_scan_obligation_scope_kind" in {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("scan_obligation")
+        }
+        assert "uq_object_check_selection" in {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints("scan_obligation")
+        }
+    finally:
+        engine.dispose()
+
+
+def test_extension_enabled_migration_upgrades_existing_extension_settings():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "d6a4f2c8e901")
+        with engine.begin() as conn:
+            columns_before = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(extension_setting)"))
+            }
+            conn.execute(
+                text(
+                    "INSERT INTO extension_setting "
+                    "(extension_id, schema_version, settings_json, updated_at) "
+                    "VALUES ('example.source', 1, '{}', CURRENT_TIMESTAMP)"
+                )
+            )
+        assert "enabled" not in columns_before
+
+        _upgrade_to(engine, "head")
+
+        with engine.connect() as conn:
+            columns_after = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(extension_setting)"))
+            }
+            enabled = conn.execute(
+                text(
+                    "SELECT enabled FROM extension_setting "
+                    "WHERE extension_id = 'example.source'"
+                )
+            ).scalar_one()
+        assert "enabled" in columns_after
+        assert enabled == 1
+    finally:
+        engine.dispose()
+
+
+def test_current_db_with_systems_tables_stamps_head_without_recreating():
     """A DB already at the current schema (e.g. built via metadata.create_all)
     but missing only the alembic_version bookkeeping row must be recognized
     as already current and not re-run migrations that would try to create
@@ -1149,7 +1910,7 @@ def test_current_db_with_applications_tables_stamps_head_without_recreating():
                 text("SELECT version_num FROM alembic_version")
             ).scalar()
 
-        assert version == "91c4e7a2d5b8"
+        assert version == HEAD_REVISION
     finally:
         SQLModel.metadata.drop_all(engine)
         engine.dispose()
@@ -1301,6 +2062,9 @@ def test_legacy_upgrade_restores_foreign_keys_before_recovery(
     monkeypatch.setattr(db, "_reset_orphaned_validating_findings", recover)
     monkeypatch.setattr(db, "_reset_orphaned_running_runs", lambda _engine: None)
     monkeypatch.setattr(db, "_cleanup_orphaned_sast_extractions", lambda: None)
+    monkeypatch.setattr(
+        settings_providers, "repair_chatgpt_plan_models", lambda _session: None
+    )
     try:
         with engine.connect() as connection:
             connection.exec_driver_sql("PRAGMA foreign_keys=ON")

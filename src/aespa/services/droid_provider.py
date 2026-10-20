@@ -155,11 +155,10 @@ def _workspace_directory() -> Path:
 
 
 def _child_env(proxy_url: str | None = None) -> dict[str, str]:
+    from aespa.services.llm_network import child_network_env
+
     env = {name: os.environ[name] for name in _ENV_ALLOWLIST if name in os.environ}
-    if proxy_url:
-        env["HTTP_PROXY"] = proxy_url
-        env["HTTPS_PROXY"] = proxy_url
-    return env
+    return child_network_env(env, proxy_url)
 
 
 def _content_text(content: Any) -> str:
@@ -235,17 +234,26 @@ async def discover_model_options(proxy_url: str | None = None) -> list[dict[str,
             model_id = getattr(model, "id", None)
             if not model_id:
                 continue
-            options.append(
-                {
-                    "id": model_id,
-                    "supported_reasoning_efforts": getattr(
-                        model, "supported_reasoning_efforts", None
-                    ),
-                    "default_reasoning_effort": getattr(
-                        model, "default_reasoning_effort", None
-                    ),
-                }
-            )
+            option = {
+                "id": model_id,
+                "supported_reasoning_efforts": getattr(
+                    model, "supported_reasoning_efforts", None
+                ),
+                "default_reasoning_effort": getattr(
+                    model, "default_reasoning_effort", None
+                ),
+            }
+            for key in (
+                "context_window_tokens",
+                "context_length",
+                "context_window",
+                "max_input_tokens",
+                "input_token_limit",
+            ):
+                value = getattr(model, key, None)
+                if value is not None:
+                    option[key] = value
+            options.append(option)
         return options
     finally:
         await client.close()
@@ -309,8 +317,8 @@ async def _handle_relay(
 
 
 def _permission_handler(params: dict[str, Any]) -> str:
-    from droid_sdk import ToolConfirmationOutcome
-
+    # Return the protocol values directly: the SDK has renamed the enum
+    # members between releases, but the values sent to Droid are stable.
     tool_uses = params.get("toolUses") or []
     aespa_only = bool(tool_uses) and all(
         isinstance(item, dict)
@@ -318,11 +326,7 @@ def _permission_handler(params: dict[str, Any]) -> str:
         and (item.get("details") or {}).get("serverName") == "aespa"
         for item in tool_uses
     )
-    return (
-        ToolConfirmationOutcome.ProceedOnce.value
-        if aespa_only
-        else ToolConfirmationOutcome.Cancel.value
-    )
+    return "proceed_once" if aespa_only else "cancel"
 
 
 async def _drain(conversation: _Conversation) -> None:

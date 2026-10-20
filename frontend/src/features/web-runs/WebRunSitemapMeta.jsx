@@ -20,6 +20,7 @@ export function WebRunSitemapMeta({
   const [llmConcurrency, setLlmConcurrency] = useState("");
   const [profileId, setProfileId] = useState(null);
   const [crawlerMode, setCrawlerMode] = useState("url");
+  const [pageSelection, setPageSelection] = useState("each_url");
   const [showFlyout, setShowFlyout] = useState(false);
   const profile = profiles.find((item) => item.id === run.llm_profile_id);
   const multiUser = run.credentials?.length > 1;
@@ -56,6 +57,7 @@ export function WebRunSitemapMeta({
     setLlmConcurrency(run.llm_max_concurrency ? String(run.llm_max_concurrency) : "");
     setProfileId(run.llm_profile_id || null);
     setCrawlerMode(run.crawler_mode || "url");
+    setPageSelection(run.page_selection || "each_url");
     setEditing(true);
   };
   const save = async () => {
@@ -72,6 +74,7 @@ export function WebRunSitemapMeta({
           max_pages: maxPages,
           llm_max_concurrency: maxConcurrency,
           crawler_mode: crawlerMode,
+          page_selection: pageSelection,
           llm_profile_id: profileId || null,
         }),
       );
@@ -82,8 +85,8 @@ export function WebRunSitemapMeta({
   };
 
   return (
-    <div className="run-meta">
-      <div className="run-stat">
+    <div className="run-meta sitemap-meta">
+      <div className="run-stat sitemap-pages-stat">
         <span className="run-stat-val">{run.pages_discovered}</span>
         <span className="run-stat-lbl">Pages found</span>
       </div>
@@ -105,10 +108,26 @@ export function WebRunSitemapMeta({
             <select
               className="select"
               value={crawlerMode}
-              onChange={(event) => setCrawlerMode(event.target.value)}
+              disabled={run.crawl_started_once}
+              onChange={(event) => {
+                setCrawlerMode(event.target.value);
+                setPageSelection("each_url");
+              }}
             >
               <option value="url">URL</option>
               <option value="interactive">Interactive SPA</option>
+            </select>
+          </div>
+          <div className="run-stat-edit-field">
+            <label>Page selection</label>
+            <select
+              className="select"
+              value={pageSelection}
+              disabled={run.crawl_started_once || crawlerMode !== "url"}
+              onChange={(event) => setPageSelection(event.target.value)}
+            >
+              <option value="each_url">Visit each URL</option>
+              <option value="group_similar">Group similar pages</option>
             </select>
           </div>
           <div className="run-stat-edit-field">
@@ -147,43 +166,36 @@ export function WebRunSitemapMeta({
       ) : (
         <>
           <div className="run-stat">
-            <span className="run-stat-val">{run.max_depth}</span>
-            <span className="run-stat-lbl">Max depth</span>
-          </div>
-          <div className="run-stat">
-            <span className="run-stat-val">{run.max_pages}</span>
-            <span className="run-stat-lbl">Max pages</span>
-          </div>
-          <div className="run-stat">
-            <span className="run-stat-val" style={{ fontSize: 12 }}>
-              {run.crawler_mode === "interactive" ? "Interactive SPA" : "URL"}
+            <span className="run-stat-val">
+              Depth {run.max_depth} · {run.max_pages} pages
             </span>
-            <span className="run-stat-lbl">Crawler</span>
           </div>
           <div className="run-stat">
-            <span className="run-stat-val" style={{ fontSize: 12 }}>
-              {run.llm_max_concurrency ? `${run.llm_max_concurrency} max` : "Unlimited"}
+            <span className="run-stat-val">
+              {run.crawler_mode === "interactive" ? "Interactive SPA crawl" : "URL crawl"}
+              {run.crawler_mode === "url"
+                ? run.page_selection === "group_similar"
+                  ? " · Group similar pages"
+                  : " · Visit each URL"
+                : ""}
             </span>
-            <span className="run-stat-lbl">LLM Concurrency</span>
           </div>
-          {run.llm_profile_id && profiles.length > 0 && (
-            <div className="run-stat">
-              <span className="run-stat-val" style={{ fontSize: 12 }}>
-                {profile?.name || "#" + run.llm_profile_id}
-              </span>
-              <span className="run-stat-lbl">LLM profile</span>
-            </div>
-          )}
-          {run.status !== "running" && (
-            <button
-              className="btn ghost sm"
-              style={{ alignSelf: "center", marginLeft: 4 }}
-              title="Edit depth / pages / LLM concurrency"
-              onClick={edit}
+          <div className="run-stat sitemap-llm-stat">
+            <span
+              className="run-stat-val"
+              title={
+                run.llm_max_concurrency
+                  ? `Up to ${run.llm_max_concurrency} page analyses at once`
+                  : "No limit on page analyses at once"
+              }
             >
-              ✎
-            </button>
-          )}
+              {run.llm_profile_id && profiles.length > 0
+                ? profile?.name || "#" + run.llm_profile_id
+                : "Default profile"}
+              {run.llm_max_concurrency ? ` · ${run.llm_max_concurrency} at once` : ""}
+            </span>
+            <span className="run-stat-lbl">LLM</span>
+          </div>
         </>
       )}
       {!multiUser && (
@@ -205,11 +217,20 @@ export function WebRunSitemapMeta({
         </>
       )}
       {credentials.length > 0 && run.status !== "running" && (
-        <div className="run-stat" style={{ flexDirection: "column", gap: 2 }}>
-          <span className="run-stat-lbl">Next crawl as</span>
+        <div className="run-stat sitemap-crawl-identity">
+          <span className="run-stat-lbl">Crawl as</span>
           <select
             className="select"
             style={{ fontSize: 12 }}
+            aria-label="Crawl as"
+            title={(() => {
+              const chosen = credentials.find((c) => c.id === crawlCredentialId);
+              return chosen
+                ? chosen.label
+                  ? `${chosen.label} (${chosen.username})`
+                  : chosen.username
+                : "All users";
+            })()}
             value={crawlCredentialId || ""}
             onChange={(e) =>
               onCrawlCredentialChange &&
@@ -218,12 +239,21 @@ export function WebRunSitemapMeta({
           >
             <option value="">All users</option>
             {credentials.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.label ? `${c.label} (${c.username})` : c.username}
+              <option key={c.id} value={c.id} title={c.username}>
+                {c.label || c.username}
               </option>
             ))}
           </select>
         </div>
+      )}
+      {run.status !== "running" && !editing && (
+        <button
+          className="btn ghost sm sitemap-edit-button"
+          title="Edit depth, page limit, crawler and LLM concurrency"
+          onClick={edit}
+        >
+          ✎ Edit
+        </button>
       )}
       {run.error_message && (
         <div style={{ color: "var(--danger)", fontSize: 12, flex: 1 }}>{run.error_message}</div>
@@ -233,8 +263,8 @@ export function WebRunSitemapMeta({
         (run.llm_completed || 0) > 0 ||
         pendingNodes.length > 0) && (
         <div
-          className="run-stat"
-          style={{ minWidth: 90, marginLeft: "auto", cursor: "pointer", position: "relative" }}
+          className="run-stat sitemap-queue-stat"
+          style={{ cursor: "pointer", position: "relative" }}
           onClick={() => setShowFlyout((prev) => !prev)}
           title="Click to view LLM analysis queue details"
         >
@@ -245,11 +275,11 @@ export function WebRunSitemapMeta({
               fontWeight: 600,
               color:
                 activeCount > 0
-                  ? "var(--warning, #f59e0b)"
+                  ? "var(--warn)"
                   : queuedCount > 0
                     ? "var(--text, #e5e7eb)"
                     : (run.llm_completed || 0) > 0 || completedNodes.length > 0
-                      ? "var(--success, #10b981)"
+                      ? "var(--ok)"
                       : "var(--muted)",
             }}
           >

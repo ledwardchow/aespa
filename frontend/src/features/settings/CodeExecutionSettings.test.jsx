@@ -16,7 +16,7 @@ const config = {
   workspace_mb: 16,
   output_limit_bytes: 65536,
   artifact_limit_bytes: 10485760,
-  max_requests_per_execution: 20,
+  max_requests_per_execution: 50,
   max_concurrent_requests: 5,
   max_concurrent_executions: 2,
   retain_redacted_source: true,
@@ -38,7 +38,9 @@ test("shows Docker service guidance without image build instructions", async () 
 
   render(<CodeExecutionSettings />);
 
-  expect(await screen.findByText(/Docker is installed, but its service is not running/)).toBeTruthy();
+  expect(
+    await screen.findByText(/Docker is installed, but its service is not running/),
+  ).toBeTruthy();
   expect(screen.queryByText(/Build it with:/)).toBeNull();
 });
 

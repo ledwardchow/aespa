@@ -4,6 +4,7 @@ import { ScannerPolicyFields } from "./ScannerPolicyFields.jsx";
 
 import { policyToForm, policyPayload, SCAN_MODE_OPTIONS } from "../../shared/runs/policy.js";
 import { IconCheck } from "../../shared/ui/Icons.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 const SCAN_MODE_DETAILS = {
   passive: "Read-only requests for low-impact reconnaissance.",
@@ -297,7 +298,7 @@ function GlobalHttpHeadersSettings() {
         Add headers to every request made by the scanner and crawler (Playwright and HTTPX). These
         do not affect requests sent to LLMs.
       </div>
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={hdrCfg === null} onDismiss={() => setError(null)} />
       {hdrCfg !== null && (
         <form onSubmit={saveHeader}>
           <div className="table-wrap global-header-table-wrap">
@@ -410,7 +411,7 @@ function GlobalHttpHeadersSettings() {
   );
 }
 
-function PolicySettings({ Fields }) {
+export function PolicySettings({ Fields }) {
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -449,7 +450,7 @@ function PolicySettings({ Fields }) {
   return (
     <>
       {!form && !error && <div className="subtle">Loading…</div>}
-      {error && <div className="alert error">{error}</div>}
+      <PageError error={error} inline={!form} onDismiss={() => setError(null)} />
       {form && (
         <form className="card" onSubmit={onSubmit}>
           <Fields form={form} upd={upd} />
@@ -469,39 +470,6 @@ function PolicySettings({ Fields }) {
         </form>
       )}
     </>
-  );
-}
-
-export function GlobalPolicySubTabs({ tab, setTab }) {
-  return (
-    <div
-      className="activity-sub-tab-bar coverage-sub-tab-bar global-policy-sub-tab-bar"
-      role="tablist"
-      aria-label="Global agent settings"
-    >
-      <button
-        type="button"
-        role="tab"
-        id="global-scan-behaviour-tab"
-        aria-selected={tab === "scan-behaviour"}
-        aria-controls="global-scan-behaviour-panel"
-        className={"activity-sub-tab-btn" + (tab === "scan-behaviour" ? " active" : "")}
-        onClick={() => setTab("scan-behaviour")}
-      >
-        Scan Behaviour
-      </button>
-      <button
-        type="button"
-        role="tab"
-        id="global-headers-tab"
-        aria-selected={tab === "headers"}
-        aria-controls="global-headers-panel"
-        className={"activity-sub-tab-btn" + (tab === "headers" ? " active" : "")}
-        onClick={() => setTab("headers")}
-      >
-        HTTP Headers
-      </button>
-    </div>
   );
 }
 

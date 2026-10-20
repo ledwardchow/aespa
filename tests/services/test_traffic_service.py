@@ -2,28 +2,25 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel import Session, select
 
-from aespa.models import CrawledPage, PageCredentialView, TrafficEntry
+from aespa.models import (
+    ApiCollection,
+    ApiEndpoint,
+    ApiEndpointTest,
+    ApiTestRun,
+    CrawledPage,
+    PageCredentialView,
+    PageOwaspTest,
+    TrafficEntry,
+)
 from aespa.models import TestRun as RunModel
 from aespa.schemas import PageCredentialViewOut
 from aespa.services import traffic
 from aespa.services.traffic import LoggingAsyncClient, setup_playwright_logging
 
 
-def test_clear_traffic_preserves_scanner_visible_crawl_state(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    from aespa import models as _models  # noqa: F401
-
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
-
+def test_clear_traffic_preserves_scanner_visible_crawl_state(engine):
     request_summary = (
         "API endpoint observed during crawl.\n"
         "Method: POST\n"
@@ -132,14 +129,7 @@ def test_page_credential_view_out_includes_api_transcript_text():
 
 
 @pytest.mark.anyio
-async def test_logging_async_client_success(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+async def test_logging_async_client_success(monkeypatch, engine):
 
     # Mock the underlying super().send to return a valid response
     mock_resp = httpx.Response(
@@ -170,14 +160,166 @@ async def test_logging_async_client_success(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_python_traffic_keeps_execution_and_body_provenance(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+async def test_agent_traffic_keeps_purpose_and_exact_coverage_cell(monkeypatch, engine):
+    with Session(engine) as session:
+        page = CrawledPage(
+            test_run_id=42,
+            url="https://target.local/accounts/7",
+            title="Account",
+        )
+        session.add(page)
+        session.commit()
+        session.refresh(page)
+        cell = PageOwaspTest(
+            test_run_id=42,
+            page_id=page.id,
+            owasp_category="A01",
+        )
+        session.add(cell)
+        session.commit()
+        session.refresh(cell)
+        page_id = page.id
+        cell_id = cell.id
+
+    mock_resp = httpx.Response(
+        status_code=403,
+        text="denied",
+        request=httpx.Request("GET", "https://target.local/accounts/7"),
     )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+    monkeypatch.setattr(httpx.AsyncClient, "send", AsyncMock(return_value=mock_resp))
+
+    async with LoggingAsyncClient(
+        run_id=42,
+        page_id=page_id,
+        provenance={
+            "purpose": traffic.request_purpose(
+                {"purpose": "Check whether another user's account is accessible"},
+                "Probe target",
+                agent_name="Specialist",
+                owasp_category="A01",
+            ),
+            "owasp_category": "A01",
+            "agent_id": "scanner",
+            "agent_step": 3,
+        },
+    ) as client:
+        await client.send(httpx.Request("GET", "https://target.local/accounts/7"))
+
+    result = traffic.get_traffic(42)
+    assert result[0]["purpose"] == (
+        "Specialist - A01: Check whether another user's account is accessible"
+    )
+    assert result[0]["username"] is None
+    assert result[0]["coverage_cell_id"] == cell_id
+    assert result[0]["owasp_category"] == "A01"
+
+
+def test_assign_web_traffic_page_backfills_missing_page(engine):
+    with Session(engine) as session:
+        page = CrawledPage(
+            test_run_id=42,
+            url="https://target.local/api/customers",
+            status="crawled",
+            in_scope=True,
+        )
+        entry = TrafficEntry(
+            test_run_id=42,
+            source="httpx",
+            method="GET",
+            url="https://target.local/api/customers?search=%27",
+            request_headers="{}",
+            response_headers="{}",
+        )
+        session.add(page)
+        session.add(entry)
+        session.commit()
+        session.refresh(page)
+        session.refresh(entry)
+        page_id = page.id
+        traffic_id = entry.id
+
+    assert traffic.assign_web_traffic_page(traffic_id, 42, page_id) is True
+
+    with Session(engine) as session:
+        assert session.get(TrafficEntry, traffic_id).page_id == page_id
+
+
+def test_api_traffic_resolves_template_to_exact_coverage_cell(engine):
+    with Session(engine) as session:
+        collection = ApiCollection(
+            name="Traffic association API", base_url="https://api.target.local"
+        )
+        session.add(collection)
+        session.commit()
+        session.refresh(collection)
+        endpoint = ApiEndpoint(
+            collection_id=collection.id,
+            method="GET",
+            path="/accounts/{id}",
+        )
+        run = ApiTestRun(collection_id=collection.id, name="API run")
+        session.add(endpoint)
+        session.add(run)
+        session.commit()
+        session.refresh(endpoint)
+        session.refresh(run)
+        cell = ApiEndpointTest(
+            api_test_run_id=run.id,
+            endpoint_id=endpoint.id,
+            owasp_api_category="API1",
+        )
+        session.add(cell)
+        session.commit()
+        session.refresh(cell)
+        run_id = run.id
+        cell_id = cell.id
+
+    traffic._write(
+        run_id=None,
+        api_run_id=run_id,
+        source="httpx",
+        method="GET",
+        url="https://api.target.local/accounts/42",
+        request_headers={},
+        request_body=None,
+        status=200,
+        response_headers={},
+        response_body="{}",
+        duration_ms=5,
+        purpose="Check object-level authorization",
+        owasp_category="API1",
+    )
+
+    result = traffic.get_traffic(0, api_run_id=run_id)
+    assert result[0]["coverage_cell_id"] == cell_id
+
+
+def test_request_purpose_prepends_agent_and_coverage_label():
+    assert (
+        traffic.request_purpose(
+            {
+                "hypothesis": "Try the alternate account",
+                "owasp_category": "a03",
+                "test_class": "stored_xss",
+            },
+            "Probe target",
+            agent_name="Specialist",
+        )
+        == "Specialist - A03 stored_xss: Try the alternate account"
+    )
+    assert (
+        traffic.request_purpose(
+            {"purpose": "Retry without cookies"},
+            "Probe target",
+            agent_name="Validator",
+            owasp_category="A01",
+        )
+        == "Validator - A01: Retry without cookies"
+    )
+
+
+@pytest.mark.anyio
+async def test_python_traffic_keeps_execution_and_body_provenance(monkeypatch, engine):
     mock_resp = httpx.Response(
         status_code=201,
         headers={"Content-Type": "application/octet-stream"},
@@ -226,14 +368,7 @@ async def test_python_traffic_keeps_execution_and_body_provenance(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_logging_async_client_failure(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+async def test_logging_async_client_failure(monkeypatch, engine):
 
     # Mock the underlying super().send to raise a ConnectTimeout exception
     monkeypatch.setattr(
@@ -266,14 +401,7 @@ async def test_logging_async_client_failure(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_playwright_logging_request_failed(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+async def test_playwright_logging_request_failed(engine):
 
     # Mock Playwright objects
     mock_ctx = MagicMock()
@@ -287,6 +415,15 @@ async def test_playwright_logging_request_failed(monkeypatch):
     mock_ctx.on = on_event
 
     setup_playwright_logging(mock_ctx, run_id=100, username="pw_user")
+    traffic.set_browser_context_tag(
+        mock_ctx,
+        None,
+        "admin_session",
+        username="authenticated_admin",
+        purpose="Specialist - A03 stored_xss: Test stored input",
+        owasp_category="A03",
+        test_class="stored_xss",
+    )
 
     # Verify that the listener is registered
     assert "requestfailed" in listeners
@@ -325,21 +462,15 @@ async def test_playwright_logging_request_failed(monkeypatch):
             "[Browser Request Failed: net::ERR_CONNECTION_REFUSED]"
             in entry.response_body
         )
-        assert entry.username == "pw_user"
+        assert entry.username == "authenticated_admin"
+        assert entry.purpose == "Specialist - A03 stored_xss: Test stored input"
 
 
 @pytest.mark.anyio
-async def test_playwright_logging_skips_noisy_resource_types(monkeypatch):
+async def test_playwright_logging_skips_noisy_resource_types(engine):
     """Image/font/media requests are not logged — and (the bug being fixed) the
     request handler must not retain per-request state for them, since the response
     handler returns before cleaning it up."""
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
 
     listeners = {}
     mock_ctx = MagicMock()
@@ -367,15 +498,7 @@ async def test_playwright_logging_skips_noisy_resource_types(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_playwright_logging_handles_binary_post_data_decode_error(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
-
+async def test_playwright_logging_handles_binary_post_data_decode_error(engine):
     listeners = {}
     mock_ctx = MagicMock()
     mock_ctx.on = lambda name, handler: listeners.__setitem__(name, handler)
@@ -434,16 +557,9 @@ async def test_playwright_logging_handles_binary_post_data_decode_error(monkeypa
 
 
 @pytest.mark.anyio
-async def test_make_httpx_hooks_keys_api_runs_on_api_column(monkeypatch):
+async def test_make_httpx_hooks_keys_api_runs_on_api_column(engine):
     """ALICE/API traffic must land on api_test_run_id (not test_run_id) so it
     shows in the API traffic panel and doesn't collide with web run ids."""
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
 
     hooks = traffic.make_httpx_hooks(None, username="alice", api_run_id=7)
     req = httpx.Request("GET", "https://api.target.local/v1/users")
@@ -466,14 +582,7 @@ async def test_make_httpx_hooks_keys_api_runs_on_api_column(monkeypatch):
     assert traffic.get_traffic(7) == []
 
 
-def test_maybe_record_waf_ignores_out_of_scope_traffic(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+def test_maybe_record_waf_ignores_out_of_scope_traffic(engine):
     traffic._waf_cache.clear()
 
     from aespa.models import Site
@@ -504,14 +613,7 @@ def test_maybe_record_waf_ignores_out_of_scope_traffic(monkeypatch):
         assert run_db.waf_provider is None
 
 
-def test_maybe_record_waf_records_in_scope_traffic(monkeypatch):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
+def test_maybe_record_waf_records_in_scope_traffic(engine):
     traffic._waf_cache.clear()
 
     from aespa.models import Site
@@ -544,15 +646,7 @@ def test_maybe_record_waf_records_in_scope_traffic(monkeypatch):
         assert run_db.waf_evidence == "server: cloudflare"
 
 
-def test_write_emits_structured_testing_traffic_for_console(monkeypatch, caplog):
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    monkeypatch.setattr(traffic, "get_engine", lambda: engine)
-
+def test_write_emits_structured_testing_traffic_for_console(caplog, engine):
     with Session(engine) as session:
         run = RunModel(site_id=1, name="Run #52")
         session.add(run)

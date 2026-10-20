@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { useAliceChat } from "./useAliceChat.js";
 const WebRunChat = createContext(null);
 
@@ -11,6 +11,14 @@ export function WebRunChatProvider({ runId, children }) {
       else next.add(aid);
       return next;
     });
+  const collapseAgentId = useCallback((aid) => {
+    setCollapsedAgentIds((prev) => {
+      if (prev.has(aid)) return prev;
+      const next = new Set(prev);
+      next.add(aid);
+      return next;
+    });
+  }, []);
   const chat = useAliceChat(runId, {
     onActivate: () =>
       setCollapsedAgentIds((prev) => {
@@ -55,7 +63,7 @@ export function WebRunChatProvider({ runId, children }) {
     };
   }, [runId, setActiveAliceTabId, setAliceChats]);
   return (
-    <WebRunChat.Provider value={{ ...chat, collapsedAgentIds, toggleAgentId }}>
+    <WebRunChat.Provider value={{ ...chat, collapsedAgentIds, toggleAgentId, collapseAgentId }}>
       {children}
     </WebRunChat.Provider>
   );

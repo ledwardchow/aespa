@@ -42,11 +42,24 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
       return "tab-default";
     }
   });
-  const [aliceRunning, setAliceRunning] = useState(false);
+  // Chat tabs with an ALICE turn in progress. Each tab streams independently,
+  // so one busy tab never blocks sending in another.
+  const [runningTabIds, setRunningTabIds] = useState(() => new Set());
+  const setTabRunning = useCallback((tabId, running) => {
+    setRunningTabIds((prev) => {
+      if (prev.has(tabId) === running) return prev;
+      const next = new Set(prev);
+      if (running) next.add(tabId);
+      else next.delete(tabId);
+      return next;
+    });
+  }, []);
+  const aliceRunning = runningTabIds.has(activeAliceTabId);
+  const anyAliceRunning = runningTabIds.size > 0;
   const [aliceInputText, setAliceInputText] = useState("");
   const [aliceExpandedThinkIds, setAliceExpandedThinkIds] = useState(new Set());
   const [aliceChatHeight, setAliceChatHeight] = useState(300);
-  const streamRef = useRef(null);
+  const streamsRef = useRef({}); // tab_id -> EventSource
   const activeAliceTabIdRef = useRef(activeAliceTabId);
   activeAliceTabIdRef.current = activeAliceTabId;
   const sessionsRef = useRef(aliceChats);
@@ -69,22 +82,25 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
   // ── Cleanup stream on unmount ─────────────────────────────────────────────
   useEffect(() => {
     return () => {
-      if (streamRef.current) {
-        streamRef.current.close();
-        streamRef.current = null;
-      }
+      Object.values(streamsRef.current).forEach((es) => es.close());
+      streamsRef.current = {};
     };
   }, []);
 
   // ── ALICE stream connection ───────────────────────────────────────────────
   const connectAliceStream = useCallback(
-    (cursor = 0) => {
-      if (streamRef.current) {
-        streamRef.current.close();
-        streamRef.current = null;
-      }
-      const es = new EventSource(`/api/api-test-runs/${runId}/alice/stream?cursor=${cursor}`);
-      streamRef.current = es;
+    (tabId, cursor = 0) => {
+      streamsRef.current[tabId]?.close();
+      const es = new EventSource(
+        `/api/api-test-runs/${runId}/alice/stream?cursor=${cursor}` +
+          `&tab_id=${encodeURIComponent(tabId)}`,
+      );
+      streamsRef.current[tabId] = es;
+      const closeStream = () => {
+        es.close();
+        if (streamsRef.current[tabId] === es) delete streamsRef.current[tabId];
+        setTabRunning(tabId, false);
+      };
       // Re-accumulate from scratch on every (re)connect: the stream replays from
       // cursor 0, so we rebuild each message's text/stepData and REPLACE state
       // rather than append — otherwise a mid-run reconnect would double-count
@@ -101,7 +117,26 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
               ),
             );
           }
-          if (
+          if (event.type === "state_snapshot" && event.tab_id) {
+            textAcc[event.think_msg_id] = normalizeAliceText(event.thought || "");
+            textAcc[event.reply_msg_id] = normalizeAliceText(event.message || "");
+            setAliceChats((prev) =>
+              prev.map((s) =>
+                s.id !== event.tab_id
+                  ? s
+                  : {
+                      ...s,
+                      messages: s.messages.map((m) => {
+                        if (m.id === event.think_msg_id)
+                          return { ...m, text: textAcc[event.think_msg_id] };
+                        if (m.id === event.reply_msg_id)
+                          return { ...m, text: textAcc[event.reply_msg_id] };
+                        return m;
+                      }),
+                    },
+              ),
+            );
+          } else if (
             (event.type === "thinking_chunk" || event.type === "message_chunk") &&
             event.delta &&
             event.tab_id &&
@@ -123,6 +158,19 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
                             }
                           : m,
                       ),
+                    },
+              ),
+            );
+          } else if (event.type === "message_retract" && event.tab_id && event.msg_id) {
+            textAcc[event.msg_id] = normalizeAliceText(event.message || "");
+            const text = textAcc[event.msg_id];
+            setAliceChats((prev) =>
+              prev.map((s) =>
+                s.id !== event.tab_id
+                  ? s
+                  : {
+                      ...s,
+                      messages: s.messages.map((m) => (m.id === event.msg_id ? { ...m, text } : m)),
                     },
               ),
             );
@@ -235,19 +283,13 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
                     },
               ),
             );
-            setAliceRunning(false);
-            es.close();
-            streamRef.current = null;
+            closeStream();
           }
         } catch {}
       };
-      es.onerror = () => {
-        es.close();
-        streamRef.current = null;
-        setAliceRunning(false);
-      };
+      es.onerror = closeStream;
     },
-    [runId],
+    [runId, setTabRunning],
   );
 
   // ── On mount: load sessions, agent log, check alice status ────────────────
@@ -268,18 +310,24 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
     apiRunsApi
       .getApiAliceStatus(runId)
       .then((st) => {
-        if (st?.goal?.tab_id) {
+        const runningTabs =
+          st?.running_tabs || (st?.running && st.tab_id ? [{ tab_id: st.tab_id }] : []);
+        const goals = [st?.goal, ...runningTabs.map((t) => t.goal)].filter((g) => g?.tab_id);
+        if (goals.length) {
           setAliceChats((prev) =>
-            prev.map((tab) => (tab.id === st.goal.tab_id ? { ...tab, goal: st.goal } : tab)),
+            prev.map((tab) => {
+              const goal = goals.find((g) => g.tab_id === tab.id);
+              return goal ? { ...tab, goal } : tab;
+            }),
           );
         }
-        if (st?.running) {
-          setAliceRunning(true);
-          connectAliceStream(0);
+        for (const { tab_id } of runningTabs) {
+          setTabRunning(tab_id, true);
+          connectAliceStream(tab_id, 0);
         }
       })
       .catch(() => {});
-  }, [runId, connectAliceStream]);
+  }, [runId, connectAliceStream, setTabRunning]);
 
   // ── ALICE send / stop ─────────────────────────────────────────────────────
   const submitAliceDirective = async (rawText) => {
@@ -314,7 +362,7 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
         ),
       );
       setAliceInputText("");
-      apiRunsApi.steerApiAliceGoal(runId, { message: userText }).catch(() => {});
+      apiRunsApi.steerApiAliceGoal(runId, { message: userText, tab_id: tabId }).catch(() => {});
       return;
     }
     setAliceInputText("");
@@ -368,7 +416,7 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
             },
       ),
     );
-    setAliceRunning(true);
+    setTabRunning(tabId, true);
     const activeSession = sessionsRef.current.find((s) => s.id === tabId) || {
       messages: [],
     };
@@ -384,20 +432,18 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
         think_msg_id: thinkId,
         reply_msg_id: replyId,
       });
-      connectAliceStream(0);
+      connectAliceStream(tabId, 0);
     } catch {
-      setAliceRunning(false);
+      setTabRunning(tabId, false);
     }
   };
   const handleAliceSend = () => submitAliceDirective(aliceInputText);
   const handleAliceStop = () => {
-    apiRunsApi.stopApiAliceRun(runId).catch(() => {});
-    if (streamRef.current) {
-      streamRef.current.close();
-      streamRef.current = null;
-    }
-    setAliceRunning(false);
     const tabId = activeAliceTabIdRef.current;
+    apiRunsApi.stopApiAliceRun(runId, tabId).catch(() => {});
+    streamsRef.current[tabId]?.close();
+    delete streamsRef.current[tabId];
+    setTabRunning(tabId, false);
     setAliceChats((prev) =>
       prev.map((tab) =>
         tab.id === tabId && tab.goal
@@ -469,8 +515,8 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
     useAutoFollowScroll(activeAliceTabId, aliceMessages, aliceRunning);
   const isActive = agent.status === "active";
   useEffect(() => {
-    onRunningChange(aliceRunning);
-  }, [aliceRunning, onRunningChange]);
+    onRunningChange(anyAliceRunning);
+  }, [anyAliceRunning, onRunningChange]);
   return (
     <div
       className="agent-row agent-row--alice-chat agent-row--expandable"
@@ -488,7 +534,7 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
           "agent-badge" + (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")
         }
       >
-        {isActive ? "ACTIVE" : "STANDBY"}
+        {isActive ? "Running" : "Idle"}
       </span>
       <span className="agent-current-task">{agent.task}</span>
       <span className="activity-expand-chevron">{isExpanded ? "▲" : "▼"}</span>
@@ -505,6 +551,9 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
                   }
                   onClick={() => setActiveAliceTabId(tab.id)}
                 >
+                  {runningTabIds.has(tab.id) && (
+                    <span className="alice-chat-tab-busy" title="Working" aria-label="Working" />
+                  )}
                   <span>{tab.title || "Session"}</span>
                   <span
                     className="alice-chat-tab-close"

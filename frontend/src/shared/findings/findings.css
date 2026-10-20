@@ -12,6 +12,17 @@
   width: 100%;
   min-width: 0;
 }
+.coverage-findings-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.coverage-findings-filter span {
+  flex: 1 1 220px;
+}
 .findings-status-bar {
   display: flex;
   align-items: center;
@@ -137,11 +148,13 @@
 }
 .finding-row td {
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border-subtle, var(--border));
+  border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
-.finding-title {
+.findings-table .finding-title {
   font-weight: 500;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .findings-table .finding-reference-cell {
   width: 120px;
@@ -315,8 +328,10 @@
   background: var(--hover);
 }
 .finding-group-row td {
+  /* Same row height whether or not the row has a group delete button. */
+  height: 49px;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border-subtle, var(--border));
+  border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
 .finding-group-row:hover .finding-del-btn {
@@ -350,7 +365,7 @@
 }
 .finding-instance-row td {
   padding: 6px 12px 6px 28px;
-  border-bottom: 1px solid var(--border-subtle, var(--border));
+  border-bottom: 1px solid var(--border);
   font-size: 12px;
   vertical-align: middle;
 }
@@ -468,4 +483,99 @@
 .view-toggle .btn.active {
   background: var(--accent);
   color: #fff;
+}
+
+/* Unconfirmed / Low confidence / Deterministic checks: section headers below the
+   main findings, with their own findings indented underneath. */
+.finding-section-row {
+  cursor: pointer;
+}
+.finding-section-row td {
+  padding: 14px 12px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.finding-section-row:hover td {
+  color: var(--text-2);
+}
+.finding-section-row .finding-count-badge {
+  margin-left: 8px;
+  text-transform: none;
+}
+.finding-group-row--nested .finding-title {
+  padding-left: 28px;
+}
+
+.finding-category-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+}
+.findings-more-menu {
+  position: relative;
+}
+.findings-more-trigger {
+  min-width: 34px;
+  font-size: 16px;
+  line-height: 1;
+}
+.findings-more-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 70;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+.findings-more-popover button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-2);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+}
+.findings-more-popover button:hover:not(:disabled),
+.findings-more-popover button:focus-visible {
+  color: var(--text);
+  background: var(--panel-2);
+  outline: none;
+}
+.findings-more-popover button.danger {
+  color: var(--danger);
+}
+.findings-more-popover button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.findings-more-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+@container findings-panel (max-width: 900px) {
+  .findings-more-popover {
+    right: auto;
+    left: 0;
+  }
 }

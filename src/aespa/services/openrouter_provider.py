@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from aespa.services.llm_network import httpx_options
+
 log = logging.getLogger("aespa.llm.openrouter")
 
 OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
@@ -38,9 +40,11 @@ async def discover_model_options(
     if api_key and api_key.strip():
         headers["Authorization"] = f"Bearer {api_key.strip()}"
 
-    client_kwargs: dict[str, Any] = {"timeout": 10.0, "headers": headers}
-    if proxy_url:
-        client_kwargs["proxy"] = proxy_url
+    client_kwargs: dict[str, Any] = {
+        "timeout": 10.0,
+        "headers": headers,
+        **httpx_options(proxy_url),
+    }
 
     async with httpx.AsyncClient(**client_kwargs) as client:
         response = await client.get(url)

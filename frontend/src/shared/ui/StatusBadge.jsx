@@ -11,6 +11,7 @@ const VARIANT = {
   analyzing: "running",
   analysing: "running",
   crawling: "running",
+  preparing: "running",
   stopping: "stopping",
   failed: "danger",
   cancelled: "danger",
@@ -32,16 +33,28 @@ const VARIANT = {
 };
 
 const LABEL_OVERRIDE = {
+  complete: "completed",
+  scanned: "completed",
   analyzing: "analysing",
   sast_running: "scanning code",
   correlating: "matching context",
   awaiting_review: "awaiting review",
   dast_running: "testing live targets",
   incomplete: "incomplete — resume available",
+  preparing: "preparing source",
 };
 
-export function StatusBadge({ status, className = "" }) {
+export const statusText = (text) => {
+  const value = String(text || "");
+  return value.charAt(0).toUpperCase() + value.slice(1);
+};
+
+export function StatusBadge({ status, className = "", title }) {
   const variant = VARIANT[status] || "neutral";
-  const label = LABEL_OVERRIDE[status] || status;
-  return <span className={`badge ${variant} ${className}`.trim()}>{label}</span>;
+  const label = statusText(LABEL_OVERRIDE[status] || status);
+  return (
+    <span className={`badge ${variant} ${className}`.trim()} title={title || undefined}>
+      {label}
+    </span>
+  );
 }

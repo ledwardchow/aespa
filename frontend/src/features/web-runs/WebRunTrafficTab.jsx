@@ -4,33 +4,13 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 import { useColResize } from "../../shared/hooks/useColResize.js";
 import { TrafficDetail, TrafficTable } from "../../shared/ui/TrafficView.jsx";
-
-function parseExcludedExtensions(value) {
-  return new Set(
-    value
-      .split(",")
-      .map((part) => part.trim().toLowerCase())
-      .filter(Boolean)
-      .map((part) => (part.startsWith(".") ? part : `.${part}`)),
-  );
-}
+import { nav } from "../../shared/navigation/router.js";
+import { runHref } from "../../shared/navigation/links.ts";
+import { extractUrlExtension, parseExcludedExtensions } from "../../shared/lib/urlExtensions.js";
 
 function extractUrlHostname(url) {
   try {
     return new URL(url).hostname.toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-function extractUrlExtension(url) {
-  try {
-    const pathname = new URL(url).pathname || "";
-    const slash = pathname.lastIndexOf("/");
-    const segment = slash >= 0 ? pathname.slice(slash + 1) : pathname;
-    const dot = segment.lastIndexOf(".");
-    if (dot <= 0 || dot === segment.length - 1) return "";
-    return segment.slice(dot).toLowerCase();
   } catch {
     return "";
   }
@@ -43,6 +23,7 @@ export function WebRunTrafficTab({
   captureActive,
   runStatus,
   onTotalChange,
+  coverageFilter,
 }) {
   const [traffic, setTraffic] = useState([]);
   const [trafficTotal, setTrafficTotal] = useState(0);
@@ -57,11 +38,12 @@ export function WebRunTrafficTab({
   });
   const trafficTableRef = useRef(null);
   const lastTrafficIdRef = useRef(0);
-  const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v2", [
+  const [trafficColW, startTrafficResize] = useColResize("colw:traffic:v3", [
     30,
     88,
     68,
     70,
+    180,
     62,
     52,
     null,
@@ -92,10 +74,13 @@ export function WebRunTrafficTab({
       if (entries.length > 0) {
         lastTrafficIdRef.current = entries[entries.length - 1].id;
         setTraffic((previous) => {
-          const stamped = entries.map((entry, index) => ({
-            ...entry,
-            _seq: previous.length + index + 1,
-          }));
+          const existingIds = new Set(previous.map((entry) => entry.id));
+          const stamped = entries
+            .filter((entry) => !existingIds.has(entry.id))
+            .map((entry, index) => ({
+              ...entry,
+              _seq: previous.length + index + 1,
+            }));
           const next = [...previous, ...stamped];
           return next.length > 2000 ? next.slice(-2000) : next;
         });
@@ -126,6 +111,17 @@ export function WebRunTrafficTab({
     }
     return hosts;
   }, [graph]);
+  const coverageFilterKey = useMemo(
+    () =>
+      coverageFilter?.cellIds?.length
+        ? `${[...coverageFilter.cellIds].sort((a, b) => a - b).join(",")}:${coverageFilter.testClass || ""}`
+        : "all",
+    [coverageFilter?.cellIds, coverageFilter?.testClass],
+  );
+
+  useEffect(() => {
+    setSelectedTraffic(null);
+  }, [coverageFilterKey]);
 
   // ── Traffic helpers ────────────────────────────────────────────────────────
   const filteredTraffic = (() => {
@@ -135,9 +131,18 @@ export function WebRunTrafficTab({
             e.url.toLowerCase().includes(trafficFilter.toLowerCase()) ||
             (e.method || "").toLowerCase().includes(trafficFilter.toLowerCase()) ||
             String(e.status || "").includes(trafficFilter) ||
-            (e.source || "").toLowerCase().includes(trafficFilter.toLowerCase()),
+            (e.source || "").toLowerCase().includes(trafficFilter.toLowerCase()) ||
+            (e.purpose || "").toLowerCase().includes(trafficFilter.toLowerCase()),
         )
       : traffic;
+    if (coverageFilter?.cellIds?.length) {
+      const cellIds = new Set(coverageFilter.cellIds);
+      list = list.filter(
+        (entry) =>
+          cellIds.has(entry.coverage_cell_id) &&
+          (!coverageFilter.testClass || entry.test_class === coverageFilter.testClass),
+      );
+    }
     if (excludedExtensions.size > 0) {
       list = list.filter((entry) => {
         const ext = extractUrlExtension(entry.url);
@@ -174,8 +179,15 @@ export function WebRunTrafficTab({
             dir: "asc",
           },
     );
+  const visibleSelectedTraffic = filteredTraffic.some((entry) => entry.id === selectedTraffic?.id)
+    ? selectedTraffic
+    : null;
   return (
-    <div className="traffic-panel" style={{ display: active ? undefined : "none" }}>
+    <div
+      key={coverageFilterKey}
+      className="traffic-panel"
+      style={{ display: active ? undefined : "none" }}
+    >
       <div className="traffic-toolbar">
         <input
           className="traffic-filter"
@@ -188,6 +200,19 @@ export function WebRunTrafficTab({
           {filteredTraffic.length} shown
           {trafficTotal > filteredTraffic.length ? ` of ${trafficTotal}` : ""}
         </span>
+        {coverageFilter?.cellIds?.length ? (
+          <span className="traffic-coverage-filter">
+            OWASP {coverageFilter.category || "cell"}
+            {coverageFilter.testClass ? ` · ${coverageFilter.testClass.replace(/_/g, " ")}` : ""}
+            <button
+              className="btn ghost sm"
+              aria-label="Clear OWASP traffic filter"
+              onClick={() => nav(runHref({ runKind: "web", runId }, "traffic"))}
+            >
+              ✕
+            </button>
+          </span>
+        ) : null}
         <label className="traffic-autoscroll">
           <input
             type="checkbox"
@@ -238,7 +263,7 @@ export function WebRunTrafficTab({
       <div className="traffic-table-wrap" ref={trafficTableRef}>
         <TrafficTable
           entries={filteredTraffic}
-          selected={selectedTraffic}
+          selected={visibleSelectedTraffic}
           onSelect={setSelectedTraffic}
           sequenceFor={(entry, index) => entry._seq ?? index + 1}
           sortable
@@ -261,7 +286,7 @@ export function WebRunTrafficTab({
           </div>
         )}
       </div>
-      <TrafficDetail entry={selectedTraffic} onClose={() => setSelectedTraffic(null)} />
+      <TrafficDetail entry={visibleSelectedTraffic} onClose={() => setSelectedTraffic(null)} />
     </div>
   );
 }

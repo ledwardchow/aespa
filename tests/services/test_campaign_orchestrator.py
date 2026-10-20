@@ -12,23 +12,29 @@ from __future__ import annotations
 
 import asyncio
 import json
+import zipfile
+from types import SimpleNamespace
 
 import pytest
 from sqlmodel import Session, select
 
 from aespa.models import (
-    Application,
-    ApplicationComponent,
-    ApplicationTarget,
     AssessmentCampaign,
     CampaignSourceMember,
     CampaignTargetMember,
+    CampaignValidationCase,
+    ComponentConnection,
     ComponentFact,
     ComponentSnapshot,
+    LeadTargetMapping,
     RunIdentity,
     SastRun,
     ScanLead,
+    ScanLeadComponentProvenance,
     Site,
+    System,
+    SystemComponent,
+    SystemTarget,
     TestRun,
 )
 from aespa.schemas import (
@@ -37,13 +43,14 @@ from aespa.schemas import (
     CampaignTargetMemberCreate,
 )
 from aespa.services import campaigns as campaigns_svc
+from aespa.services import events as events_svc
 
 
 def _seed_application(session: Session) -> dict:
-    app = Application(name="Acme")
+    app = System(name="Acme")
     session.add(app)
     session.flush()
-    component = ApplicationComponent(application_id=app.id, name="checkout-ui")
+    component = SystemComponent(system_id=app.id, name="checkout-ui")
     session.add(component)
     session.flush()
     snapshot = ComponentSnapshot(
@@ -57,16 +64,14 @@ def _seed_application(session: Session) -> dict:
     site = Site(name="Portal", base_url="http://portal.test")
     session.add(site)
     session.flush()
-    target = ApplicationTarget(
-        application_id=app.id, target_type="site", target_id=site.id
-    )
+    target = SystemTarget(system_id=app.id, target_type="site", target_id=site.id)
     session.add(target)
     session.commit()
     session.refresh(component)
     session.refresh(snapshot)
     session.refresh(target)
     return {
-        "application_id": app.id,
+        "system_id": app.id,
         "component_id": component.id,
         "snapshot_id": snapshot.id,
         "target_id": target.id,
@@ -84,7 +89,7 @@ def _create_draft_campaign(session: Session, ctx: dict) -> AssessmentCampaign:
         ],
         target_members=[CampaignTargetMemberCreate(target_id=ctx["target_id"])],
     )
-    return campaigns_svc.create_campaign(session, ctx["application_id"], payload)
+    return campaigns_svc.create_campaign(session, ctx["system_id"], payload)
 
 
 def test_campaign_id_joins_global_run_identity_namespace(isolated_db_engine):
@@ -94,6 +99,30 @@ def test_campaign_id_joins_global_run_identity_namespace(isolated_db_engine):
         identity = s.get(RunIdentity, campaign.id)
     assert identity is not None
     assert identity.kind == "campaign"
+
+
+def test_forward_campaign_status_clears_old_interruption(isolated_db_engine):
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        campaign = _create_draft_campaign(s, ctx)
+        campaign.status = "interrupted"
+        campaign.interrupted_stage = "sast_running"
+        campaign.error_message = "Scan interrupted"
+        campaign.warnings_json = json.dumps(
+            ["The application restarted while this stage was running. Retry to resume."]
+        )
+        s.add(campaign)
+        s.commit()
+        campaign_id = campaign.id
+
+    campaigns_svc._set_campaign_status(campaign_id, "correlating")
+
+    with Session(isolated_db_engine) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        assert campaign.status == "correlating"
+        assert campaign.interrupted_stage is None
+        assert campaign.error_message is None
+        assert json.loads(campaign.warnings_json) == []
 
 
 def test_create_campaign_rejects_duplicate_component_selection(isolated_db_engine):
@@ -112,7 +141,7 @@ def test_create_campaign_rejects_duplicate_component_selection(isolated_db_engin
             target_members=[CampaignTargetMemberCreate(target_id=ctx["target_id"])],
         )
         with pytest.raises(campaigns_svc.InvalidCampaignState):
-            campaigns_svc.create_campaign(s, ctx["application_id"], payload)
+            campaigns_svc.create_campaign(s, ctx["system_id"], payload)
 
 
 @pytest.mark.anyio
@@ -162,11 +191,11 @@ async def test_partial_sast_failure_produces_warning_but_still_reaches_review(
     isolated_db_engine, monkeypatch
 ):
     with Session(isolated_db_engine) as s:
-        app = Application(name="Acme2")
+        app = System(name="Acme2")
         s.add(app)
         s.flush()
-        good = ApplicationComponent(application_id=app.id, name="good-component")
-        bad = ApplicationComponent(application_id=app.id, name="bad-component")
+        good = SystemComponent(system_id=app.id, name="good-component")
+        bad = SystemComponent(system_id=app.id, name="bad-component")
         s.add(good)
         s.add(bad)
         s.flush()
@@ -189,9 +218,7 @@ async def test_partial_sast_failure_produces_warning_but_still_reaches_review(
         site = Site(name="P2", base_url="http://p2.test")
         s.add(site)
         s.flush()
-        target = ApplicationTarget(
-            application_id=app.id, target_type="site", target_id=site.id
-        )
+        target = SystemTarget(system_id=app.id, target_type="site", target_id=site.id)
         s.add(target)
         s.commit()
         payload = CampaignCreate(
@@ -295,14 +322,18 @@ async def test_child_sast_page_resume_reactivates_failed_campaign(
         assert campaign.error_message is None
         assert member.status == "running"
         assert campaign.warnings_json.count("did not finish successfully") == 0
+        assert "The application restarted" not in campaign.warnings_json
 
     with Session(isolated_db_engine) as s:
         run = s.get(SastRun, sast_run_id)
         run.status = "completed"
         s.add(run)
         s.commit()
-    campaigns_svc.notify_source_run_finished(sast_run_id, "completed")
+    # The SAST scanner calls this from inside its own "sast" scope.
+    with events_svc.run_kind_scope("sast"):
+        campaigns_svc.notify_source_run_finished(sast_run_id, "completed")
     task = campaigns_svc._campaign_tasks[campaign_id]
+    assert task.get_context()[events_svc._run_kind_ctx] == "campaign"
     await task
 
     with Session(isolated_db_engine) as s:
@@ -317,14 +348,41 @@ async def test_child_sast_page_resume_reactivates_failed_campaign(
 
 
 @pytest.mark.anyio
+async def test_stopping_sast_run_cancels_its_source_member_retry(isolated_db_engine):
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        campaign = _create_draft_campaign(s, ctx)
+        sast_run = SastRun(name="child", status="scanning")
+        s.add(sast_run)
+        s.flush()
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign.id
+            )
+        ).one()
+        member.sast_run_id = sast_run.id
+        s.add(member)
+        s.commit()
+        key = (campaign.id, "source", member.id)
+        sast_run_id = sast_run.id
+
+    task = asyncio.create_task(asyncio.sleep(3600))
+    campaigns_svc._campaign_member_tasks[key] = task
+    try:
+        await campaigns_svc.stop_member_tasks_for_run("sast", sast_run_id)
+        assert task.cancelled()
+    finally:
+        campaigns_svc._campaign_member_tasks.pop(key, None)
+        task.cancel()
+
+
+@pytest.mark.anyio
 async def test_resume_source_member_retries_only_selected_child(
     isolated_db_engine, monkeypatch
 ):
     with Session(isolated_db_engine) as s:
         ctx = _seed_application(s)
-        second = ApplicationComponent(
-            application_id=ctx["application_id"], name="orders-api"
-        )
+        second = SystemComponent(system_id=ctx["system_id"], name="orders-api")
         s.add(second)
         s.flush()
         second_snapshot = ComponentSnapshot(
@@ -339,7 +397,7 @@ async def test_resume_source_member_retries_only_selected_child(
         second_snapshot_id = second_snapshot.id
         campaign = campaigns_svc.create_campaign(
             s,
-            ctx["application_id"],
+            ctx["system_id"],
             CampaignCreate(
                 name="resume-one",
                 source_members=[
@@ -430,7 +488,7 @@ async def test_continue_to_live_testing_gated_until_review_submitted(
 
 
 @pytest.mark.anyio
-async def test_continue_to_live_testing_sequences_crawl_then_scan(
+async def test_continue_to_live_testing_skips_scan_without_runnable_cases(
     isolated_db_engine, monkeypatch
 ):
     with Session(isolated_db_engine) as s:
@@ -438,6 +496,12 @@ async def test_continue_to_live_testing_sequences_crawl_then_scan(
         campaign = _create_draft_campaign(s, ctx)
         campaign.status = "awaiting_review"
         campaign.review_submitted_at = campaign.created_at
+        campaign.warnings_json = json.dumps(
+            [
+                "Lead 12: pre-crawl path wording was not rewritten (bad response)",
+                "A source-code scan did not finish successfully - matches may be incomplete.",
+            ]
+        )
         s.add(campaign)
         s.commit()
         campaign_id = campaign.id
@@ -463,11 +527,10 @@ async def test_continue_to_live_testing_sequences_crawl_then_scan(
     monkeypatch.setattr(crawler_svc, "is_running", lambda run_id: False)
     monkeypatch.setattr(scanner_svc, "start_thinking_scan", _fake_start_thinking_scan)
     monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: False)
-
     await campaigns_svc.continue_to_live_testing(campaign_id)
     await campaigns_svc._campaign_tasks[campaign_id]
 
-    assert call_order == ["crawl_start", "scan_start"]  # crawl always before scan
+    assert call_order == ["crawl_start"]
 
     with Session(isolated_db_engine) as s:
         campaign = s.get(AssessmentCampaign, campaign_id)
@@ -568,7 +631,7 @@ async def test_delete_campaign_immediately_after_stop_does_not_race(
         ctx = _seed_application(s)
         campaign = _create_draft_campaign(s, ctx)
         campaign_id = campaign.id
-        application_id = ctx["application_id"]
+        system_id = ctx["system_id"]
 
     started = asyncio.Event()
 
@@ -607,7 +670,7 @@ async def test_delete_campaign_immediately_after_stop_does_not_race(
     # No sleep/yield here on purpose — this is exactly the "stop then
     # immediately delete" sequence a UI action would perform.
     with Session(isolated_db_engine) as s:
-        campaigns_svc.delete_campaign(s, application_id, campaign_id)
+        campaigns_svc.delete_campaign(s, system_id, campaign_id)
 
     with Session(isolated_db_engine) as s:
         assert s.get(AssessmentCampaign, campaign_id) is None
@@ -697,7 +760,7 @@ def test_delete_campaign_cascades_child_runs_and_facts(isolated_db_engine):
         sast_run_id = sast_run.id
 
     with Session(isolated_db_engine) as s:
-        campaigns_svc.delete_campaign(s, ctx["application_id"], campaign_id)
+        campaigns_svc.delete_campaign(s, ctx["system_id"], campaign_id)
 
     with Session(isolated_db_engine) as s:
         assert s.get(AssessmentCampaign, campaign_id) is None
@@ -728,7 +791,7 @@ def test_delete_campaign_blocked_while_active(isolated_db_engine):
 
     with Session(isolated_db_engine) as s:
         with pytest.raises(campaigns_svc.InvalidCampaignState):
-            campaigns_svc.delete_campaign(s, ctx["application_id"], campaign_id)
+            campaigns_svc.delete_campaign(s, ctx["system_id"], campaign_id)
 
 
 # ── Regression: cascade_delete_campaign FK order + snapshot ownership ───────
@@ -756,8 +819,8 @@ def test_cascade_delete_campaign_respects_fk_order(fk_engine, tmp_path):
         s.add(collection)
         s.flush()
         s.add(ApiEndpoint(collection_id=collection.id, method="POST", path="/orders"))
-        target = ApplicationTarget(
-            application_id=ctx["application_id"],
+        target = SystemTarget(
+            system_id=ctx["system_id"],
             target_type="api_collection",
             target_id=collection.id,
         )
@@ -850,7 +913,7 @@ def test_cascade_delete_campaign_respects_fk_order(fk_engine, tmp_path):
 
     # Must not raise sqlalchemy.exc.IntegrityError with FK enforcement on.
     with Session(fk_engine) as s:
-        campaigns_svc.delete_campaign(s, ctx["application_id"], campaign_id)
+        campaigns_svc.delete_campaign(s, ctx["system_id"], campaign_id)
 
     with Session(fk_engine) as s:
         assert s.get(AssessmentCampaign, campaign_id) is None
@@ -892,7 +955,7 @@ def test_cascade_delete_campaign_preserves_shared_snapshot_file(fk_engine, tmp_p
         s.commit()
 
     with Session(fk_engine) as s:
-        campaigns_svc.delete_campaign(s, ctx["application_id"], campaign_id)
+        campaigns_svc.delete_campaign(s, ctx["system_id"], campaign_id)
 
     assert snapshot_path.is_file()  # the shared archive survives
 
@@ -969,6 +1032,114 @@ def test_direct_sast_run_deletion_detaches_campaign_member(
         assert s.get(SastRun, sast_run_id) is None
 
 
+def test_direct_sast_run_deletion_clears_campaign_fk_references(fk_engine):
+    from aespa.services import run_cleanup
+
+    with Session(fk_engine) as s:
+        ctx = _seed_application(s)
+        campaign = _create_draft_campaign(s, ctx)
+        campaign_id = campaign.id
+        source_member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign_id
+            )
+        ).one()
+        target_member = s.exec(
+            select(CampaignTargetMember).where(
+                CampaignTargetMember.campaign_id == campaign_id
+            )
+        ).one()
+
+        sast_run = SastRun(name="child", status="completed")
+        s.add(sast_run)
+        s.flush()
+        source_member.sast_run_id = sast_run.id
+        s.add(source_member)
+
+        source_fact = ComponentFact(
+            sast_run_id=sast_run.id,
+            component_id=ctx["component_id"],
+            fact_type="http_call",
+            path="/orders",
+            evidence_location="client.py:1",
+            fingerprint="client-call",
+        )
+        target_fact = ComponentFact(
+            sast_run_id=sast_run.id,
+            component_id=ctx["component_id"],
+            fact_type="route",
+            path="/orders",
+            evidence_location="routes.py:1",
+            fingerprint="server-route",
+        )
+        s.add(source_fact)
+        s.add(target_fact)
+        s.flush()
+        s.add(
+            ComponentConnection(
+                campaign_id=campaign_id,
+                source_component_id=ctx["component_id"],
+                source_fact_id=source_fact.id,
+                target_component_id=ctx["component_id"],
+                target_fact_id=target_fact.id,
+            )
+        )
+
+        source_lead = ScanLead(
+            producer_run_id=sast_run.id,
+            producer_run_type="sast",
+            title="SQL injection",
+        )
+        campaign_lead = ScanLead(
+            producer_run_id=campaign_id,
+            producer_run_type="campaign",
+            title="Cross-repository SQL injection",
+        )
+        s.add(source_lead)
+        s.add(campaign_lead)
+        s.flush()
+        mapping = LeadTargetMapping(
+            campaign_id=campaign_id,
+            lead_id=source_lead.id,
+            target_id=ctx["target_id"],
+            target_type="site",
+        )
+        s.add(mapping)
+        s.flush()
+        s.add(
+            CampaignValidationCase(
+                campaign_id=campaign_id,
+                mapping_id=mapping.id,
+                target_member_id=target_member.id,
+                origin_lead_id=source_lead.id,
+            )
+        )
+        s.add(
+            ScanLeadComponentProvenance(
+                scan_lead_id=campaign_lead.id,
+                component_id=ctx["component_id"],
+                fact_id=source_fact.id,
+            )
+        )
+        s.commit()
+        sast_run_id = sast_run.id
+        campaign_lead_id = campaign_lead.id
+
+    with Session(fk_engine) as s:
+        run_cleanup.cascade_delete_sast_run(s, sast_run_id)
+        s.commit()
+
+    with Session(fk_engine) as s:
+        assert s.get(SastRun, sast_run_id) is None
+        assert s.exec(select(ComponentFact)).first() is None
+        assert s.exec(select(ComponentConnection)).first() is None
+        assert s.exec(select(LeadTargetMapping)).first() is None
+        assert s.exec(select(CampaignValidationCase)).first() is None
+        provenance = s.exec(select(ScanLeadComponentProvenance)).one()
+        assert provenance.scan_lead_id == campaign_lead_id
+        assert provenance.fact_id is None
+
+
 def test_direct_web_run_deletion_detaches_campaign_member(
     isolated_db_engine,
 ):
@@ -1016,8 +1187,8 @@ def test_direct_api_run_deletion_detaches_campaign_member(
         collection = ApiCollection(name="Orders API", base_url="http://api.test")
         s.add(collection)
         s.flush()
-        target = ApplicationTarget(
-            application_id=ctx["application_id"],
+        target = SystemTarget(
+            system_id=ctx["system_id"],
             target_type="api_collection",
             target_id=collection.id,
         )
@@ -1058,10 +1229,10 @@ def test_site_deletion_blocked_while_attached_to_application(client):
         "/api/sites", json={"name": "S1", "base_url": "http://t.local"}
     )
     site_id = site_resp.json()["id"]
-    app_resp = client.post("/api/applications", json={"name": "App1"})
+    app_resp = client.post("/api/systems", json={"name": "App1"})
     app_id = app_resp.json()["id"]
     client.post(
-        f"/api/applications/{app_id}/targets",
+        f"/api/systems/{app_id}/targets",
         json={"target_type": "site", "target_id": site_id},
     )
     resp = client.delete(f"/api/sites/{site_id}")
@@ -1074,10 +1245,10 @@ def test_api_collection_deletion_blocked_while_attached_to_application(client):
         json={"name": "Orders", "base_url": "http://api.test"},
     )
     collection_id = coll_resp.json()["id"]
-    app_resp = client.post("/api/applications", json={"name": "App2"})
+    app_resp = client.post("/api/systems", json={"name": "App2"})
     app_id = app_resp.json()["id"]
     client.post(
-        f"/api/applications/{app_id}/targets",
+        f"/api/systems/{app_id}/targets",
         json={"target_type": "api_collection", "target_id": collection_id},
     )
     resp = client.delete(f"/api/api-collections/{collection_id}")
@@ -1093,10 +1264,10 @@ def test_direct_test_run_delete_endpoint_detaches_campaign_member(client):
     run_resp = client.post(f"/api/sites/{site_id}/test-runs", json={"name": "run"})
     run_id = run_resp.json()["id"]
 
-    app_resp = client.post("/api/applications", json={"name": "AppDirect"})
+    app_resp = client.post("/api/systems", json={"name": "AppDirect"})
     app_id = app_resp.json()["id"]
     target_resp = client.post(
-        f"/api/applications/{app_id}/targets",
+        f"/api/systems/{app_id}/targets",
         json={"target_type": "site", "target_id": site_id},
     )
     target_id = target_resp.json()["id"]
@@ -1105,7 +1276,7 @@ def test_direct_test_run_delete_endpoint_detaches_campaign_member(client):
     from aespa.models import CampaignTargetMember
 
     with Session(get_engine()) as s:
-        campaign = AssessmentCampaign(application_id=app_id, name="c")
+        campaign = AssessmentCampaign(system_id=app_id, name="c")
         s.add(campaign)
         s.flush()
         s.add(
@@ -1166,6 +1337,19 @@ async def test_dast_stage_marks_target_failed_when_scan_status_is_failed(
     monkeypatch.setattr(scanner_svc, "start_thinking_scan", _fake_start_thinking_scan)
     monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: False)
 
+    # This test exercises scan terminal-state handling. Supply one resolved
+    # case so the readiness gate allows the mocked scanner to start.
+    monkeypatch.setattr(
+        campaigns_svc.validation_cases_svc,
+        "resolve_cases_for_web_target",
+        lambda *_args, **_kwargs: SimpleNamespace(counts={"resolved": 1}, warnings=[]),
+    )
+    monkeypatch.setattr(
+        campaigns_svc.validation_cases_svc,
+        "compile_runnable_cases",
+        lambda *_args, **_kwargs: SimpleNamespace(copied_lead_ids=[1], warnings=[]),
+    )
+
     await campaigns_svc.continue_to_live_testing(campaign_id)
     await campaigns_svc._campaign_tasks[campaign_id]
 
@@ -1187,12 +1371,10 @@ async def test_dast_stage_marks_target_failed_when_scan_status_is_failed(
 
 
 @pytest.mark.anyio
-async def test_dast_stage_completes_when_one_of_two_targets_succeeds(
+async def test_dast_stage_is_incomplete_when_one_of_two_targets_fails(
     isolated_db_engine, monkeypatch
 ):
-    """One target genuinely failing while another genuinely succeeds should
-    still report the campaign 'completed' (with a warning), not falsely
-    'failed' either."""
+    """A successful target must not hide a failed sibling target."""
     with Session(isolated_db_engine) as s:
         ctx = _seed_application(s)
         collection = None
@@ -1201,8 +1383,8 @@ async def test_dast_stage_completes_when_one_of_two_targets_succeeds(
         collection = ApiCollection(name="Second API", base_url="http://api2.test")
         s.add(collection)
         s.flush()
-        target2 = ApplicationTarget(
-            application_id=ctx["application_id"],
+        target2 = SystemTarget(
+            system_id=ctx["system_id"],
             target_type="api_collection",
             target_id=collection.id,
         )
@@ -1222,7 +1404,7 @@ async def test_dast_stage_completes_when_one_of_two_targets_succeeds(
                 CampaignTargetMemberCreate(target_id=target2.id),
             ],
         )
-        campaign = campaigns_svc.create_campaign(s, ctx["application_id"], payload)
+        campaign = campaigns_svc.create_campaign(s, ctx["system_id"], payload)
         campaign.status = "awaiting_review"
         campaign.review_submitted_at = campaign.created_at
         s.add(campaign)
@@ -1263,13 +1445,28 @@ async def test_dast_stage_completes_when_one_of_two_targets_succeeds(
     monkeypatch.setattr(scanner_svc, "is_thinking_running", lambda run_id: False)
     monkeypatch.setattr(api_scanner_svc, "start_api_scan", _fake_start_api_scan)
     monkeypatch.setattr(api_scanner_svc, "is_api_scan_running", lambda run_id: False)
+    monkeypatch.setattr(
+        campaigns_svc.validation_cases_svc,
+        "resolve_cases_for_web_target",
+        lambda *_args, **_kwargs: SimpleNamespace(counts={"resolved": 1}, warnings=[]),
+    )
+    monkeypatch.setattr(
+        campaigns_svc.validation_cases_svc,
+        "resolve_cases_for_api_target",
+        lambda *_args, **_kwargs: SimpleNamespace(counts={"resolved": 1}, warnings=[]),
+    )
+    monkeypatch.setattr(
+        campaigns_svc.validation_cases_svc,
+        "compile_runnable_cases",
+        lambda *_args, **_kwargs: SimpleNamespace(copied_lead_ids=[1], warnings=[]),
+    )
 
     await campaigns_svc.continue_to_live_testing(campaign_id)
     await campaigns_svc._campaign_tasks[campaign_id]
 
     with Session(isolated_db_engine) as s:
         campaign = s.get(AssessmentCampaign, campaign_id)
-        assert campaign.status == "completed"  # one real success is enough
+        assert campaign.status == "incomplete"
         members = s.exec(
             select(CampaignTargetMember).where(
                 CampaignTargetMember.campaign_id == campaign_id
@@ -1470,6 +1667,256 @@ def test_retry_campaign_rejected_when_not_interrupted(isolated_db_engine):
     asyncio.run(_run())
 
 
+@pytest.mark.anyio
+async def test_rebuild_context_matching_clears_all_generated_review_data(
+    isolated_db_engine, monkeypatch, tmp_path
+):
+    archive = tmp_path / "ui.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.js", "fetch('/api/orders')")
+
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        snapshot = s.get(ComponentSnapshot, ctx["snapshot_id"])
+        snapshot.stored_path = str(archive)
+        s.add(snapshot)
+        campaign = _create_draft_campaign(s, ctx)
+        campaign.status = "awaiting_review"
+        campaign.review_submitted_at = campaign.created_at
+        s.add(campaign)
+        s.flush()
+
+        sast_run = SastRun(name="source", status="completed")
+        s.add(sast_run)
+        s.flush()
+        source_member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign.id
+            )
+        ).one()
+        source_member.sast_run_id = sast_run.id
+        source_member.status = "completed"
+        s.add(source_member)
+
+        call = ComponentFact(
+            sast_run_id=sast_run.id,
+            component_id=ctx["component_id"],
+            fact_type="http_call",
+            method="POST",
+            path="/api/orders",
+            fingerprint="call",
+        )
+        route = ComponentFact(
+            sast_run_id=sast_run.id,
+            component_id=ctx["component_id"],
+            fact_type="route",
+            method="POST",
+            path="/api/orders",
+            fingerprint="route",
+        )
+        s.add(call)
+        s.add(route)
+        s.flush()
+        s.add(
+            ComponentConnection(
+                campaign_id=campaign.id,
+                source_component_id=ctx["component_id"],
+                source_fact_id=call.id,
+                target_component_id=ctx["component_id"],
+                target_fact_id=route.id,
+            )
+        )
+
+        original_lead = ScanLead(
+            producer_run_type="sast",
+            producer_run_id=sast_run.id,
+            title="Original SAST lead",
+        )
+        generated_lead = ScanLead(
+            producer_run_type="campaign",
+            producer_run_id=campaign.id,
+            source="campaign",
+            title="Generated path lead",
+        )
+        s.add(original_lead)
+        s.add(generated_lead)
+        s.flush()
+        s.add(
+            ScanLeadComponentProvenance(
+                scan_lead_id=generated_lead.id,
+                component_id=ctx["component_id"],
+                fact_id=call.id,
+            )
+        )
+        mapping = LeadTargetMapping(
+            campaign_id=campaign.id,
+            lead_id=generated_lead.id,
+            target_id=ctx["target_id"],
+            target_type="site",
+            status="approved",
+            approved=True,
+        )
+        s.add(mapping)
+        s.flush()
+        target_member = s.exec(
+            select(CampaignTargetMember).where(
+                CampaignTargetMember.campaign_id == campaign.id
+            )
+        ).one()
+        target_member.status = "completed"
+        target_member.status_message = "Old result"
+        target_member.validation_summary_json = '{"confirmed": 1}'
+        s.add(target_member)
+        s.add(
+            CampaignValidationCase(
+                campaign_id=campaign.id,
+                mapping_id=mapping.id,
+                target_member_id=target_member.id,
+                origin_lead_id=generated_lead.id,
+            )
+        )
+        s.commit()
+        campaign_id = campaign.id
+        original_lead_id = original_lead.id
+
+    refreshed = []
+    monkeypatch.setattr(
+        campaigns_svc,
+        "_refresh_component_facts",
+        lambda value: refreshed.append(value),
+    )
+
+    async def _fake_correlate(value, *, preserve_downstream):
+        assert value == campaign_id
+        assert preserve_downstream is False
+        with Session(isolated_db_engine) as s:
+            assert not s.exec(
+                select(ComponentConnection).where(
+                    ComponentConnection.campaign_id == campaign_id
+                )
+            ).all()
+            assert not s.exec(
+                select(LeadTargetMapping).where(
+                    LeadTargetMapping.campaign_id == campaign_id
+                )
+            ).all()
+            assert not s.exec(
+                select(CampaignValidationCase).where(
+                    CampaignValidationCase.campaign_id == campaign_id
+                )
+            ).all()
+        return {"connections": 0, "cross_component_leads": 0, "lead_target_mappings": 0}
+
+    monkeypatch.setattr(
+        campaigns_svc.correlation_svc,
+        "correlate_campaign_with_llm",
+        _fake_correlate,
+    )
+
+    await campaigns_svc.rebuild_campaign_connections(campaign_id)
+
+    assert refreshed == [campaign_id]
+    with Session(isolated_db_engine) as s:
+        campaign = s.get(AssessmentCampaign, campaign_id)
+        assert campaign.status == "awaiting_review"
+        assert campaign.review_submitted_at is None
+        assert json.loads(campaign.warnings_json) == []
+        assert s.get(ScanLead, original_lead_id) is not None
+        assert not s.exec(
+            select(ScanLead).where(
+                ScanLead.producer_run_type == "campaign",
+                ScanLead.producer_run_id == campaign_id,
+            )
+        ).all()
+        assert not s.exec(select(ScanLeadComponentProvenance)).all()
+        target_member = s.exec(
+            select(CampaignTargetMember).where(
+                CampaignTargetMember.campaign_id == campaign_id
+            )
+        ).one()
+        assert target_member.status == "pending"
+        assert target_member.status_message is None
+        assert target_member.validation_summary_json == "{}"
+
+
+@pytest.mark.anyio
+async def test_rebuild_context_matching_rejects_existing_live_child_run(
+    isolated_db_engine,
+):
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        campaign = _create_draft_campaign(s, ctx)
+        campaign.status = "completed"
+        s.add(campaign)
+        run = TestRun(site_id=ctx["site_id"], name="existing live scan")
+        s.add(run)
+        s.flush()
+        member = s.exec(
+            select(CampaignTargetMember).where(
+                CampaignTargetMember.campaign_id == campaign.id
+            )
+        ).one()
+        member.test_run_id = run.id
+        s.add(member)
+        s.commit()
+        campaign_id = campaign.id
+
+    with pytest.raises(campaigns_svc.InvalidCampaignState, match="live target scans"):
+        await campaigns_svc.rebuild_campaign_connections(campaign_id)
+
+    with Session(isolated_db_engine) as s:
+        assert s.get(AssessmentCampaign, campaign_id).status == "completed"
+
+
+def test_refresh_component_facts_uses_frozen_snapshot(isolated_db_engine, tmp_path):
+    archive = tmp_path / "ui.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("src/client.js", "fetch('/api/orders', { method: 'POST' })")
+
+    with Session(isolated_db_engine) as s:
+        ctx = _seed_application(s)
+        snapshot = s.get(ComponentSnapshot, ctx["snapshot_id"])
+        snapshot.stored_path = str(archive)
+        s.add(snapshot)
+        campaign = _create_draft_campaign(s, ctx)
+        run = SastRun(name="source", status="completed")
+        s.add(run)
+        s.flush()
+        member = s.exec(
+            select(CampaignSourceMember).where(
+                CampaignSourceMember.campaign_id == campaign.id
+            )
+        ).one()
+        member.sast_run_id = run.id
+        member.status = "completed"
+        s.add(member)
+        s.add(
+            ComponentFact(
+                sast_run_id=run.id,
+                component_id=ctx["component_id"],
+                fact_type="http_call",
+                path="/old",
+                detail_json='{"origin": "llm_mapper"}',
+                fingerprint="old-llm",
+            )
+        )
+        s.commit()
+        campaign_id = campaign.id
+        run_id = run.id
+
+    campaigns_svc._refresh_component_facts(campaign_id)
+
+    with Session(isolated_db_engine) as s:
+        facts = s.exec(
+            select(ComponentFact).where(ComponentFact.sast_run_id == run_id)
+        ).all()
+        assert not any(fact.path == "/old" for fact in facts)
+        assert any(
+            fact.fact_type == "http_call" and fact.path == "/api/orders"
+            for fact in facts
+        )
+
+
 # ── Regression: submit_review gating (finding 7) ────────────────────────────
 
 
@@ -1483,8 +1930,8 @@ def _seed_campaign_with_one_proposal(session) -> dict:
     session.add(collection)
     session.flush()
     session.add(ApiEndpoint(collection_id=collection.id, method="POST", path="/orders"))
-    target = ApplicationTarget(
-        application_id=ctx["application_id"],
+    target = SystemTarget(
+        system_id=ctx["system_id"],
         target_type="api_collection",
         target_id=collection.id,
     )

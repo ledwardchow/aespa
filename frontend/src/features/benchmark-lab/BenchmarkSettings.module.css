@@ -1,0 +1,86 @@
+.settings {
+  width: 100%;
+  max-width: 680px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+.settings > :global(form.card) {
+  width: 100%;
+}
+.settings :global(.form-actions) {
+  align-items: center;
+  margin-top: 0;
+  flex-wrap: wrap;
+}
+.datasets {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.datasets :global(.policy-section-copy) {
+  margin-bottom: 0;
+}
+.dataset {
+  padding: 20px 24px;
+}
+.datasetHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.datasetHeader h3 {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+.itemCount {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  line-height: 21px;
+}
+.fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.fieldGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.settings .actions {
+  margin-top: 18px;
+}
+.deleteButton {
+  margin-left: auto;
+  color: var(--danger);
+}
+.confirmation {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.confirmation p {
+  margin: 0 0 12px;
+}
+@media (max-width: 700px) {
+  .fieldGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .datasetHeader {
+    flex-wrap: wrap;
+    gap: 4px 12px;
+  }
+}

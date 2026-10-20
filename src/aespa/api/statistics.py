@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import date as calendar_date
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session
 
@@ -11,10 +14,23 @@ router = APIRouter(prefix="/api/statistics", tags=["statistics"])
 
 @router.get("/llm")
 def get_llm_statistics(
+    view: Literal["all_time", "monthly", "weekly", "daily", "custom"] = "monthly",
     month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    date: calendar_date | None = None,
+    start: calendar_date | None = None,
+    end: calendar_date | None = None,
     session: Session = Depends(get_session),
 ) -> dict:
-    return statistics_service.get_statistics(session, month)
+    try:
+        if month is not None:
+            calendar_date.fromisoformat(f"{month}-01")
+            if view != "monthly":
+                raise ValueError("month is only valid for the monthly view")
+        return statistics_service.get_statistics_view(
+            session, view=view, month=month, anchor=date, start=start, end=end
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/llm/prices/refresh")

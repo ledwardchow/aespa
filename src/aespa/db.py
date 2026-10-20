@@ -4,21 +4,23 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from alembic.config import Config
-from sqlalchemy import event, inspect
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, create_engine, select
 
 from aespa import db_legacy
 from aespa.config import Settings, get_settings
+from aespa.storage_migration import migrate_legacy_storage
 from alembic import command
 
 _engine: Engine | None = None
 
-# The revision immediately before the Applications/Campaign schema
+# The revision immediately before the Systems/Campaign schema
 # (`00c6c82b48b7`'s own ``down_revision``). Fixed on purpose — unlike the
 # symbolic ``"head"``, this never silently drifts forward as new migrations
 # are added; see ``_stamp_legacy_db_if_needed``.
-_LAST_PRE_APPLICATIONS_REVISION = "3d4e5f6a7b8c"
+_LAST_PRE_SYSTEMS_REVISION = "3d4e5f6a7b8c"
+_LAST_APPLICATIONS_REVISION = "3b5d7f9a1c24"
 
 
 def _build_engine(settings: Settings) -> Engine:
@@ -40,6 +42,10 @@ def _build_engine(settings: Settings) -> Engine:
                 # the identity migration temporarily disables it while it
                 # rebuilds legacy tables.
                 cursor.execute("PRAGMA foreign_keys=ON")
+                # This takes effect without a VACUUM while a new database has
+                # no tables. Existing databases keep their current setting so
+                # startup never triggers an unexpected full-file rebuild.
+                cursor.execute("PRAGMA auto_vacuum=FULL")
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA synchronous=NORMAL")
                 cursor.execute("PRAGMA busy_timeout=30000")
@@ -52,7 +58,9 @@ def _build_engine(settings: Settings) -> Engine:
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
-        _engine = _build_engine(get_settings())
+        settings = get_settings()
+        migrate_legacy_storage(settings)
+        _engine = _build_engine(settings)
     return _engine
 
 
@@ -89,7 +97,7 @@ def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> bool:
     "this must already be current" assumption — the previous version of this
     function stamped any DB with ``run_identity`` present straight at literal
     ``"head"``, which was correct the day it was written but silently started
-    skipping every migration added since (including the entire Applications/
+    skipping every migration added since (including the entire Systems/
     Campaign schema) for a genuine legacy database that has ``run_identity``
     but predates that feature.
 
@@ -98,10 +106,10 @@ def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> bool:
         Stamp immediately before it so ids/child rows get remapped for real
         instead of silently skipped.
       * ``run_identity`` present but not yet ``assessment_campaign`` (or any
-        other Applications/Campaign table) — a genuine legacy database that
-        predates that feature. Stamp at ``_LAST_PRE_APPLICATIONS_REVISION``
+        other Systems/Campaign table) - a genuine legacy database that
+        predates that feature. Stamp at ``_LAST_PRE_SYSTEMS_REVISION``
         (immediately before it) so those migrations replay for real.
-      * Every Applications/Campaign table already present — e.g. a dev/test
+      * Every Systems/Campaign table already present - e.g. a dev/test
         database built via ``metadata.create_all()`` with current models, so
         it is genuinely at head already. Stamp there directly; replaying
         those migrations would try to create tables that already exist.
@@ -116,10 +124,14 @@ def _stamp_legacy_db_if_needed(engine: Engine, alembic_cfg: Config) -> bool:
 
     if "run_identity" not in tables:
         command.stamp(alembic_cfg, "d2f9a6b1c340")
-    elif "assessment_campaign" in tables:
+    elif "system" in tables:
         command.stamp(alembic_cfg, "head")
+    elif "assessment_campaign" in tables:
+        # This database has the complete schema from immediately before the
+        # Applications to Systems rename, but no Alembic bookkeeping row.
+        command.stamp(alembic_cfg, _LAST_APPLICATIONS_REVISION)
     else:
-        command.stamp(alembic_cfg, _LAST_PRE_APPLICATIONS_REVISION)
+        command.stamp(alembic_cfg, _LAST_PRE_SYSTEMS_REVISION)
     return True
 
 
@@ -486,9 +498,59 @@ def _migrate(engine: Engine) -> None:
                     conn.exec_driver_sql("PRAGMA foreign_keys=ON")
                     conn.commit()
 
+    _relocate_stored_paths(engine)
+
     _reset_orphaned_validating_findings(engine)
     _reset_orphaned_running_runs(engine)
+    from aespa.services.settings_providers import repair_chatgpt_plan_models
+
+    with Session(engine) as session:
+        repair_chatgpt_plan_models(session)
     _cleanup_orphaned_sast_extractions()
+
+
+def _relocate_stored_paths(engine: Engine) -> None:
+    """Repair uploaded-file references after the data folder moves."""
+    if engine.dialect.name != "sqlite":
+        return
+    data_dir = Path(get_settings().data_dir).resolve()
+    columns = (
+        ("api_document", "stored_path", ("api_collections",)),
+        ("code_artifact", "stored_path", ("code_artifacts", "aespa_data")),
+        ("component_snapshot", "stored_path", ("system_snapshots",)),
+        (
+            "sast_run",
+            "source_archive_path",
+            ("sast_uploads", "system_snapshots"),
+        ),
+    )
+    tables = set(inspect(engine).get_table_names())
+    with engine.begin() as connection:
+        for table, column, folders in columns:
+            if table not in tables:
+                continue
+            for row_id, old_path in connection.execute(
+                text(f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL")
+            ):
+                parts = str(old_path).replace("\\", "/").split("/")
+                markers = [index for index, part in enumerate(parts) if part in folders]
+                if not markers:
+                    continue
+                marker_index = max(markers)
+                relative_parts = parts[
+                    marker_index + (1 if parts[marker_index] == "aespa_data" else 0) :
+                ]
+                if not relative_parts or any(
+                    part in {"", ".", ".."} for part in relative_parts
+                ):
+                    continue
+                relocated = data_dir.joinpath(*relative_parts)
+                if str(relocated) == old_path or not relocated.is_file():
+                    continue
+                connection.execute(
+                    text(f"UPDATE {table} SET {column} = :path WHERE id = :id"),
+                    {"path": str(relocated), "id": row_id},
+                )
 
 
 def get_session() -> Iterator[Session]:

@@ -1,10 +1,41 @@
 import json
 from datetime import datetime, timezone
 
-from sqlmodel import Session
+import pytest
+from sqlmodel import Session, func, select
 
-from aespa.models import LLMConfig, LLMPriceCatalog, LLMUsageMonth, Site, TestRun
+from aespa.models import (
+    LLMConfig,
+    LLMPriceCatalog,
+    LLMUsageDay,
+    LLMUsageMonth,
+    Site,
+    TestRun,
+)
 from aespa.services import llm, statistics
+
+
+def test_provider_usage_is_isolated_without_requesting_a_database_fixture():
+    from aespa.db import get_engine
+
+    engine = get_engine()
+    assert engine.url.database == ":memory:"
+    llm._record_usage("isolation-test-model", 10, 5, provider="unknown")
+    with Session(engine) as session:
+        row = session.exec(select(LLMUsageMonth)).one()
+        assert row.model == "isolation-test-model"
+        assert row.requests == 1
+
+
+def test_explicit_free_price_remains_zero():
+    row = LLMUsageMonth(
+        month="2026-09",
+        provider="openai",
+        model="free-model",
+        input_tokens=100,
+        input_price_usd_per_million=0,
+    )
+    assert statistics._row_dict(row)["estimated_total_cost_usd"] == 0
 
 
 def test_records_all_calls_without_run_context(isolated_db_engine, monkeypatch):
@@ -18,7 +49,7 @@ def test_records_all_calls_without_run_context(isolated_db_engine, monkeypatch):
         base_url="https://api.openai.com/v1",
     )
     with Session(isolated_db_engine) as session:
-        row = session.query(LLMUsageMonth).one()
+        row = session.exec(select(LLMUsageMonth)).one()
         assert row.input_tokens == 700
         assert row.output_tokens == 200
         assert row.cache_read_tokens == 300
@@ -121,8 +152,64 @@ def test_bedrock_input_is_not_subtracted(isolated_db_engine):
         month="2026-08",
     )
     with Session(isolated_db_engine) as session:
-        row = session.query(LLMUsageMonth).one()
+        row = session.exec(select(LLMUsageMonth)).one()
         assert row.input_tokens == 1000
+
+
+def test_bedrock_run_cost_uses_uncached_input():
+    cost = statistics.estimate_usage_cost(
+        "bedrock",
+        input_tokens=450,
+        cache_read_tokens=300,
+        cache_write_tokens=50,
+        rates={
+            "input_price_usd_per_million": 1.0,
+            "cache_read_price_usd_per_million": 0.1,
+            "cache_write_price_usd_per_million": 2.0,
+        },
+    )
+    assert cost["estimated_token_cost_usd"] == pytest.approx(230 / 1_000_000)
+
+
+def test_copilot_cost_uses_credits_even_when_model_has_token_prices(
+    client, isolated_db_engine, monkeypatch
+):
+    monkeypatch.setattr(
+        statistics,
+        "_feed",
+        lambda session: {
+            "gpt-test": {
+                "input_cost_per_token": 0.000002,
+                "output_cost_per_token": 0.000004,
+            }
+        },
+    )
+    rates = statistics.record_usage(
+        "github_copilot",
+        "gpt-test",
+        input_tokens=1_000_000,
+        output_tokens=500_000,
+        ai_credits=2.5,
+        month="2026-08",
+    )
+
+    assert rates["credit_price_usd_per_million"] == 10_000
+    run_cost = statistics.estimate_usage_cost(
+        "github_copilot",
+        input_tokens=1_000_000,
+        output_tokens=500_000,
+        ai_credits=2.5,
+        rates=rates,
+    )
+    assert run_cost["estimated_token_cost_usd"] == 0
+    assert run_cost["estimated_credit_cost_usd"] == 0.025
+    assert run_cost["estimated_total_cost_usd"] == 0.025
+
+    stats = client.get("/api/statistics/llm?month=2026-08").json()
+    assert stats["rows"][0]["estimated_token_cost_usd"] == 0
+    assert stats["rows"][0]["estimated_total_cost_usd"] == 0.025
+    assert stats["totals"]["estimated_total_cost_usd"] == 0.025
+    assert stats["lifetime"]["estimated_total_cost_usd"] == 0.025
 
 
 def test_usage_keeps_first_observed_base_url(isolated_db_engine):
@@ -139,7 +226,7 @@ def test_usage_keeps_first_observed_base_url(isolated_db_engine):
         month="2026-08",
     )
     with Session(isolated_db_engine) as session:
-        row = session.query(LLMUsageMonth).one()
+        row = session.exec(select(LLMUsageMonth)).one()
         assert row.base_url == "https://first.example/v1"
 
 
@@ -159,10 +246,15 @@ def test_monthly_price_override_and_reset_keep_catalog(isolated_db_engine):
                 "apply_to_future": True,
             },
         )
-        assert session.query(LLMPriceCatalog).one().credit_price_usd_per_million == 9
+        assert (
+            session.exec(select(LLMPriceCatalog)).one().credit_price_usd_per_million
+            == 9
+        )
         statistics.reset_statistics(session)
-        assert session.query(LLMUsageMonth).count() == 0
-        assert session.query(LLMPriceCatalog).count() == 1
+        assert session.exec(select(func.count()).select_from(LLMUsageMonth)).one() == 0
+        assert (
+            session.exec(select(func.count()).select_from(LLMPriceCatalog)).one() == 1
+        )
 
 
 def test_statistics_api_is_independent_and_reset_is_explicit(client):
@@ -188,6 +280,89 @@ def test_statistics_api_includes_lifetime_cost(client):
     assert lifetime["months"] == 2
     assert lifetime["factory_credits"] == 1_500_000
     assert lifetime["estimated_total_cost_usd"] == 10.5
+
+
+def test_date_views_use_daily_usage_and_monthly_prices(client, isolated_db_engine):
+    statistics.record_usage(
+        "openai", "dated-model", input_tokens=100, day="2026-10-18", service_tier="fast"
+    )
+    statistics.record_usage(
+        "openai", "dated-model", input_tokens=200, day="2026-10-19", service_tier="fast"
+    )
+    statistics.record_usage("openai", "dated-model", input_tokens=300, day="2026-10-26")
+    with Session(isolated_db_engine) as session:
+        statistics.set_prices(
+            session,
+            {
+                "month": "2026-10",
+                "provider": "openai",
+                "model": "dated-model",
+                "input_price_usd_per_million": 2,
+            },
+        )
+        statistics.set_prices(
+            session,
+            {
+                "month": "2026-10",
+                "provider": "openai",
+                "model": "dated-model",
+                "service_tier": "fast",
+                "input_price_usd_per_million": 4,
+            },
+        )
+        assert len(list(session.exec(select(LLMUsageDay)))) == 3
+    response = client.get("/api/statistics/llm?view=daily&date=2026-10-19")
+    assert response.status_code == 200, response.json()
+    daily = response.json()
+    assert daily["totals"]["input_tokens"] == 200
+    assert daily["rows"][0]["month"] == "2026-10"
+    assert daily["rows"][0]["service_tier"] == "fast"
+    assert daily["totals"]["estimated_total_cost_usd"] == pytest.approx(0.0008)
+    weekly = client.get("/api/statistics/llm?view=weekly&date=2026-10-19").json()
+    assert weekly["start"] == "2026-10-19"
+    assert weekly["end"] == "2026-10-25"
+    assert weekly["totals"]["input_tokens"] == 200
+    custom = client.get(
+        "/api/statistics/llm?view=custom&start=2026-10-18&end=2026-10-19"
+    ).json()
+    assert custom["totals"]["input_tokens"] == 300
+    all_time = client.get("/api/statistics/llm?view=all_time").json()
+    assert all_time["totals"]["input_tokens"] == 600
+    assert all_time["totals"]["estimated_total_cost_usd"] == pytest.approx(0.0018)
+
+
+def test_date_view_reports_older_monthly_usage_without_guessing_dates(
+    client, isolated_db_engine
+):
+    statistics.record_usage("openai", "older", input_tokens=500, month="2026-08")
+    with Session(isolated_db_engine) as session:
+        assert session.exec(select(func.count()).select_from(LLMUsageDay)).one() == 0
+    response = client.get(
+        "/api/statistics/llm?view=custom&start=2026-08-01&end=2026-08-31"
+    ).json()
+    assert response["rows"] == []
+    assert response["legacy_months"] == ["2026-08"]
+    assert (
+        client.get("/api/statistics/llm?month=2026-08").json()["totals"]["input_tokens"]
+        == 500
+    )
+
+
+def test_invalid_custom_date_range_and_reset_daily_ledger(client, isolated_db_engine):
+    assert (
+        client.get("/api/statistics/llm?view=custom&start=2026-10-19").status_code
+        == 422
+    )
+    assert (
+        client.get(
+            "/api/statistics/llm?view=custom&start=2026-10-20&end=2026-10-19"
+        ).status_code
+        == 422
+    )
+    statistics.record_usage("openai", "reset", day="2026-10-19")
+    assert client.delete("/api/statistics/llm").status_code == 200
+    with Session(isolated_db_engine) as session:
+        assert session.exec(select(func.count()).select_from(LLMUsageDay)).one() == 0
 
 
 def test_missing_prices_count_as_zero_in_monthly_and_lifetime_costs(
@@ -222,7 +397,7 @@ def test_missing_prices_count_as_zero_in_monthly_and_lifetime_costs(
     rows = {row["model"]: row for row in stats["rows"]}
     assert rows["priced-model"]["estimated_credit_cost_usd"] == 0
     assert rows["unpriced-model"]["estimated_token_cost_usd"] == 0
-    assert rows["unpriced-model"]["estimated_total_cost_usd"] == 0
+    assert rows["unpriced-model"]["estimated_total_cost_usd"] is None
     assert stats["totals"]["estimated_token_cost_usd"] == 2
     assert stats["totals"]["estimated_credit_cost_usd"] == 0
     assert stats["totals"]["estimated_total_cost_usd"] == 2
@@ -292,7 +467,7 @@ def test_run_cost_is_recalculated_from_totals_on_each_usage_update(
             provider="openai",
         )
         with Session(isolated_db_engine) as session:
-            price = session.query(LLMPriceCatalog).one()
+            price = session.exec(select(LLMPriceCatalog)).one()
             price.input_price_usd_per_million = 2
             price.output_price_usd_per_million = 4
             session.add(price)
@@ -375,3 +550,105 @@ def test_existing_run_token_usage_is_backfilled_and_persisted(isolated_db_engine
     with Session(isolated_db_engine) as session:
         saved = json.loads(session.get(TestRun, run_id).token_usage_json)
     assert saved[model]["estimated_total_cost_usd"] == 1.94
+
+
+def _add_standard_price(session, model):
+    session.add(
+        LLMPriceCatalog(
+            provider="openai_chatgpt_plan",
+            model=model,
+            input_price_usd_per_million=1,
+            output_price_usd_per_million=2,
+        )
+    )
+    session.commit()
+
+
+def test_fast_usage_gets_its_own_row_priced_above_standard(isolated_db_engine):
+    with Session(isolated_db_engine) as session:
+        _add_standard_price(session, "gpt-fast-test")
+    for tier in ("", "fast"):
+        statistics.record_usage(
+            "openai_chatgpt_plan",
+            "gpt-fast-test",
+            service_tier=tier,
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            month="2026-10",
+        )
+    with Session(isolated_db_engine) as session:
+        rows = {
+            row["service_tier"]: row
+            for row in statistics.get_statistics(session, "2026-10")["rows"]
+        }
+    assert rows[""]["requests"] == rows["fast"]["requests"] == 1
+    assert rows[""]["estimated_total_cost_usd"] == 3
+    assert rows["fast"]["estimated_total_cost_usd"] == 6
+    assert rows["fast"]["prices"]["confidence"] == "fallback"
+
+
+def test_fast_price_comes_from_feed_priority_prices():
+    feed = {
+        "gpt-test": {
+            "input_cost_per_token": 0.000001,
+            "output_cost_per_token": 0.000002,
+            "input_cost_per_token_priority": 0.0000025,
+            "output_cost_per_token_priority": 0.000005,
+        }
+    }
+    rates = statistics.resolve_price("openai", "gpt-test", feed, "fast")
+    assert rates["input_price_usd_per_million"] == 2.5
+    assert rates["output_price_usd_per_million"] == 5
+
+
+def test_fast_manual_price_does_not_change_standard_price(isolated_db_engine):
+    statistics.record_usage(
+        "openai_chatgpt_plan", "gpt-manual", service_tier="fast", month="2026-10"
+    )
+    with Session(isolated_db_engine) as session:
+        statistics.set_prices(
+            session,
+            {
+                "month": "2026-10",
+                "provider": "openai_chatgpt_plan",
+                "model": "gpt-manual",
+                "service_tier": "fast",
+                "input_price_usd_per_million": 7,
+            },
+        )
+        fast = statistics._rates_for(
+            session, "openai_chatgpt_plan", "gpt-manual", "fast"
+        )
+        standard = statistics._rates_for(session, "openai_chatgpt_plan", "gpt-manual")
+    assert fast["input_price_usd_per_million"] == 7
+    assert standard.get("input_price_usd_per_million") is None
+
+
+def test_run_usage_lists_fast_models_separately(isolated_db_engine):
+    model = "gpt-run-fast"
+    with Session(isolated_db_engine) as session:
+        _add_standard_price(session, model)
+    run_id = 991010
+    key = ("web", run_id)
+    llm.set_run_context(run_id, emit_fn=None)
+    try:
+        for tier in ("", "fast"):
+            llm._record_usage(
+                model,
+                input_tokens=1_000_000,
+                output_tokens=0,
+                provider="openai_chatgpt_plan",
+                service_tier=tier,
+            )
+        usage = llm.get_run_token_usage(run_id)
+    finally:
+        llm.clear_run_context()
+        llm._run_token_usage.pop(key, None)
+        llm._run_token_seeded.discard(key)
+
+    assert set(usage["by_model"]) == set(usage["by_model_fast"]) == {model}
+    assert usage["by_model"][model]["estimated_total_cost_usd"] == 1
+    assert usage["by_model_fast"][model]["estimated_total_cost_usd"] == 2
+    assert usage["by_model_fast"][model]["service_tier"] == "fast"
+    assert usage["total_input"] == 2_000_000
+    assert usage["estimated_total_cost_usd"] == 3

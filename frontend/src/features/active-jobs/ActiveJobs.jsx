@@ -1,5 +1,5 @@
 import * as apiRunsApi from "../../shared/api/apiRuns.js";
-import * as applicationsApi from "../../shared/api/applications.js";
+import * as systemsApi from "../../shared/api/systems.js";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as webRunsApi from "../../shared/api/webRuns.js";
 import { useState, useCallback, useMemo } from "react";
@@ -8,7 +8,9 @@ import { fmtDate } from "../../shared/lib/dates.js";
 
 import { nav } from "../../shared/navigation/router.js";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { usePolling } from "../../shared/hooks/usePolling.js";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 // ── Active jobs ───────────────────────────────────────────────────────────────
 
@@ -25,6 +27,7 @@ function activeJobBadge(job) {
                 "running",
                 "analysing",
                 "analyzing",
+                "preparing",
                 "sast_running",
                 "correlating",
                 "dast_running",
@@ -45,16 +48,14 @@ function activeJobProgress(job) {
   return "—";
 }
 function activeJobScopeName(job) {
-  if (job.run_type === "campaign")
-    return job.application_name || `Application #${job.application_id}`;
+  if (job.run_type === "campaign") return job.system_name || `System #${job.system_id}`;
   if (job.run_type === "api") return job.collection_name || `API #${job.collection_id}`;
   if (job.run_type === "sast")
     return job.collection_id ? job.collection_name || `API #${job.collection_id}` : job.run_name;
   return job.site_name || `Site #${job.site_id}`;
 }
 function activeJobScopeLink(job) {
-  if (job.run_type === "campaign")
-    return `#/applications/${job.application_id}/campaigns/${job.run_id}`;
+  if (job.run_type === "campaign") return `#/systems/${job.system_id}/campaigns/${job.run_id}`;
   if (job.run_type === "api") return `#/apis/${job.collection_id}`;
   if (job.run_type === "sast")
     return job.collection_id ? `#/apis/${job.collection_id}` : `#/sast-runs/${job.run_id}/progress`;
@@ -136,7 +137,7 @@ export function ActiveJobsPage() {
     }));
     try {
       if (j.run_type === "campaign") {
-        await applicationsApi.stopCampaign(j.application_id, j.run_id);
+        await systemsApi.stopCampaign(j.system_id, j.run_id);
       } else if (j.run_type === "sast") {
         await sastRunsApi.stopSastScan(j.run_id);
       } else if (j.run_type === "api") {
@@ -188,16 +189,7 @@ export function ActiveJobsPage() {
         </div>
       </div>
       <div className="content scroll-content">
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 16,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <PageError error={error} inline={!jobs} onDismiss={() => setError(null)} />
         {jobs === null && <div className="subtle">Loading…</div>}
         {jobs !== null && jobs.length === 0 && (
           <EmptyState
@@ -304,14 +296,14 @@ export function ActiveJobsPage() {
                   const isStopping = !!stopping[key];
                   const runLink =
                     j.run_type === "campaign"
-                      ? `#/applications/${j.application_id}/campaigns/${j.run_id}`
+                      ? `#/systems/${j.system_id}/campaigns/${j.run_id}`
                       : j.run_type === "sast"
                         ? `#/sast-runs/${j.run_id}/progress`
                         : j.run_type === "api"
                           ? `#/api-runs/${j.run_id}/status`
                           : `#/runs/${j.run_id}`;
                   return (
-                    <tr key={key}>
+                    <NavigationRow key={key} href={runLink} label={`Open ${j.run_name}`}>
                       <td>
                         <a
                           href={runLink}
@@ -360,7 +352,7 @@ export function ActiveJobsPage() {
                           </button>
                         </div>
                       </td>
-                    </tr>
+                    </NavigationRow>
                   );
                 })}
               </tbody>

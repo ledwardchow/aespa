@@ -6,7 +6,128 @@ from types import SimpleNamespace
 
 import pytest
 
-from aespa.services import codex_provider, statistics
+from aespa.services import codex_provider, llm, statistics
+
+
+def test_codex_requests_advertised_daybreak_program(monkeypatch):
+    async def options():
+        return [
+            {"id": "gpt-6-sol", "daybreak_programs": ["daybreak_blue"]},
+            {"id": "gpt-daybreak-red-latest", "daybreak_programs": ["daybreak_red"]},
+        ]
+
+    class Client:
+        async def request(self, method, params):
+            assert method == "turn/start"
+            requests.append(params)
+
+    monkeypatch.setattr(codex_provider, "discover_model_options", options)
+    requests = []
+    conversation = codex_provider._Conversation("thread", 0)
+    config = SimpleNamespace(model="gpt-6-sol", reasoning_effort=None)
+    asyncio.run(codex_provider._send_turn(Client(), conversation, config, "test"))
+    assert requests[-1]["cyberAccessProgram"] == "daybreakBlue"
+    assert conversation.daybreak_program == "daybreak_blue"
+
+    config.model = "gpt-daybreak-red-latest"
+    asyncio.run(codex_provider._send_turn(Client(), conversation, config, "test"))
+    assert requests[-1]["cyberAccessProgram"] == "daybreakRed"
+
+    config.model = "unknown-model"
+    asyncio.run(codex_provider._send_turn(Client(), conversation, config, "test"))
+    assert "cyberAccessProgram" not in requests[-1]
+    assert conversation.daybreak_program is None
+
+
+def test_codex_model_list_exposes_daybreak_access(monkeypatch):
+    class Client:
+        async def request(self, method, params):
+            assert method == "model/list"
+            return {
+                "data": [
+                    {
+                        "id": "gpt-6-sol",
+                        "availableAccessPrograms": {
+                            "cyber": ["daybreakRed", "daybreakBlue"]
+                        },
+                    }
+                ]
+            }
+
+    async def client():
+        return Client()
+
+    monkeypatch.setattr(codex_provider, "_get_client", client)
+    options = asyncio.run(codex_provider.discover_model_options())
+    assert options[0]["daybreak_programs"] == ["daybreak_blue", "daybreak_red"]
+
+
+def test_codex_program_callback_does_not_count_another_request(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        llm,
+        "_record_daybreak_program",
+        lambda model, program, context: recorded.append((model, program)),
+    )
+    monkeypatch.setattr(
+        llm,
+        "_record_usage",
+        lambda *args, **kwargs: pytest.fail("metadata callback counted token usage"),
+    )
+    llm._codex_usage_callback()("gpt-6-sol", 0, 0, daybreak_program="daybreak_blue")
+    assert recorded == [("gpt-6-sol", "daybreak_blue")]
+
+
+def test_codex_missing_catalog_metadata_is_unknown(monkeypatch):
+    async def options():
+        return [
+            {"id": "gpt-6-sol", "daybreak_programs": [], "daybreak_access_known": False}
+        ]
+
+    monkeypatch.setattr(codex_provider, "discover_model_options", options)
+    assert asyncio.run(codex_provider._daybreak_access_summary()) is None
+
+
+def test_codex_tool_call_records_daybreak_before_turn_completion(monkeypatch):
+    messages = [{"role": "user", "content": "test"}]
+    recorded = []
+
+    class Client:
+        async def request(self, method, params):
+            if method == "account/rateLimits/read":
+                return None
+            raise AssertionError(method)
+
+    client = Client()
+
+    async def get_client():
+        return client
+
+    async def run():
+        conversation = codex_provider._Conversation(
+            thread_id="thread", last_message_count=len(messages), client=client
+        )
+        conversation.daybreak_program = "daybreak_blue"
+        await conversation.events.put(
+            ("tool", {"callId": "call-1", "tool": "check", "arguments": {}})
+        )
+        codex_provider._conversations[id(messages)] = conversation
+        try:
+            result = await codex_provider._completion_with_tools_once(
+                SimpleNamespace(model="gpt-5.6-sol"),
+                "system",
+                messages,
+                [{"name": "check"}],
+                lambda *args, **kwargs: recorded.append(kwargs),
+            )
+            assert conversation.daybreak_program is None
+            return result
+        finally:
+            codex_provider._conversations.pop(id(messages), None)
+
+    monkeypatch.setattr(codex_provider, "_get_client", get_client)
+    assert asyncio.run(run())[1] == "tool_use"
+    assert recorded == [{"daybreak_program": "daybreak_blue"}]
 
 
 class _AsyncLines:
@@ -185,22 +306,18 @@ def test_codex_rate_limit_error_recognizes_full_numeric_window():
     assert codex_provider._rate_limit_error_has_full_window(payload) is True
 
 
-def test_codex_rate_limit_snapshot_detects_full_window():
-    assert codex_provider._rate_limit_is_exhausted(
-        {"rateLimits": {"primary": {"usedPercent": 100, "resetsAt": 123}}}
-    )
-    assert not codex_provider._rate_limit_is_exhausted(
-        {"rateLimits": {"primary": {"usedPercent": 74, "resetsAt": 123}}}
-    )
-
-
-def test_codex_rate_limit_snapshot_detects_numeric_full_window():
-    assert codex_provider._rate_limit_is_exhausted(
-        {"rateLimits": {"primary": {"limit": 40_000_000, "used": 40_000_000}}}
-    )
-    assert not codex_provider._rate_limit_is_exhausted(
-        {"rateLimits": {"primary": {"limit": 40_000_000, "used": 39_999_999}}}
-    )
+@pytest.mark.parametrize(
+    ("primary", "exhausted"),
+    [
+        ({"usedPercent": 100, "resetsAt": 123}, True),
+        ({"usedPercent": 74, "resetsAt": 123}, False),
+        ({"limit": 40_000_000, "used": 40_000_000}, True),
+        ({"limit": 40_000_000, "used": 39_999_999}, False),
+    ],
+)
+def test_codex_rate_limit_snapshot_detects_full_window(primary, exhausted):
+    snapshot = {"rateLimits": {"primary": primary}}
+    assert codex_provider._rate_limit_is_exhausted(snapshot) is exhausted
 
 
 def test_codex_rate_limit_scope_uses_regular_bucket_for_non_spark_model():
@@ -272,6 +389,8 @@ def _run_codex_completion_events(monkeypatch, events, *, tools=None):
 
     class FakeClient:
         async def request(self, method, params):  # noqa: ARG002
+            if method == "model/list":
+                return {"data": []}
             if method == "account/rateLimits/read":
                 return {"rateLimits": {"primary": {"usedPercent": 0}}}
             if method == "turn/start":
@@ -416,7 +535,7 @@ def test_codex_retryable_stream_errors_are_bounded(monkeypatch):
 
 
 def test_codex_internal_wait_fails_immediately_instead_of_hanging(monkeypatch):
-    with pytest.raises(codex_provider.CodexUnavailableError) as raised:
+    with pytest.raises(codex_provider.CodexInternalToolError) as raised:
         _run_codex_completion_events(
             monkeypatch,
             [
@@ -433,7 +552,45 @@ def test_codex_internal_wait_fails_immediately_instead_of_hanging(monkeypatch):
         )
 
     assert "internal 'wait' tool" in str(raised.value)
-    assert "AESPA stopped the turn" in str(raised.value)
+    assert "Only AESPA dynamic tools" in str(raised.value)
+
+
+@pytest.mark.parametrize("failures", [1, codex_provider.MAX_INTERNAL_TOOL_RETRIES + 1])
+def test_codex_internal_tool_retries_in_fresh_threads_are_bounded(
+    monkeypatch, failures
+):
+    calls = []
+
+    async def fake_completion(*args, **kwargs):  # noqa: ARG001
+        calls.append("completion")
+        if calls.count("completion") <= failures:
+            raise codex_provider.CodexInternalToolError("internal 'js' tool")
+        return ([{"type": "text", "text": "recovered"}], "end_turn", [])
+
+    async def fake_abandon(messages, *, delete_thread=True):  # noqa: ARG001
+        calls.append(("abandon", delete_thread))
+
+    monkeypatch.setattr(codex_provider, "_completion_with_tools_once", fake_completion)
+    monkeypatch.setattr(codex_provider, "_abandon_conversation", fake_abandon)
+
+    request = (
+        SimpleNamespace(model="auto"),
+        "system",
+        [{"role": "user", "content": "hello"}],
+        [{"name": "context_tool"}],
+        lambda *args, **kwargs: None,
+    )
+    if failures > codex_provider.MAX_INTERNAL_TOOL_RETRIES:
+        with pytest.raises(codex_provider.CodexInternalToolError):
+            asyncio.run(codex_provider.completion_with_tools(*request))
+    else:
+        result = asyncio.run(codex_provider.completion_with_tools(*request))
+        assert result[0][0]["text"] == "recovered"
+
+    assert calls.count("completion") == min(
+        failures + 1, codex_provider.MAX_INTERNAL_TOOL_RETRIES + 1
+    )
+    assert calls.count(("abandon", True)) == failures
 
 
 def test_codex_turn_timeout_has_a_useful_error(monkeypatch):
@@ -1027,3 +1184,77 @@ def test_codex_thread_uses_app_server_sandbox_wire_value():
     assert conversation.thread_id == "thread-1"
     assert calls[0][0] == "thread/start"
     assert calls[0][1]["sandbox"] == "read-only"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_type", "expected_text"),
+    [
+        (
+            "{'code': -32600, 'message': 'failed to load configuration: Too many open files (os error 24)'}",
+            codex_provider.CodexOpenFileLimitError,
+            "ran out of open files",
+        ),
+        (
+            "{'code': -32602, 'message': 'unknown field dynamicTools'}",
+            codex_provider.CodexUnavailableError,
+            "Upgrade Codex CLI",
+        ),
+        (
+            "{'code': -32600, 'message': 'invalid model'}",
+            codex_provider.CodexUnavailableError,
+            "invalid model",
+        ),
+    ],
+)
+def test_codex_thread_start_errors_keep_their_cause(
+    error, expected_type, expected_text
+):
+    class FakeClient:
+        def __init__(self):
+            self._conversations = {}
+
+        async def request(self, method, params):
+            raise codex_provider.CodexUnavailableError(error)
+
+    client = FakeClient()
+    with pytest.raises(expected_type) as raised:
+        asyncio.run(
+            codex_provider._start_thread(
+                client,
+                SimpleNamespace(model="gpt-6-sol"),
+                "system",
+                [{"role": "user", "content": "hello"}],
+                [{"name": "read_file", "input_schema": {"type": "object"}}],
+            )
+        )
+
+    assert expected_text in str(raised.value)
+    if "invalid model" in error:
+        assert "Upgrade Codex CLI" not in str(raised.value)
+
+
+def test_codex_thread_allows_several_tool_calls_per_response():
+    calls = []
+
+    class FakeClient:
+        def __init__(self):
+            self._conversations = {}
+
+        async def request(self, method, params):
+            calls.append((method, params))
+            return {"thread": {"id": "thread-1"}}
+
+    asyncio.run(
+        codex_provider._start_thread(
+            FakeClient(),
+            SimpleNamespace(model="auto"),
+            "system",
+            [{"role": "user", "content": "hello"}],
+            [{"name": "read_file", "input_schema": {"type": "object"}}],
+        )
+    )
+
+    instructions = calls[0][1]["baseInstructions"]
+    assert "exactly one" not in instructions
+    assert "at least one" in instructions
+    assert "same response" in instructions

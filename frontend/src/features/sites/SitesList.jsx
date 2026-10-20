@@ -1,11 +1,97 @@
 import * as sitesApi from "../../shared/api/sites.js";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { nav } from "../../shared/navigation/router.js";
 
 import { IconPlus } from "../../shared/ui/Icons.jsx";
 import { EmptyState } from "../../shared/ui/EmptyState.jsx";
+import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
+import { PageError } from "../../shared/ui/Notice.jsx";
 
 // ── Sites list ────────────────────────────────────────────────────────────────
+
+function SiteExportMenu({ site }) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState(null);
+  const buttonRef = useRef(null);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsideClick = (event) => {
+      if (!buttonRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) {
+        setOpen(false);
+      }
+    };
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        buttonRef.current?.focus();
+      }
+    };
+    const closeOnScroll = () => setOpen(false);
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("scroll", closeOnScroll, true);
+    window.addEventListener("resize", closeOnScroll);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("scroll", closeOnScroll, true);
+      window.removeEventListener("resize", closeOnScroll);
+    };
+  }, [open]);
+
+  const toggle = () => {
+    if (!open) {
+      const bounds = buttonRef.current.getBoundingClientRect();
+      setPosition({ top: bounds.bottom + 6, right: window.innerWidth - bounds.right });
+    }
+    setOpen((current) => !current);
+  };
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="btn secondary sm"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        Export ↓
+      </button>
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="sast-actions-popover"
+            role="menu"
+            style={{ position: "fixed", ...position }}
+          >
+            <a
+              href={`/api/sites/${site.id}/export?configuration_only=true`}
+              download
+              role="menuitem"
+              onClick={() => setOpen(false)}
+            >
+              Export settings only
+            </a>
+            <a
+              href={`/api/sites/${site.id}/export`}
+              download
+              role="menuitem"
+              onClick={() => setOpen(false)}
+            >
+              Export settings and runs
+            </a>
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
 
 export function SitesList() {
   const [sites, setSites] = useState(null);
@@ -51,10 +137,7 @@ export function SitesList() {
       let valA = a[sortField];
       let valB = b[sortField];
 
-      if (sortField === "requires_auth") {
-        valA = a.requires_auth ? 1 : 0;
-        valB = b.requires_auth ? 1 : 0;
-      } else if (sortField === "credential_count") {
+      if (sortField === "credential_count") {
         valA = a.credential_count || 0;
         valB = b.credential_count || 0;
       }
@@ -81,10 +164,6 @@ export function SitesList() {
     } catch (e) {
       setError(e.message);
     }
-  };
-
-  const onExport = (s) => {
-    window.location.href = `/api/sites/${s.id}/export`;
   };
 
   const onImportFile = async (e) => {
@@ -131,16 +210,7 @@ export function SitesList() {
         </div>
       </div>
       <div className="content scroll-content">
-        {error && (
-          <div
-            className="alert error"
-            style={{
-              marginBottom: 16,
-            }}
-          >
-            {error}
-          </div>
-        )}
+        <PageError error={error} inline={!sites} onDismiss={() => setError(null)} />
         {sites === null && <div className="subtle">Loading…</div>}
         {sites !== null && sites.length === 0 && (
           <EmptyState
@@ -159,27 +229,22 @@ export function SitesList() {
               <colgroup>
                 <col
                   style={{
+                    width: "38%",
+                  }}
+                />
+                <col
+                  style={{
+                    width: "32%",
+                  }}
+                />
+                <col
+                  style={{
+                    width: "12%",
+                  }}
+                />
+                <col
+                  style={{
                     width: "18%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "42%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "10%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "10%",
-                  }}
-                />
-                <col
-                  style={{
-                    width: "20%",
                   }}
                 />
               </colgroup>
@@ -199,12 +264,6 @@ export function SitesList() {
                   </th>
                   <th
                     style={{ cursor: "pointer", userSelect: "none" }}
-                    onClick={() => toggleSort("requires_auth")}
-                  >
-                    Auth {sortArrow("requires_auth")}
-                  </th>
-                  <th
-                    style={{ cursor: "pointer", userSelect: "none" }}
                     onClick={() => toggleSort("credential_count")}
                   >
                     Credentials {sortArrow("credential_count")}
@@ -214,7 +273,7 @@ export function SitesList() {
               </thead>
               <tbody>
                 {sortedSites.map((s) => (
-                  <tr key={s.id}>
+                  <NavigationRow key={s.id} href={`#/sites/${s.id}`} label={`Open ${s.name}`}>
                     <td>
                       <a
                         href={`#/sites/${s.id}`}
@@ -226,13 +285,6 @@ export function SitesList() {
                       </a>
                     </td>
                     <td className="url">{s.base_url}</td>
-                    <td>
-                      {s.requires_auth ? (
-                        <span className="badge ok">required</span>
-                      ) : (
-                        <span className="badge neutral">none</span>
-                      )}
-                    </td>
                     <td>
                       {s.credential_count > 0 ? (
                         s.credential_count
@@ -250,15 +302,13 @@ export function SitesList() {
                         <button className="btn secondary sm" onClick={() => nav(`#/sites/${s.id}`)}>
                           Open
                         </button>
-                        <button className="btn secondary sm" onClick={() => onExport(s)}>
-                          Export
-                        </button>
+                        <SiteExportMenu site={s} />
                         <button className="btn danger-outline sm" onClick={() => onDelete(s)}>
                           Delete
                         </button>
                       </div>
                     </td>
-                  </tr>
+                  </NavigationRow>
                 ))}
               </tbody>
             </table>

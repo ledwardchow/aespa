@@ -1,13 +1,33 @@
 import * as settingsApi from "../../shared/api/settings.js";
 import { useState, useEffect, useMemo } from "react";
-import { llmProfileToForm, llmPayload } from "./modelForm.js";
-import { API_FORMAT_LABELS } from "./providerMetadata.js";
+import { llmProfileToForm, llmPayload, modelDefaults } from "./modelForm.js";
+import { API_FORMAT_LABELS, DEFAULT_LLM_FORM } from "./providerMetadata.js";
 
 import { IconCheck } from "../../shared/ui/Icons.jsx";
 import { sortModelNames } from "../../shared/lib/modelSorting.js";
 
-export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
-  const [form, setForm] = useState(() => llmProfileToForm(profile, providers));
+export function LLMModelForm({
+  mode,
+  profile,
+  providers,
+  modelConfigs = [],
+  initialProviderId,
+  initialModel,
+  onSaved,
+  onCancel,
+}) {
+  const [form, setForm] = useState(() => {
+    const initialForm = llmProfileToForm(profile, providers);
+    if (mode !== "new" || !initialProviderId || !initialModel) return initialForm;
+    const initialProvider = providers.find((item) => item.id === initialProviderId);
+    return {
+      ...DEFAULT_LLM_FORM,
+      ...modelDefaults(initialProvider, initialModel),
+      name: initialProvider?.name ? `${initialProvider.name}/${initialModel}` : initialModel,
+      provider_id: initialProviderId,
+      model: initialModel,
+    };
+  });
   const [nameTouched, setNameTouched] = useState(mode === "edit");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -41,14 +61,29 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
     }
   };
   const selectedProvider = providers.find((p) => p.id === Number(form.provider_id));
+  const limitsForModel = (providerId, modelName) => {
+    const configured = modelConfigs.find(
+      (item) => item.provider_id === Number(providerId) && item.model === modelName,
+    );
+    return {
+      max_tpm: configured?.max_tpm ?? "",
+      max_rpm: configured?.max_rpm ?? "",
+    };
+  };
   const models = useMemo(
     () => sortModelNames(selectedProvider?.models),
     [selectedProvider?.models],
   );
   const storedCapabilities = selectedProvider?.model_capabilities || {};
   const hasStoredCapability = Object.prototype.hasOwnProperty.call(storedCapabilities, form.model);
+  const storedCapability = hasStoredCapability ? storedCapabilities[form.model] || {} : {};
+  const storedContext = Number(
+    storedCapability.context_window_tokens || storedCapability.context_length || 0,
+  );
+  const hasStoredContext = storedContext >= 1024;
+  const hasStoredEfforts = Array.isArray(storedCapability.supported_efforts);
   useEffect(() => {
-    if (!selectedProvider || !form.model || hasStoredCapability) {
+    if (!selectedProvider || !form.model || (hasStoredContext && hasStoredEfforts)) {
       setDiscoveredCapabilities({});
       setLoadingCapabilities(false);
       return undefined;
@@ -76,22 +111,45 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
     return () => {
       cancelled = true;
     };
-  }, [selectedProvider, models, form.model, hasStoredCapability]);
-  const capability = hasStoredCapability
-    ? storedCapabilities[form.model] || {}
-    : discoveredCapabilities[form.model] || {};
+  }, [selectedProvider, models, form.model, hasStoredContext, hasStoredEfforts]);
+  const capability = {
+    ...(discoveredCapabilities[form.model] || {}),
+    ...storedCapability,
+  };
+  const documentedOutput = Number(capability.max_output_tokens || 0);
+  const preferredEffort = capability.default_effort || "";
+  useEffect(() => {
+    if (mode !== "new") return;
+    setForm((current) => ({
+      ...current,
+      ...(documentedOutput > 0 && Number(current.max_tokens) === 16384
+        ? { max_tokens: documentedOutput }
+        : {}),
+      ...(preferredEffort && !current.reasoning_effort
+        ? { reasoning_effort: preferredEffort }
+        : {}),
+    }));
+  }, [mode, documentedOutput, preferredEffort]);
   const levels = Array.isArray(capability.supported_efforts) ? capability.supported_efforts : [];
-  const detectedContext = Number(
-    capability.context_window_tokens || capability.context_length || 0,
+  const speedTiers = Array.isArray(capability.service_tiers)
+    ? capability.service_tiers.filter((tier) => tier?.id)
+    : [];
+  const selectedSpeed = speedTiers.find((tier) => tier.id === form.service_tier);
+  const discoveredCapability = discoveredCapabilities[form.model] || {};
+  const discoveredContext = Number(
+    discoveredCapability.context_window_tokens || discoveredCapability.context_length || 0,
   );
+  const detectedContext = hasStoredContext ? storedContext : discoveredContext;
   useEffect(() => {
     if (form.max_context_auto && detectedContext >= 1024) {
-      upd({ max_context_tokens: detectedContext });
+      upd({
+        max_context_tokens: detectedContext,
+        detected_context_tokens: detectedContext,
+      });
     }
   }, [detectedContext, form.max_context_auto]);
   return (
     <>
-      {error && <div className="alert error">{error}</div>}
       <form className="card" onSubmit={onSubmit}>
         <div className="form-section-title">Model</div>
         <div className="field">
@@ -121,6 +179,9 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
                 provider_id: newProviderId,
                 model: newModel,
                 reasoning_effort: "",
+                service_tier: "",
+                ...modelDefaults(provider, newModel),
+                ...limitsForModel(newProviderId, newModel),
               };
               if (!nameTouched || !form.name.trim()) {
                 updates.name =
@@ -137,8 +198,9 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
           </select>
         </div>
         <div className="field">
-          <label>Model</label>
+          <label htmlFor="model-config-model">Model</label>
           <select
+            id="model-config-model"
             className="select"
             required
             value={form.model}
@@ -147,6 +209,9 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
               const updates = {
                 model: newModel,
                 reasoning_effort: "",
+                service_tier: "",
+                ...modelDefaults(selectedProvider, newModel),
+                ...limitsForModel(form.provider_id, newModel),
               };
               if (!nameTouched || !form.name.trim()) {
                 const provider = providers.find((p) => p.id === Number(form.provider_id));
@@ -164,10 +229,11 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
           </select>
         </div>
         <div className="field">
-          <label>
+          <label htmlFor="model-config-thinking-level">
             Thinking level <span className="field-optional">(optional)</span>
           </label>
           <select
+            id="model-config-thinking-level"
             className="select"
             value={form.reasoning_effort || ""}
             onChange={(e) => upd({ reasoning_effort: e.target.value })}
@@ -200,16 +266,51 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
             </div>
           )}
         </div>
+        {(speedTiers.length > 0 || form.service_tier) && (
+          <div className="field">
+            <label htmlFor="model-config-speed">Speed</label>
+            <select
+              id="model-config-speed"
+              className="select"
+              value={form.service_tier || ""}
+              onChange={(e) => upd({ service_tier: e.target.value })}
+            >
+              <option value="">Standard</option>
+              {speedTiers.map((tier) => (
+                <option key={tier.id} value={tier.id}>
+                  {tier.name || tier.id}
+                </option>
+              ))}
+              {form.service_tier && !selectedSpeed && (
+                <option value={form.service_tier}>{form.service_tier} (saved)</option>
+              )}
+            </select>
+            <div className="field-hint">
+              {selectedSpeed?.description
+                ? `${selectedSpeed.description}.`
+                : "Faster speeds use your plan's usage limits more quickly."}
+            </div>
+          </div>
+        )}
         <div className="divider" />
         <div className="form-section-title">Sampling</div>
         <div className="two-col">
           <div className="field">
-            <label>Max tokens</label>
+            <label htmlFor="model-config-max-tokens">
+              {selectedProvider?.api_format === "openai_chatgpt_plan"
+                ? "Output budget (local)"
+                : "Max tokens"}
+            </label>
             <input
+              id="model-config-max-tokens"
               type="number"
               required
               min="1"
-              max="256000"
+              max={
+                selectedProvider?.api_format === "openai_chatgpt_plan" && documentedOutput > 0
+                  ? documentedOutput
+                  : 256000
+              }
               value={form.max_tokens}
               onChange={(e) =>
                 upd({
@@ -217,6 +318,12 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
                 })
               }
             />
+            {selectedProvider?.api_format === "openai_chatgpt_plan" && (
+              <div className="field-hint">
+                AESPA uses this for context planning. ChatGPT plan requests do not support an
+                output-token limit.
+              </div>
+            )}
           </div>
           <div className="field">
             <label>Maximum context tokens</label>
@@ -228,7 +335,9 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
               />
               <span>
                 Auto
-                {detectedContext >= 1024 ? ` (${detectedContext.toLocaleString()} detected)` : ""}
+                {detectedContext >= 1024
+                  ? ` (${detectedContext.toLocaleString()} ${capability.context_window_source === "openai_documentation" ? "from OpenAI docs" : "detected"})`
+                  : ""}
               </span>
             </label>
             <input
@@ -236,7 +345,11 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
               required={!form.max_context_auto}
               disabled={form.max_context_auto}
               min="1024"
-              max="2000000"
+              max={
+                selectedProvider?.api_format === "openai_chatgpt_plan" && detectedContext >= 1024
+                  ? detectedContext
+                  : 2000000
+              }
               value={form.max_context_tokens}
               onChange={(e) =>
                 upd({
@@ -295,6 +408,38 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
           </div>
         </div>
         <div className="divider" />
+        <div className="form-section-title">
+          Rate Limits <span className="field-optional">(optional)</span>
+        </div>
+        <div className="field-hint">
+          Pace requests for this provider and model pair. Saved configurations using the same pair
+          share these limits.
+        </div>
+        <div className="two-col">
+          <div className="field">
+            <label htmlFor="model-max-tpm">Max Tokens Per Minute (TPM)</label>
+            <input
+              id="model-max-tpm"
+              type="number"
+              min="1"
+              placeholder="Unlimited"
+              value={form.max_tpm}
+              onChange={(e) => upd({ max_tpm: e.target.value })}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="model-max-rpm">Max Requests Per Minute (RPM)</label>
+            <input
+              id="model-max-rpm"
+              type="number"
+              min="1"
+              placeholder="Unlimited"
+              value={form.max_rpm}
+              onChange={(e) => upd({ max_rpm: e.target.value })}
+            />
+          </div>
+        </div>
+        <div className="divider" />
         <div className="form-section-title">Vision</div>
         <label className="toggle-row">
           <input
@@ -342,6 +487,11 @@ export function LLMModelForm({ mode, profile, providers, onSaved, onCancel }) {
               </span>
             )}
           </div>
+          {error && (
+            <div className="alert error form-error" role="alert">
+              {error}
+            </div>
+          )}
           <div className="row">
             {onCancel && (
               <button type="button" className="btn ghost" onClick={onCancel}>

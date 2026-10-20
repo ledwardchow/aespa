@@ -106,6 +106,7 @@ _COPILOT_ENV_ALLOWLIST = (
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS",
+    "COPILOT_CLI_PATH",
     "COPILOT_GITHUB_TOKEN",
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -148,10 +149,15 @@ def list_accounts() -> list[dict[str, Any]]:
     return accounts
 
 
+def _installed_copilot_cli() -> str | None:
+    """Prefer an explicit CLI path, then an executable on the process PATH."""
+    configured = (os.environ.get("COPILOT_CLI_PATH") or "").strip()
+    return str(Path(configured).expanduser()) if configured else shutil.which("copilot")
+
+
 def _copilot_login_command() -> list[str]:
     """Resolve the CLI bundled with the SDK for its supported login command."""
-    configured = (os.environ.get("COPILOT_CLI_PATH") or "").strip()
-    cli_path: str | None = configured or None
+    cli_path = _installed_copilot_cli()
     if cli_path is None:
         try:
             from copilot.client import _get_or_download_cli
@@ -175,12 +181,14 @@ def _copilot_login_command() -> list[str]:
 
 def _copilot_login_env() -> dict[str, str]:
     """Build a minimal login environment that cannot bypass OAuth with a host token."""
+    from aespa.services.llm_network import child_network_env
+
     allowed = (*_COPILOT_ENV_ALLOWLIST, "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
     child_env = {name: os.environ[name] for name in allowed if name in os.environ}
     for name in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
         child_env.pop(name, None)
     child_env["COPILOT_HOME"] = str(_copilot_home())
-    return child_env
+    return child_network_env(child_env)
 
 
 def _login_payload(flow: _LoginFlow) -> dict[str, Any]:
@@ -337,13 +345,18 @@ async def _cancel_login_flows() -> None:
 
 
 def _client_key(config: LLMConfig, proxy_url: str | None) -> str:
+    from aespa.services.llm_network import configured_llm_network
+
+    saved_proxy, ca_bundle = configured_llm_network()
     username = (getattr(config, "username", None) or "").strip()
     token_marker = config.api_key or (
         f"copilot-user:{username.casefold()}:{_copilot_home()}"
         if username
         else f"logged-in-user:{_copilot_home()}"
     )
-    material = f"{token_marker}\0{proxy_url or ''}".encode()
+    material = (
+        f"{token_marker}\0{proxy_url or saved_proxy or ''}\0{ca_bundle or ''}".encode()
+    )
     return hashlib.sha256(material).hexdigest()
 
 
@@ -421,9 +434,12 @@ async def _get_client(config: LLMConfig, proxy_url: str | None) -> Any:
             for name in _COPILOT_ENV_ALLOWLIST
             if name in os.environ
         }
-        if proxy_url:
-            child_env["HTTP_PROXY"] = proxy_url
-            child_env["HTTPS_PROXY"] = proxy_url
+        from aespa.services.llm_network import child_network_env
+
+        child_env = child_network_env(child_env, proxy_url)
+        cli_path = _installed_copilot_cli()
+        if cli_path:
+            child_env["COPILOT_CLI_PATH"] = cli_path
 
         client = CopilotClient(
             mode=client_mode,
@@ -480,17 +496,26 @@ async def discover_model_options(proxy_url: str | None = None) -> list[dict[str,
     for model in models:
         model_id = getattr(model, "id", None) or getattr(model, "name", "")
         if model_id:
-            discovered.append(
-                {
-                    "id": model_id,
-                    "supported_reasoning_efforts": getattr(
-                        model, "supported_reasoning_efforts", None
-                    ),
-                    "default_reasoning_effort": getattr(
-                        model, "default_reasoning_effort", None
-                    ),
-                }
-            )
+            option = {
+                "id": model_id,
+                "supported_reasoning_efforts": getattr(
+                    model, "supported_reasoning_efforts", None
+                ),
+                "default_reasoning_effort": getattr(
+                    model, "default_reasoning_effort", None
+                ),
+            }
+            for key in (
+                "context_window_tokens",
+                "context_length",
+                "context_window",
+                "max_input_tokens",
+                "input_token_limit",
+            ):
+                value = getattr(model, key, None)
+                if value is not None:
+                    option[key] = value
+            discovered.append(option)
     if not any(item["id"] == "auto" for item in discovered):
         discovered.insert(0, {"id": "auto"})
     return discovered

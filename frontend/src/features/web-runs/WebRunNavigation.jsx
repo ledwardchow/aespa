@@ -19,16 +19,12 @@ export function WebRunNavigation({
       counts={counts}
     >
       {canClearCrawl && activeTab === "sitemap" && (
-        <button
-          className="btn danger-outline sm"
-          style={{ margin: "auto 8px auto 0" }}
-          onClick={onClearCrawl}
-        >
+        <button className="btn danger-outline sm" onClick={onClearCrawl}>
           Clear crawl
         </button>
       )}
       {activeTab === "sitemap" && multiUser && (
-        <div className="view-toggle" style={{ margin: "auto 8px auto 0" }}>
+        <div className="view-toggle">
           <button
             className={"btn ghost sm" + (graphView === "scope" ? " active" : "")}
             onClick={() => onGraphView("scope")}

@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from aespa.models import UpstreamProxyConfig
 from aespa.services import model_discovery, settings
 
 
-def test_discover_openai_models():
+def test_discover_openai_models(db_session, fake_ssl_context):
+    db_session.add(
+        UpstreamProxyConfig(
+            id=1,
+            proxy_llm=True,
+            llm_proxy_url="http://proxy.example:8080",
+            llm_ca_bundle_path="/tmp/company-ca.pem",
+        )
+    )
+    db_session.commit()
+    captured = {}
     mock_response = MagicMock()
     mock_response.json.return_value = {
         "data": [
@@ -18,7 +30,7 @@ def test_discover_openai_models():
 
     class _MockClient:
         def __init__(self, **kwargs):
-            pass
+            captured.update(kwargs)
 
         async def __aenter__(self):
             return self
@@ -33,6 +45,8 @@ def test_discover_openai_models():
     with patch("httpx.AsyncClient", _MockClient):
         models = asyncio.run(model_discovery.discover_openai_models(api_key="test-key"))
         assert models == ["gpt-4o", "gpt-4o-mini"]
+    assert captured["proxy"] == "http://proxy.example:8080"
+    assert captured["verify"] == fake_ssl_context("/tmp/company-ca.pem")
 
 
 def test_discover_bedrock_mantle_models_uses_v1_models_route():
@@ -59,7 +73,7 @@ def test_discover_bedrock_mantle_models_uses_v1_models_route():
             captured["url"] = url
             return mock_response
 
-    with patch("httpx.AsyncClient", _MockClient):
+    with patch("httpx2.AsyncClient", _MockClient):
         records = asyncio.run(
             model_discovery.discover_bedrock_mantle_model_options(
                 api_key="mantle-key",
@@ -103,15 +117,40 @@ def test_discover_bedrock_mantle_models_uses_sigv4_without_api_key(monkeypatch):
 
     monkeypatch.setenv("AWS_PROFILE", "mantle-dev")
     monkeypatch.setattr("aespa.services.llm._BedrockMantleSigV4Auth", _MockSigner)
-    with patch("httpx.AsyncClient", _MockClient):
+    with patch("httpx2.AsyncClient", _MockClient):
         asyncio.run(
             model_discovery.discover_bedrock_mantle_model_options(
                 base_url="https://bedrock-mantle.eu-west-1.api.aws",
+                profile="mantle-selected",
             )
         )
 
-    assert captured["signer"] == {"region": "eu-west-1", "profile": "mantle-dev"}
+    assert captured["signer"] == {"region": "eu-west-1", "profile": "mantle-selected"}
     assert captured["client"]["auth"] is signer
+
+
+def test_discover_bedrock_mantle_models_accepts_real_sigv4_signer(monkeypatch):
+    """The real signer must be accepted by the real HTTP client used here."""
+    from aespa.services.llm import _BedrockMantleSigV4Auth
+
+    captured: dict[str, object] = {}
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"data": [{"id": "nvidia.nemotron"}]}
+
+    async def _fake_get(self, url):
+        captured["auth"] = self.auth
+        return mock_response
+
+    monkeypatch.setattr("httpx2.AsyncClient.get", _fake_get)
+    records = asyncio.run(
+        model_discovery.discover_bedrock_mantle_model_options(
+            base_url="https://bedrock-mantle.us-east-1.api.aws",
+            profile="mantle-selected",
+        )
+    )
+
+    assert isinstance(captured["auth"], _BedrockMantleSigV4Auth)
+    assert [record["id"] for record in records] == ["nvidia.nemotron"]
 
 
 def test_provider_model_discovery_sorts_and_deduplicates_all_formats(monkeypatch):
@@ -135,6 +174,54 @@ def test_provider_model_discovery_sorts_and_deduplicates_all_formats(monkeypatch
     )
 
     assert result["models"] == ["alpha", "Zulu"]
+
+
+def test_bedrock_model_discovery_uses_selected_profile(monkeypatch):
+    captured = {}
+
+    async def fake_discovery(**kwargs):
+        captured.update(kwargs)
+        return ["global.anthropic.claude-sonnet-4-6"]
+
+    monkeypatch.setattr(model_discovery, "discover_bedrock_models", fake_discovery)
+    asyncio.run(
+        settings.discover_models_for_format(
+            api_format="bedrock", aws_profile="scan-operator"
+        )
+    )
+    assert captured["profile"] == "scan-operator"
+
+
+def test_mantle_discovery_exposes_each_models_inference_api(monkeypatch):
+    async def fake_discovery(**kwargs):
+        return [
+            {"id": "anthropic.claude-sonnet-5"},
+            {"id": "openai.gpt-5.6-luna"},
+            {"id": "deepseek.v3.2"},
+            {"id": "unknown.future-model"},
+        ]
+
+    async def fake_enrichment(api_format, models, native):
+        return {}
+
+    monkeypatch.setattr(
+        model_discovery, "discover_bedrock_mantle_model_options", fake_discovery
+    )
+    monkeypatch.setattr(settings, "enrich_model_options", fake_enrichment)
+
+    result = asyncio.run(
+        settings.discover_model_options_for_format(api_format="bedrock_mantle")
+    )
+
+    assert {
+        model: metadata["inference_api"]
+        for model, metadata in result["capabilities"].items()
+    } == {
+        "anthropic.claude-sonnet-5": "messages",
+        "openai.gpt-5.6-luna": "responses",
+        "deepseek.v3.2": "chat_completions",
+        "unknown.future-model": "unknown",
+    }
 
 
 def test_discover_anthropic_models():
@@ -201,3 +288,73 @@ def test_discover_google_models():
     with patch("httpx.AsyncClient", _MockClient):
         models = asyncio.run(model_discovery.discover_google_models(api_key="test-key"))
         assert models == ["gemini-2.0-flash-exp", "gemini-1.5-pro"]
+
+
+def test_discover_google_vertex_models_uses_adc_and_filters_publishers(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Pager:
+        def __init__(self):
+            self._items = iter(
+                [
+                    SimpleNamespace(
+                        name="publishers/google/models/gemini-2.5-flash",
+                        input_token_limit=1_048_576,
+                        output_token_limit=65_536,
+                        supported_actions=["generateContent"],
+                    ),
+                    SimpleNamespace(
+                        name="projects/p/locations/us-central1/endpoints/123",
+                        input_token_limit=None,
+                        output_token_limit=None,
+                        supported_actions=["predict"],
+                    ),
+                    SimpleNamespace(
+                        name="publishers/google/models/text-embedding-005",
+                        input_token_limit=None,
+                        output_token_limit=None,
+                        supported_actions=["embedContent"],
+                    ),
+                ]
+            )
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._items)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class _Models:
+        async def list(self, *, config):
+            captured["list_config"] = config
+            return _Pager()
+
+    class _AsyncClient:
+        models = _Models()
+
+        async def aclose(self):
+            captured["closed"] = True
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.aio = _AsyncClient()
+
+    monkeypatch.setattr("google.genai.Client", _Client)
+
+    records = asyncio.run(
+        model_discovery.discover_google_vertex_model_options(
+            project_id="example-project", location="us-central1"
+        )
+    )
+
+    assert [record["id"] for record in records] == ["gemini-2.5-flash"]
+    assert records[0]["input_token_limit"] == 1_048_576
+    assert captured["client"]["vertexai"] is True
+    assert captured["client"]["project"] == "example-project"
+    assert captured["client"]["location"] == "us-central1"
+    assert captured["list_config"] == {"query_base": True}
+    assert captured["closed"] is True

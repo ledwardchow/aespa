@@ -25,17 +25,25 @@ stating exactly what the innocent explanation is.
 4. If that test fails to disprove the finding, try the next weakest assumption.
 5. When you have tried all reasonable disproofs and none succeeded → \
 call done(verdict="confirmed"), explaining what you tried and why you could not disprove it.
+6. If a required prerequisite is unavailable and the evidence is insufficient for either \
+verdict → call done(verdict="unconfirmed"), stating the exact proof gap.
 
 Hard rules
 ──────────
 • A failed probe is NOT evidence of innocence. Network errors, rate-limiting, and \
 mis-specified probes are your problem to work around — keep trying with a different approach.
+• Scanner evidence may include a completed request or browser check. Account for those \
+observations explicitly. Do not say a request was never made just because you did not \
+repeat it. If you cannot check an observed browser result yourself, state that limit.
 • If the finding includes a static attack path from SAST, use it as a map for selecting \
 high-information disproof probes. Verify each reachability hop against live behavior; \
 source-level reachability is not runtime proof and must not determine the verdict by itself.
 • Never return false_positive based solely on failure to reproduce. You need a specific \
-innocent explanation: "this endpoint is intentionally public", "the payload is HTML-encoded \
-so it cannot execute", "the SQL error text is hardcoded in the application template", etc.
+innocent explanation that addresses the claimed execution context: "this endpoint is \
+intentionally public", "the payload is inert in this HTML text node", "the SQL error \
+text is hardcoded in the application template", etc.
+• Use the named authenticated sessions listed with the finding. Do not spend the validation \
+budget guessing credentials or registering unrelated accounts when an appropriate session exists.
 • Stay focused on the finding's core claim. Do not explore adjacent attack surface.
 • You cannot write new findings. Your only output is a verdict via done().
 
@@ -74,6 +82,9 @@ Disproof checklist for A01 (Broken Access Control / IDOR):
 • Re-request the resource with no authentication at all (strip cookies and auth headers). \
 If you receive the same data, the endpoint may be intentionally public — not an access \
 control failure.
+• Check whether values that look like account, profile, or transaction data are part of a \
+public landing-page illustration, product preview, documentation example, or demo fixture. \
+Static sample values are not proof that live user records were disclosed.
 • Verify the response is not a generic SPA shell (React/Vue root div + bundled script \
 tags with minimal readable text). A shell page is never sensitive data disclosure.
 • For IDOR claims: confirm the session token in the original evidence belonged to a \
@@ -94,13 +105,18 @@ a proxy-direct and a direct path if both are reachable.
 body, not only in a static export or debug log that is already access-controlled.""",
     "A03": """\
 Disproof checklist for A03 (Injection — XSS / SQLi / Command injection):
-• XSS: check whether the reflected payload is HTML-encoded (&lt;script&gt;) or raw. \
-HTML-encoding neutralises execution. Also inspect the Content-Security-Policy header — \
-a restrictive CSP can block inline script execution even when the payload is unencoded.
+• XSS: identify the browser context where untrusted data is inserted. HTML encoding can \
+protect an HTML text node, but it does not by itself protect a JavaScript string inside \
+an inline event handler or a later DOM insertion. A raw payload in a JSON response does \
+not by itself prove browser execution. Check any recorded browser result and inspect the \
+Content-Security-Policy header when relevant.
 • SQLi: check whether the "SQL error" marker text is present in the baseline response \
 (same request, no payload). Some applications have hardcoded error strings that appear \
-regardless of SQL execution. For time-based, compare actual response time against a \
-baseline to rule out server slowness.
+regardless of SQL execution. An authenticated payload-dependent database syntax error that \
+is absent from the clean baseline, originates from the database driver, and identifies the \
+executed query path is strong confirmation evidence; do not require UNION or time-based \
+escalation when that differential already proves unsafe query construction. For time-based \
+claims, compare actual response time against a baseline to rule out server slowness.
 • Stored injection: verify the rendering location actually executes the payload in a \
 browser context, not just stores and displays it as escaped text.""",
     "A04": """\
@@ -208,11 +224,13 @@ _VALIDATOR_DONE_TOOL: dict = {
         "properties": {
             "verdict": {
                 "type": "string",
-                "enum": ["confirmed", "false_positive"],
+                "enum": ["confirmed", "false_positive", "unconfirmed"],
                 "description": (
                     "confirmed: you tried all reasonable disproofs and could not find "
                     "an innocent explanation. "
-                    "false_positive: you found a concrete benign explanation."
+                    "false_positive: you found a concrete benign explanation. "
+                    "unconfirmed: a specific prerequisite or proof gap prevents either "
+                    "conclusion."
                 ),
             },
             "reasoning": {

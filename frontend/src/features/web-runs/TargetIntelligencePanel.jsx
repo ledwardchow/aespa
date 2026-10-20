@@ -38,7 +38,7 @@ export function TargetIntelligencePanel({
     <div className="intel-panel">
       <div className="intel-toolbar">
         <div className="intel-title">
-          <span>Target Intelligence</span>
+          <span>Crawl Data</span>
           <span className="subtle">
             {total} item{total === 1 ? "" : "s"} discovered during crawl
           </span>

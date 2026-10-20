@@ -1,0 +1,45 @@
+.page {
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  width: 100%;
+  padding: 24px;
+  overflow-y: auto;
+  background: var(--bg);
+}
+.panel {
+  width: 100%;
+  max-width: 420px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.panel .brand {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin: 0 0 24px;
+  font-size: 38px;
+  line-height: 1;
+  letter-spacing: -1px;
+}
+.brand img {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  margin: -12px -6px -10px -10px;
+}
+.panel h2 {
+  margin: 0 0 12px;
+}
+.panel p {
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.panel input {
+  width: 100%;
+}
+.panel button {
+  margin-top: 16px;
+}

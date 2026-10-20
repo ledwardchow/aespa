@@ -7,12 +7,19 @@ these helpers directly without going through HTTP.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 
 from sqlmodel import Session, select
 
 from aespa.models import Credential, Site
-from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate
+from aespa.schemas import CredentialIn, SiteCreate, SiteUpdate, SiteWorkflowInput
+from aespa.services.run_cleanup import detach_credential_dependents
+
+# Workflow definitions are stored as one JSON column. Keep read, edit, and
+# commit together when crawl and API threads update the same site. AESPA's
+# local server runs these writers in one process.
+site_workflow_lock = threading.RLock()
 
 
 def _parse_datetimes(data: dict, *fields: str) -> dict:
@@ -45,8 +52,8 @@ class DuplicateSiteName(SiteServiceError):
     pass
 
 
-class SiteReferencedByApplication(SiteServiceError):
-    """Raised when a Site is still attached to an Application as a target."""
+class SiteReferencedBySystem(SiteServiceError):
+    """Raised when a Site is still attached to a System as a target."""
 
 
 def _utcnow() -> datetime:
@@ -71,6 +78,78 @@ def _credential_values(payload: CredentialIn) -> dict:
             str(payload.test_mailbox_url) if payload.test_mailbox_url else None
         ),
     }
+
+
+def workflow_data_for_site(site: Site) -> list[dict]:
+    try:
+        data = json.loads(site.workflow_data_json or "[]")
+    except (TypeError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_site_workflow_data(
+    session: Session, site_id: int, workflow: dict, instructions: str
+) -> None:
+    with site_workflow_lock:
+        site = get_site(session, site_id)
+        session.refresh(site)
+        if not upsert_site_workflow_data(site, workflow, instructions):
+            raise ValueError("A site can save up to 20 workflows.")
+        session.add(site)
+        session.commit()
+
+
+def upsert_site_workflow_data(
+    site: Site,
+    workflow: dict,
+    instructions: str = "",
+    *,
+    preserve_existing_goal: bool = False,
+) -> bool:
+    """Save one workflow definition, retaining saved values when none are supplied.
+
+    The caller owns the transaction. Returns false when the site is full.
+    """
+    item = SiteWorkflowInput(
+        name=workflow["name"],
+        goal=workflow.get("goal") or workflow["name"],
+        start_url=workflow.get("start_url") or workflow.get("url"),
+        instructions=instructions,
+    ).model_dump(mode="json")
+    from urllib.parse import urlsplit
+
+    site_url = urlsplit(site.base_url)
+    start_url = urlsplit(item["start_url"])
+    if (
+        start_url.hostname,
+        start_url.port or (443 if start_url.scheme == "https" else 80),
+    ) != (
+        site_url.hostname,
+        site_url.port or (443 if site_url.scheme == "https" else 80),
+    ):
+        raise ValueError("workflow starting pages must be on the site host")
+    items = workflow_data_for_site(site)
+    key = (item["name"].casefold(), item["start_url"].rstrip("/").casefold())
+    for index, existing in enumerate(items):
+        existing_key = (
+            str(existing.get("name") or "").casefold(),
+            str(existing.get("start_url") or "").rstrip("/").casefold(),
+        )
+        if existing_key == key:
+            if preserve_existing_goal:
+                item["goal"] = existing.get("goal") or item["goal"]
+            if not item["instructions"]:
+                item["instructions"] = existing.get("instructions") or ""
+            items[index] = item
+            break
+    else:
+        if len(items) >= 20:
+            return False
+        items.append(item)
+    site.workflow_data_json = json.dumps(items)
+    site.updated_at = _utcnow()
+    return True
 
 
 def list_sites(session: Session) -> list[Site]:
@@ -114,6 +193,9 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
         login_url=str(payload.login_url) if payload.login_url else None,
         notes=payload.notes,
         scan_guidance=payload.scan_guidance,
+        workflow_data_json=json.dumps(
+            [item.model_dump(mode="json") for item in payload.workflow_data or []]
+        ),
         scope_hosts=json.dumps(
             normalize_scope_entries(payload.scope_hosts, default_url=base_url)
         ),
@@ -129,6 +211,11 @@ def create_site(session: Session, payload: SiteCreate) -> Site:
 
 
 def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
+    with site_workflow_lock:
+        return _update_site_locked(session, site_id, payload)
+
+
+def _update_site_locked(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     site = get_site(session, site_id)
     _ensure_unique_name(session, payload.name, ignore_id=site.id)
 
@@ -140,16 +227,50 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
     site.login_url = str(payload.login_url) if payload.login_url else None
     site.notes = payload.notes
     site.scan_guidance = payload.scan_guidance
+    if payload.workflow_data is not None:
+        site.workflow_data_json = json.dumps(
+            [item.model_dump(mode="json") for item in payload.workflow_data]
+        )
     site.scope_hosts = json.dumps(
         normalize_scope_entries(payload.scope_hosts, default_url=site.base_url)
     )
     site.updated_at = _utcnow()
 
-    # Replace credentials list wholesale.
-    site.credentials.clear()
-    session.flush()
-    for cred in payload.credentials:
-        site.credentials.append(Credential(**_credential_values(cred)))
+    existing_by_id = {cred.id: cred for cred in site.credentials}
+    existing_by_username: dict[str, list[Credential]] = {}
+    for cred in site.credentials:
+        existing_by_username.setdefault(cred.username, []).append(cred)
+    requested_usernames = [cred.username for cred in payload.credentials]
+    retained_ids: set[int] = set()
+    updated_credentials: list[Credential] = []
+    for incoming in payload.credentials:
+        current = None
+        if incoming.id is not None:
+            current = existing_by_id.get(incoming.id)
+            if current is None or current.id in retained_ids:
+                raise SiteServiceError(
+                    "A credential does not belong to this site or appears twice."
+                )
+        elif requested_usernames.count(incoming.username) == 1:
+            matches = existing_by_username.get(incoming.username or "", [])
+            if len(matches) == 1 and matches[0].id not in retained_ids:
+                current = matches[0]
+        values = _credential_values(incoming)
+        if current is None:
+            current = Credential(**values)
+        else:
+            retained_ids.add(current.id)
+            for key, value in values.items():
+                if key == "totp_seed" and value is None:
+                    continue
+                setattr(current, key, value)
+        updated_credentials.append(current)
+    # Removed credentials are deleted as orphans on commit; clear references
+    # first, before the reassignment makes them pending deletes.
+    detach_credential_dependents(
+        session, [cred_id for cred_id in existing_by_id if cred_id not in retained_ids]
+    )
+    site.credentials = updated_credentials
 
     session.add(site)
     session.commit()
@@ -159,18 +280,18 @@ def update_site(session: Session, site_id: int, payload: SiteUpdate) -> Site:
 
 
 def delete_site(session: Session, site_id: int) -> None:
-    from aespa.models import ApplicationTarget, TestRun
+    from aespa.models import SystemTarget, TestRun
     from aespa.services import run_cleanup
 
     site = get_site(session, site_id)
     referenced = session.exec(
-        select(ApplicationTarget.id)
-        .where(ApplicationTarget.target_type == "site")
-        .where(ApplicationTarget.target_id == site_id)
+        select(SystemTarget.id)
+        .where(SystemTarget.target_type == "site")
+        .where(SystemTarget.target_id == site_id)
     ).first()
     if referenced is not None:
-        raise SiteReferencedByApplication(
-            "This site is attached to an application — detach it there first."
+        raise SiteReferencedBySystem(
+            "This site is attached to a system. Detach it there first."
         )
     runs = session.exec(select(TestRun).where(TestRun.site_id == site_id)).all()
     for run in runs:
@@ -204,6 +325,7 @@ def delete_credential(session: Session, site_id: int, credential_id: int) -> Non
         raise CredentialNotFound(
             f"Credential id={credential_id} not found for site {site_id}"
         )
+    detach_credential_dependents(session, [credential_id])
     session.delete(cred)
     session.commit()
 
@@ -211,8 +333,10 @@ def delete_credential(session: Session, site_id: int, credential_id: int) -> Non
 # ── Export / Import ──────────────────────────────────────────────────────────
 
 
-def export_site(session: Session, site_id: int) -> dict:
-    """Return a portable dict containing the site and every related row.
+def export_site(
+    session: Session, site_id: int, *, configuration_only: bool = False
+) -> dict:
+    """Return a portable site bundle, optionally without test runs.
 
     All primary keys are preserved as export-local IDs so that import_site()
     can remap them.  Datetimes are serialised to ISO-8601 strings via
@@ -241,6 +365,15 @@ def export_site(session: Session, site_id: int) -> dict:
         return obj.model_dump(mode="json")
 
     creds = [_row(c) for c in site.credentials]
+    if configuration_only:
+        return {
+            "export_version": 1,
+            "exported_at": _utcnow().isoformat(),
+            "site": _row(site),
+            "credentials": creds,
+            "test_runs": [],
+        }
+
     runs = list(session.exec(select(TestRun).where(TestRun.site_id == site_id)).all())
 
     run_bundles = []

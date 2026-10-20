@@ -28,6 +28,7 @@ class LoginField(BaseModel):
 class CredentialIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    id: int | None = None
     username: str | None = None
     password: str | None = None
     login_fields: list[LoginField] = Field(default_factory=list)
@@ -112,6 +113,15 @@ class CredentialOut(BaseModel):
         return data
 
 
+class SiteWorkflowInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    goal: str = Field(min_length=1, max_length=220)
+    start_url: HttpUrl
+    instructions: str = Field(default="", max_length=4000)
+
+
 class SiteBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -121,12 +131,22 @@ class SiteBase(BaseModel):
     login_url: HttpUrl | None = None
     notes: str | None = None
     scan_guidance: str | None = None
+    workflow_data: list[SiteWorkflowInput] | None = Field(default=None, max_length=20)
     scope_hosts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_auth_consistency(self) -> "SiteBase":
         if not self.requires_auth and self.login_url is not None:
             raise ValueError("login_url must be omitted when requires_auth is false")
+        site_port = self.base_url.port or (
+            443 if self.base_url.scheme == "https" else 80
+        )
+        for workflow in self.workflow_data or []:
+            start_port = workflow.start_url.port or (
+                443 if workflow.start_url.scheme == "https" else 80
+            )
+            if workflow.start_url.host != self.base_url.host or start_port != site_port:
+                raise ValueError("workflow starting pages must be on the site host")
         return self
 
 
@@ -180,10 +200,28 @@ class SiteDetail(BaseModel):
     login_url: str | None
     notes: str | None
     scan_guidance: str | None
+    workflow_data: list[SiteWorkflowInput] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     credentials: list[CredentialOut]
     scope_hosts: list[str] = Field(default_factory=list)
+
+
+class LoginTestIn(BaseModel):
+    base_url: HttpUrl
+    login_url: HttpUrl | None = None
+    site_id: int | None = None
+    credential: CredentialIn
+
+
+class LoginTestOut(BaseModel):
+    status: Literal["logged_in", "failed"]
+    message: str
+    login_url: str
+    final_url: str | None = None
+    page_message: str | None = None
+    screenshot: str | None = None
+    duration_ms: int = 0
 
 
 # ── API Collection schemas ────────────────────────────────────────────────
@@ -303,6 +341,9 @@ class ApiCredentialCreate(BaseModel):
 # ── API Test Run schemas ──────────────────────────────────────────────────────
 
 CoverageModeLiteral = Literal["track", "standard", "enforce", "sast_validate"]
+WebCoverageModeLiteral = Literal[
+    "track", "standard", "enforce", "deep", "team", "sast_validate"
+]
 
 
 class ApiTestRunCreate(BaseModel):
@@ -383,7 +424,15 @@ class SastRunSummary(BaseModel):
     collection_id: int | None
     document_id: int | None
     source_filename: str | None
+    source_archive_path: str | None = None
+    source_provider: str = "upload"
+    source_locator: str | None = None
+    source_requested_ref: str | None = None
+    source_revision: str | None = None
+    source_archive_sha256: str | None = None
+    source_metadata_json: str | None = None
     name: str
+    analysis_mode: Literal["light", "deep"] = "deep"
     status: str
     triggered_by_run_type: str | None
     triggered_by_run_id: int | None
@@ -456,14 +505,17 @@ class ScanLeadOut(BaseModel):
 
 LLMProviderAPILiteral = Literal[
     "anthropic",
+    "claude_cli",
     "factory_droid",
     "github_copilot",
     "openai_codex",
+    "openai_chatgpt_plan",
     "google_antigravity",
     "openai",
     "openai_compatible",
     "openrouter",
     "google",
+    "google_vertex",
     "bedrock",
     "bedrock_mantle",
     "azure_openai",
@@ -473,8 +525,17 @@ LLMProviderAPILiteral = Literal[
 ]
 
 PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
+    "claude_cli": [
+        "sonnet",
+        "opus",
+        "haiku",
+        "mythos",
+        "mythos-5",
+        "claude-mythos-5",
+    ],
     "factory_droid": [],
     "openai_codex": ["auto"],
+    "openai_chatgpt_plan": ["gpt-6.1-sol"],
     "google_antigravity": [
         "auto",
         "Gemini 3.7 Flash (High)",
@@ -506,6 +567,7 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "claude-3-5-sonnet-20241022",
     ],
     "openai": [
+        "gpt-6-astra",
         "gpt-5.6-luna",
         "gpt-5.6-terra",
         "gpt-5.6-sol",
@@ -533,6 +595,11 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "gemini-2.0-flash",
         "gemini-1.5-pro",
         "gemini-1.5-flash",
+    ],
+    "google_vertex": [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
     ],
     "bedrock": [
         "global.anthropic.claude-opus-4-8",
@@ -599,11 +666,11 @@ class LLMProviderConfigIn(BaseModel):
     base_url: str | None = None
     username: str | None = Field(default=None, max_length=255)
     project_id: str | None = Field(default=None, max_length=120)
+    aws_profile: str | None = Field(default=None, max_length=255)
+    location: str | None = Field(default=None, max_length=120)
     models: list[str] = Field(default_factory=list, min_length=1)
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     api_key: str | None = None
-    max_tpm: int | None = Field(default=None, ge=1)
-    max_rpm: int | None = Field(default=None, ge=1)
 
     @field_validator("models")
     @classmethod
@@ -633,12 +700,42 @@ class LLMProviderConfigIn(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_codex_connection(self) -> "LLMProviderConfigIn":
-        if self.api_format == "openai_codex":
+    def _validate_provider_connection(self) -> "LLMProviderConfigIn":
+        if self.api_format in {"openai_codex", "openai_chatgpt_plan", "claude_cli"}:
+            self.api_key = None
+            self.base_url = None
+            if self.api_format in {"openai_codex", "claude_cli"}:
+                self.username = None
+            elif not self.username:
+                raise ValueError("Select a signed-in ChatGPT account")
+            self.project_id = None
+            self.location = None
+        elif self.api_format == "google_vertex":
+            if not self.project_id:
+                raise ValueError("project_id is required for Google Vertex AI")
+            self.location = self.location or "global"
             self.api_key = None
             self.base_url = None
             self.username = None
-            self.project_id = None
+            for model in self.models:
+                lowered = model.casefold()
+                if (
+                    lowered.startswith(
+                        ("projects/", "models/", "tunedmodels/", "endpoints/")
+                    )
+                    or "/endpoints/" in lowered
+                    or "/models/" in lowered
+                    and not lowered.startswith("publishers/")
+                ):
+                    raise ValueError(
+                        "Google Vertex AI models must be serverless publisher model IDs"
+                    )
+                if "/" not in model and not lowered.startswith("gemini-"):
+                    raise ValueError(
+                        "Use a Gemini model ID or a publisher/model ID for Google Vertex AI"
+                    )
+        else:
+            self.location = None
         return self
 
 
@@ -651,11 +748,12 @@ class LLMProviderConfigOut(BaseModel):
     base_url: str | None
     username: str | None = None
     project_id: str | None = None
+    aws_profile: str | None = None
+    location: str | None = None
     models: list[str] = Field(default_factory=list)
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key: str | None = None
-    max_tpm: int | None = None
     updated_at: datetime
 
 
@@ -668,11 +766,15 @@ class LLMModelDiscoveryRequest(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     username: str | None = None
+    project_id: str | None = None
+    aws_profile: str | None = None
+    location: str | None = None
 
 
 class LLMModelDiscoveryOut(BaseModel):
     models: list[str] = Field(default_factory=list)
     capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    catalog_complete: bool = True
 
 
 class CodexIntegrationConfigIn(BaseModel):
@@ -697,20 +799,24 @@ class LLMConfigIn(BaseModel):
     name: Optional[str] = Field(default=None, max_length=120)
     provider_id: int
     model: str = Field(min_length=1)
-    max_tokens: int = Field(default=70000, ge=1, le=256000)
+    max_tpm: int | None = Field(default=None, ge=1)
+    max_rpm: int | None = Field(default=None, ge=1)
+    max_tokens: int = Field(default=16384, ge=1, le=256000)
     # ``None`` asks the server to use the detected model context window.
     max_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
+    # A capability value discovered by the model form but not yet persisted on
+    # the provider. It remains an automatic limit rather than a manual override.
+    detected_context_tokens: int | None = Field(default=None, ge=1024, le=2_000_000)
     temperature: Optional[float] = Field(default=None)
     reasoning_effort: str | None = Field(default=None, max_length=32)
+    service_tier: str | None = Field(default=None, max_length=32)
     use_vision: bool = False
     force_tool_choice: bool = False
 
     @model_validator(mode="after")
     def _validate_context_window(self) -> "LLMConfigIn":
-        if (
-            self.max_context_tokens is not None
-            and self.max_context_tokens <= self.max_tokens + 1024
-        ):
+        context_tokens = self.max_context_tokens or self.detected_context_tokens
+        if context_tokens is not None and context_tokens <= self.max_tokens + 1024:
             raise ValueError(
                 "max_context_tokens must leave at least 1024 tokens for input"
             )
@@ -738,12 +844,17 @@ class LLMConfigOut(BaseModel):
     base_url: str | None
     username: str | None = None
     project_id: str | None = None
+    aws_profile: str | None = None
+    location: str | None = None
     model: str
+    max_tpm: int | None = None
+    max_rpm: int | None = None
     max_tokens: int
     max_context_tokens: int
     context_limit_source: str = "configured"
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
     use_vision: bool
     force_tool_choice: bool
     updated_at: datetime
@@ -765,9 +876,11 @@ class LLMProfileOut(BaseModel):
     id: int
     name: str
     is_active: bool
-    default_model_id: int | None = None
+    extension_id: str | None = None
+    extension_name: str | None = None
+    default_model_id: int | str | None = None
     default_model_name: str | None = None
-    role_models: dict[str, int] = Field(default_factory=dict)
+    role_models: dict[str, int | str] = Field(default_factory=dict)
     role_model_names: dict[str, str | None] = Field(default_factory=dict)
     updated_at: datetime
 
@@ -790,6 +903,7 @@ class ScannerPolicyBase(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     execution_monitor_enabled: bool = False
+    openai_refusal_recovery_enabled: bool = False
     disable_deterministic_checks: bool = False
     max_consecutive_text_turns: int = Field(default=0, ge=0, le=50)
     enforce_full_coverage_obligations: bool = False
@@ -797,6 +911,7 @@ class ScannerPolicyBase(BaseModel):
     scan_mode: ScanModeLiteral = "aggressive"
     max_probes_per_page: int = Field(default=50, ge=0, le=500)
     thinking_max_steps: int = Field(default=120, ge=1, le=1000)
+    dast_max_concurrent_llm_requests: int = Field(default=4, ge=1, le=100)
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=120.0)
     min_delay_s: float = Field(default=0.05, ge=0.0, le=60.0)
     max_request_body_bytes: int = Field(default=65536, ge=0, le=10 * 1024 * 1024)
@@ -814,6 +929,20 @@ class ScannerPolicyBase(BaseModel):
     allow_subdomains: bool = True
     require_approval_for_destructive: bool = True
     strict_locator_enforcement: bool = True
+    sast_rate_limit_findings: bool = True
+    sast_race_condition_findings: bool = True
+    sast_audit_logging_findings: bool = True
+    sast_defense_in_depth_findings: bool = False
+    sast_dependency_findings: bool = True
+    retire_auto_update: bool = True
+    sast_min_severity: Literal["low", "medium", "high", "critical"] = "low"
+    sast_budget_mode: Literal["adaptive", "fixed"] = "adaptive"
+    sast_baseline_budget: int = Field(default=80, ge=1, le=1000)
+    sast_threat_budget: int = Field(default=60, ge=1, le=1000)
+    sast_worker_budget_max: int = Field(default=250, ge=1, le=1000)
+    sast_closure_budget: int = Field(default=40, ge=1, le=1000)
+    sast_validator_budget: int = Field(default=50, ge=1, le=1000)
+    sast_max_concurrent_llm_requests: int = Field(default=4, ge=1, le=100)
 
     @field_validator("methods_by_mode", mode="before")
     @classmethod
@@ -861,11 +990,21 @@ class ScannerPolicyBase(BaseModel):
             raise ValueError(
                 "methods_by_mode must include methods for the selected scan_mode"
             )
+        if self.sast_budget_mode == "adaptive" and self.sast_worker_budget_max < max(
+            self.sast_baseline_budget, self.sast_threat_budget
+        ):
+            raise ValueError(
+                "sast_worker_budget_max must be at least the baseline and threat minimums"
+            )
         return self
 
 
 class ScannerPolicyIn(ScannerPolicyBase):
-    pass
+    openai_refusal_recovery_enabled: bool | None = None
+
+
+class OpenAIRefusalRecoveryIn(BaseModel):
+    enabled: bool
 
 
 class ScannerPolicyOut(ScannerPolicyBase):
@@ -895,7 +1034,7 @@ class CodeExecutionConfigBase(BaseModel):
     workspace_mb: int = Field(default=16, ge=4, le=64)
     output_limit_bytes: int = Field(default=65536, ge=8192, le=262144)
     artifact_limit_bytes: int = Field(default=10485760, ge=0, le=50 * 1024 * 1024)
-    max_requests_per_execution: int = Field(default=20, ge=0, le=100)
+    max_requests_per_execution: int = Field(default=50, ge=0, le=100)
     max_concurrent_requests: int = Field(default=5, ge=1, le=10)
     max_concurrent_executions: int = Field(default=2, ge=1, le=8)
     retain_redacted_source: bool = True
@@ -964,11 +1103,14 @@ class ComponentMapperConfigOut(ComponentMapperConfigBase):
 
 
 class UpstreamProxyConfigBase(BaseModel):
-    proxy_url: str | None = Field(default=None, max_length=500)
+    scanner_proxy_url: str | None = Field(default=None, max_length=500)
+    llm_proxy_url: str | None = Field(default=None, max_length=500)
+    scanner_ca_bundle_path: str | None = Field(default=None, max_length=1000)
+    llm_ca_bundle_path: str | None = Field(default=None, max_length=1000)
     proxy_scanner: bool = False
     proxy_llm: bool = False
 
-    @field_validator("proxy_url")
+    @field_validator("scanner_proxy_url", "llm_proxy_url")
     @classmethod
     def _normalize_proxy_url(cls, v):
         if not v:
@@ -977,60 +1119,30 @@ class UpstreamProxyConfigBase(BaseModel):
         if not v:
             return None
         if not v.startswith(("http://", "https://")):
-            raise ValueError("proxy_url must start with http:// or https://")
+            raise ValueError("proxy URL must start with http:// or https://")
         return v
 
 
 class UpstreamProxyConfigIn(UpstreamProxyConfigBase):
-    pass
+    @field_validator("scanner_ca_bundle_path", "llm_ca_bundle_path")
+    @classmethod
+    def _validate_ca_bundle_path(cls, value):
+        if not value or not value.strip():
+            return None
+        import ssl
+        from pathlib import Path
+
+        path = Path(value.strip()).expanduser()
+        if not path.is_absolute() or not path.is_file():
+            raise ValueError("CA bundle must be an existing file on the AESPA computer")
+        try:
+            ssl.create_default_context(cafile=str(path))
+        except (OSError, ssl.SSLError) as exc:
+            raise ValueError("CA bundle must contain valid PEM certificates") from exc
+        return str(path)
 
 
 class UpstreamProxyConfigOut(UpstreamProxyConfigBase):
-    updated_at: datetime
-
-
-class BurpRestApiConfigBase(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    enabled: bool = False
-    api_url: str = Field(default="http://127.0.0.1:1337", min_length=1, max_length=500)
-    api_key: str | None = None
-    scan_configuration_name: str | None = Field(
-        default="Audit checks - all except time-based detection methods",
-        max_length=200,
-    )
-    scan_sqli: bool = True
-    scan_xss: bool = True
-    scan_command_injection: bool = True
-    scan_path_traversal: bool = True
-    scan_ssrf: bool = True
-    scan_xxe: bool = True
-    scan_ssti: bool = True
-
-    @field_validator("api_url")
-    @classmethod
-    def _normalize_api_url(cls, v: str) -> str:
-        v = v.strip().rstrip("/")
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("api_url must start with http:// or https://")
-        return v
-
-    @field_validator("scan_configuration_name")
-    @classmethod
-    def _normalize_scan_configuration_name(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        v = v.strip()
-        return v or None
-
-
-class BurpRestApiConfigIn(BurpRestApiConfigBase):
-    pass
-
-
-class BurpRestApiConfigOut(BurpRestApiConfigBase):
-    has_api_key: bool = False
-    api_key: str | None = None
     updated_at: datetime
 
 
@@ -1057,7 +1169,6 @@ class SpecialistAgentConfigBase(BaseModel):
     dispatch_crypto: bool = True
     dispatch_config: bool = False
     dispatch_file_upload: bool = True
-    trigger_specialist_on_burp: bool = False
 
 
 class SpecialistAgentConfigIn(SpecialistAgentConfigBase):
@@ -1065,6 +1176,46 @@ class SpecialistAgentConfigIn(SpecialistAgentConfigBase):
 
 
 class SpecialistAgentConfigOut(SpecialistAgentConfigBase):
+    updated_at: datetime
+
+
+# ── Deep web DAST config schemas ─────────────────────────────────────────────
+
+
+class DeepScanConfigBase(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    max_concurrent_workers: int = Field(default=6, ge=1, le=20)
+    max_concurrent_planners: int = Field(default=4, ge=1, le=20)
+    max_tasks: int = Field(default=200, ge=1, le=1000)
+    max_steps_per_task: int = Field(default=30, ge=1, le=200)
+    initial_variants_per_campaign: int = Field(default=2, ge=1, le=8)
+    max_variants_per_campaign: int = Field(default=4, ge=1, le=12)
+    max_total_variants: int = Field(default=400, ge=1, le=4000)
+    adaptive_follow_up: bool = True
+    minimum_signal_strength: int = Field(default=2, ge=1, le=3)
+    reuse_captured_baselines: bool = True
+    include_sast_leads: bool = True
+    include_recon_checks: bool = True
+
+    @model_validator(mode="after")
+    def _validate_variant_limits(self) -> "DeepScanConfigBase":
+        if self.initial_variants_per_campaign + 1 > self.max_variants_per_campaign:
+            raise ValueError(
+                "Maximum variants per tester must include the baseline and all initial variants"
+            )
+        if self.max_total_variants < self.max_variants_per_campaign:
+            raise ValueError(
+                "Maximum variants per run must be at least the per-tester maximum"
+            )
+        return self
+
+
+class DeepScanConfigIn(DeepScanConfigBase):
+    pass
+
+
+class DeepScanConfigOut(DeepScanConfigBase):
     updated_at: datetime
 
 
@@ -1170,6 +1321,8 @@ class BrowserDebugConfigIn(BrowserDebugConfigBase):
 
 class BrowserDebugConfigOut(BrowserDebugConfigBase):
     updated_at: datetime
+    playwright_chromium_available: bool = True
+    playwright_chromium_installing: bool = False
     graphical_display_available: bool = True
     graphical_display_message: str | None = None
 
@@ -1199,29 +1352,35 @@ class LLMExportProviderItem(BaseModel):
     base_url: str | None = None
     username: str | None = None
     project_id: str | None = None
+    aws_profile: str | None = None
+    location: str | None = None
     models: list[str]
     model_capabilities: dict[str, dict[str, Any]] = Field(default_factory=dict)
     has_api_key: bool = False
     api_key: str | None = None
-    max_tpm: int | None = None
-    max_rpm: int | None = None
+    # Accepted when importing version 1 exports. Version 2 exports omit these.
+    max_tpm: int | None = Field(default=None, exclude=True)
+    max_rpm: int | None = Field(default=None, exclude=True)
 
 
 class LLMExportProfileItem(BaseModel):
     name: str
     provider_name: str
     model: str
-    max_tokens: int = 70000
+    max_tpm: int | None = None
+    max_rpm: int | None = None
+    max_tokens: int = 16384
     max_context_tokens: int | None = None
     temperature: Optional[float] = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
     use_vision: bool = False
     force_tool_choice: bool = False
     is_active: bool = False
 
 
 class LLMConfigExport(BaseModel):
-    version: int = 1
+    version: int = 2
     exported_at: datetime
     providers: list[LLMExportProviderItem]
     profiles: list[LLMExportProfileItem]
@@ -1237,6 +1396,37 @@ class LLMImportResult(BaseModel):
 # ── Test run schemas ──────────────────────────────────────────────────────────
 
 
+class SavedCrawlCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class SavedCrawlUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class SavedCrawlOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    site_id: int
+    name: str
+    notes: str | None = None
+    source_run_id: int | None = None
+    source_run_exists: bool = False
+    source_run_name: str | None = None
+    crawler_mode: str
+    page_selection: str = "each_url"
+    page_count: int
+    size_bytes: int
+    created_at: datetime
+
+
 class TestRunCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -1246,8 +1436,14 @@ class TestRunCreate(BaseModel):
     max_pages: int = Field(default=500, ge=5, le=500)
     llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
     crawler_mode: Literal["url", "interactive"] = "url"
+    page_selection: Literal["each_url", "group_similar"] = "each_url"
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
+    llm_budget_usd: float | None = Field(default=None, gt=0)
+
+
+class TestRunBudgetUpdate(BaseModel):
+    llm_budget_usd: float | None = Field(default=None, gt=0)
 
 
 class TestRunUpdate(BaseModel):
@@ -1255,8 +1451,11 @@ class TestRunUpdate(BaseModel):
     max_pages: int = Field(ge=5, le=500)
     llm_max_concurrency: int | None = Field(default=None, ge=0, le=100)
     crawler_mode: Literal["url", "interactive"] | None = None
+    page_selection: Literal["each_url", "group_similar"] | None = None
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
+    # Left unchanged when omitted; null removes the limit.
+    llm_budget_usd: float | None = Field(default=None, gt=0)
 
 
 class StartCrawlBody(BaseModel):
@@ -1267,6 +1466,10 @@ class StartCrawlBody(BaseModel):
     """
 
     crawl_credential_id: int | None = None
+    start_pentest_after_crawl: bool = False
+    coverage_mode: WebCoverageModeLiteral | None = None
+    crawler_mode: Literal["url", "interactive"] | None = None
+    page_selection: Literal["each_url", "group_similar"] | None = None
 
 
 class CredentialSummary(BaseModel):
@@ -1294,7 +1497,12 @@ class TestRunSummary(BaseModel):
     max_pages: int
     llm_max_concurrency: int | None = None
     crawler_mode: str = "url"
+    page_selection: str = "each_url"
+    crawl_started_once: bool = False
+    route_groups: list[dict] = Field(default_factory=list)
     scan_mode: str = "aggressive"
+    coverage_mode: str = "track"
+    scan_mode_locked: bool = False
     scan_status: str = "idle"
     scan_total_pages: int = 0
     scan_pages_done: int = 0
@@ -1309,6 +1517,7 @@ class TestRunSummary(BaseModel):
     scanner_policy: dict = Field(default_factory=dict)
     llm_config_id: int | None = None
     llm_profile_id: int | None = None
+    llm_budget_usd: float | None = None
     # Per-credential crawl progress: {username: {current_url, pages_visited}}
     per_user_progress: dict = Field(default_factory=dict)
     scope_hosts: list[str] = Field(default_factory=list)
@@ -1347,8 +1556,8 @@ class ActiveJobSummary(BaseModel):
     run_id: int
     site_id: Optional[int] = None
     site_name: Optional[str] = None
-    application_id: Optional[int] = None
-    application_name: Optional[str] = None
+    system_id: Optional[int] = None
+    system_name: Optional[str] = None
     run_name: str
     job_type: str
     status: str
@@ -1569,6 +1778,10 @@ class TrafficEntryOut(BaseModel):
     page_id: int | None = None
     session_label: str | None = None
     interaction_id: str | None = None
+    purpose: str | None = None
+    owasp_category: str | None = None
+    coverage_cell_id: int | None = None
+    test_class: str | None = None
 
 
 class ScanFindingOut(BaseModel):
@@ -1699,20 +1912,20 @@ class ScanCheckpointStatusOut(BaseModel):
     updated_at: datetime | None = None
 
 
-# ── Applications & multi-repository campaigns ────────────────────────────────
+# ── Systems & multi-repository campaigns ────────────────────────────────
 
 
-class ApplicationCreate(BaseModel):
+class SystemCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = None
 
 
-class ApplicationUpdate(BaseModel):
+class SystemUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
 
 
-class ApplicationSummary(BaseModel):
+class SystemSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -1726,26 +1939,26 @@ class ApplicationSummary(BaseModel):
     last_campaign_status: str | None = None
 
 
-class ApplicationDetail(ApplicationSummary):
+class SystemDetail(SystemSummary):
     pass
 
 
-class ApplicationComponentCreate(BaseModel):
+class SystemComponentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     role: str | None = None
     description: str | None = None
 
 
-class ApplicationComponentUpdate(BaseModel):
+class SystemComponentUpdate(BaseModel):
     role: str | None = None
     description: str | None = None
 
 
-class ApplicationComponentOut(BaseModel):
+class SystemComponentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     name: str
     role: str | None
     description: str | None
@@ -1766,20 +1979,20 @@ class ComponentSnapshotOut(BaseModel):
     created_at: datetime
 
 
-class ApplicationTargetCreate(BaseModel):
+class SystemTargetCreate(BaseModel):
     target_type: Literal["site", "api_collection"]
     target_id: int
 
 
-class ApplicationTargetUpdate(BaseModel):
+class SystemTargetUpdate(BaseModel):
     component_id: int | None = None
 
 
-class ApplicationTargetOut(BaseModel):
+class SystemTargetOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     target_type: str
     target_id: int
     component_id: int | None = None
@@ -1797,7 +2010,7 @@ class ComponentTargetHintOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     component_id: int
     target_id: int
     note: str | None
@@ -1865,7 +2078,7 @@ class CampaignSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    application_id: int
+    system_id: int
     name: str
     status: str
     max_parallel_sast: int
@@ -1997,6 +2210,85 @@ class LeadTargetMappingReviewResult(BaseModel):
 class LeadTargetMappingEditRequest(BaseModel):
     expected_updated_at: datetime | None = None
     path: dict = Field(default_factory=dict)
+
+
+class FrontendSurfaceOut(BaseModel):
+    """Browser-visible page, action, and request for a validation case."""
+
+    ui_route: dict = Field(default_factory=dict)
+    ui_action: dict = Field(default_factory=dict)
+    browser_request: dict = Field(default_factory=dict)
+
+
+class ServiceHopOut(BaseModel):
+    """One server-side route or handler in an ordered static path."""
+
+    fact_id: int | None = None
+    component_id: int | None = None
+    component_name: str | None = None
+    kind: str = ""
+    method: str | None = None
+    path: str | None = None
+    request_role: str | None = None
+    evidence_location: str | None = None
+    detail: dict = Field(default_factory=dict)
+
+
+class LiveBindingOut(BaseModel):
+    """Crawl evidence bound to a browser request."""
+
+    status: str = "pending"
+    candidate_count: int = 0
+    page_id: int | None = None
+    action_id: int | None = None
+    traffic_id: int | None = None
+    endpoint_id: int | None = None
+    interaction_id: str | None = None
+    session_label: str | None = None
+    observed_request: dict = Field(default_factory=dict)
+    evidence_ids: list[str] = Field(default_factory=list)
+    candidates: list[dict] = Field(default_factory=list)
+
+
+class ValidationAssertionOut(BaseModel):
+    """The claim and outcomes used by a focused validation."""
+
+    claim: str = ""
+    mutation_points: list = Field(default_factory=list)
+    secure_outcome: str = ""
+    vulnerable_outcome: str = ""
+    prerequisites: list = Field(default_factory=list)
+
+
+class CampaignValidationCaseOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    mapping_id: int
+    target_member_id: int
+    origin_lead_id: int
+    source_lead: dict = Field(default_factory=dict)
+    assertion_key: str
+    frontend_surface: FrontendSurfaceOut = Field(default_factory=FrontendSurfaceOut)
+    service_hops: list[ServiceHopOut] = Field(default_factory=list)
+    live_binding: LiveBindingOut = Field(default_factory=LiveBindingOut)
+    validation_assertion: ValidationAssertionOut = Field(
+        default_factory=ValidationAssertionOut
+    )
+    static_path: dict = Field(default_factory=dict)
+    readiness_status: str
+    blocker_codes: list[str] = Field(default_factory=list)
+    copied_lead_id: int | None = None
+    copied_lead_reference: str | None = None
+    finding_id: int | None = None
+    finding_reference: str | None = None
+    execution_status: str
+    outcome_reason: str | None = None
+    baseline_evidence: dict = Field(default_factory=dict)
+    mutated_evidence: dict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
 
 
 class CampaignSupplementalValidationRequest(BaseModel):

@@ -2,6 +2,19 @@ import { DEFAULT_LLM_FORM } from "./providerMetadata.js";
 
 import { sortModelNames } from "../../shared/lib/modelSorting.js";
 
+export function modelDefaults(provider, model) {
+  const capability = provider?.model_capabilities?.[model] || {};
+  const context = Number(capability.context_window_tokens || 0);
+  const output = Number(capability.max_output_tokens || 0);
+  return {
+    ...(context >= 1024
+      ? { max_context_tokens: context, detected_context_tokens: context, max_context_auto: true }
+      : {}),
+    ...(output > 0 ? { max_tokens: output } : {}),
+    ...(capability.default_effort ? { reasoning_effort: capability.default_effort } : {}),
+  };
+}
+
 export function llmProfileToForm(cfg, providers = []) {
   const providerId = cfg?.provider_id || providers[0]?.id || "";
   const provider = providers.find((p) => p.id === providerId) || providers[0];
@@ -11,14 +24,21 @@ export function llmProfileToForm(cfg, providers = []) {
       name: cfg.name ?? (provider?.name && cfg.model ? `${provider.name}/${cfg.model}` : "Default"),
       provider_id: providerId,
       model: cfg.model,
+      max_tpm: cfg.max_tpm != null ? cfg.max_tpm : "",
+      max_rpm: cfg.max_rpm != null ? cfg.max_rpm : "",
       max_tokens: cfg.max_tokens,
       max_context_tokens: cfg.max_context_tokens || 128000,
       max_context_auto: cfg.context_limit_source !== "manual",
+      detected_context_tokens:
+        cfg.context_limit_source !== "manual" && cfg.context_limit_source !== "fallback"
+          ? cfg.max_context_tokens
+          : null,
       temperature: hasTemp ? cfg.temperature : 0.2,
       use_temperature: hasTemp,
       use_vision: cfg.use_vision ?? false,
       force_tool_choice: cfg.force_tool_choice ?? false,
       reasoning_effort: cfg.reasoning_effort || "",
+      service_tier: cfg.service_tier || "",
     };
   }
   const defaultModel = sortModelNames(provider?.models)[0] || "";
@@ -26,6 +46,7 @@ export function llmProfileToForm(cfg, providers = []) {
     provider?.name && defaultModel ? `${provider.name}/${defaultModel}` : defaultModel;
   return {
     ...DEFAULT_LLM_FORM,
+    ...modelDefaults(provider, defaultModel),
     name: defaultName,
     provider_id: provider?.id || "",
     model: defaultModel,
@@ -37,11 +58,17 @@ export function llmPayload(form) {
     name: form.name.trim(),
     provider_id: Number(form.provider_id),
     model: form.model.trim(),
+    max_tpm: form.max_tpm !== "" ? Number(form.max_tpm) : null,
+    max_rpm: form.max_rpm !== "" ? Number(form.max_rpm) : null,
     max_tokens: Number(form.max_tokens),
     max_context_tokens: form.max_context_auto ? null : Number(form.max_context_tokens),
+    detected_context_tokens: form.max_context_auto
+      ? Number(form.detected_context_tokens) || null
+      : null,
     temperature: form.use_temperature ? Number(form.temperature) : null,
     use_vision: form.use_vision,
     force_tool_choice: form.force_tool_choice,
     reasoning_effort: form.reasoning_effort || null,
+    service_tier: form.service_tier || null,
   };
 }

@@ -1,25 +1,69 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import { runWorkflowStatus } from "../../shared/runs/presentation.jsx";
 
 import {
+  canResumeSelectedScanMode,
+  hasResumableExperimentalScan,
   isCrawlerAgentActive,
   resolveRunPrimaryAction,
   RUN_PRIMARY_ACTION,
   runStatusFromThinkingStatus,
+  settleAgentsAfterScan,
 } from "./runState.js";
+
+test("a terminal scan update clears active scan agents", () => {
+  const agents = [
+    { id: "scanner", status: "active" },
+    { id: "specialist-1", status: "active" },
+    { id: "crawler", status: "active" },
+    { id: "validator-1", status: "active" },
+  ];
+  assert.deepEqual(
+    settleAgentsAfterScan(agents, "paused").map((agent) => agent.status),
+    ["paused", "paused", "active", "active"],
+  );
+  assert.deepEqual(
+    settleAgentsAfterScan(agents, "complete").map((agent) => agent.status),
+    ["idle", "idle", "active", "active"],
+  );
+  assert.deepEqual(
+    settleAgentsAfterScan(agents, "paused", false).map((agent) => agent.status),
+    ["paused", "paused", "active", "paused"],
+  );
+});
+
+test("only resumes when the selected scan mode matches the saved mode", () => {
+  assert.equal(canResumeSelectedScanMode(true, "deep", "deep"), true);
+  assert.equal(canResumeSelectedScanMode(true, "track", "deep"), false);
+  assert.equal(canResumeSelectedScanMode(true, "deep", "track"), false);
+  assert.equal(canResumeSelectedScanMode(false, "track", "track"), false);
+});
+
+test("stopped and quota-paused experimental scans remain resumable without a checkpoint", () => {
+  assert.equal(hasResumableExperimentalScan({ coverage_mode: "deep", status: "stopped" }), true);
+  assert.equal(hasResumableExperimentalScan({ coverage_mode: "team", status: "paused" }), true);
+  assert.equal(hasResumableExperimentalScan({ coverage_mode: "team", status: "complete" }), false);
+  assert.equal(hasResumableExperimentalScan({ coverage_mode: "track", status: "stopped" }), false);
+});
+
+test("the run badge says stopped", () => {
+  assert.equal(runWorkflowStatus({ status: "stopped" }).label, "stopped");
+});
+
+test("the run badge distinguishes a finished crawl from a finished scan", () => {
+  assert.equal(runWorkflowStatus({ status: "complete", phase: "crawled" }).label, "Crawled");
+  assert.equal(runWorkflowStatus({ status: "complete", phase: "finished" }).label, "completed");
+  assert.equal(
+    runWorkflowStatus({ status: "complete", phase: "crawled", thinking_status: "complete" }).label,
+    "Dynamic Scan completed",
+  );
+});
 
 test("crawler activity follows its own agent state", () => {
   assert.equal(isCrawlerAgentActive({ status: "active" }), true);
   assert.equal(isCrawlerAgentActive({ status: "complete" }), false);
   assert.equal(isCrawlerAgentActive({ status: "failed" }), false);
-});
-
-test("crawler can remain active while the Test Lead runs concurrently", () => {
-  const run = { status: "running", phase: "scanning" };
-  const crawler = { status: "active" };
-
-  assert.equal(run.phase, "scanning");
-  assert.equal(isCrawlerAgentActive(crawler), true);
 });
 
 test("crawler remains active while a stop request is unwinding", () => {
