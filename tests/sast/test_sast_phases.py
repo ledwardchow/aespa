@@ -452,7 +452,7 @@ def test_sast_summaries_prefer_live_scanner_status(
     monkeypatch.setattr(
         sast_scanner,
         "is_sast_scan_running",
-        lambda run_id: run_id == sast_run_id,
+        lambda run_id, *, analysis_mode=None: run_id == sast_run_id,
     )
 
     detail = client.get(f"/api/sast-runs/{sast_run_id}")
@@ -1959,6 +1959,59 @@ def test_reconciled_duplicate_does_not_schedule_another_validator(analysis_mode)
 
     reconcile_candidate_ledger(candidates)
     assert scanner_module._pending_candidate_ids(candidates) == [3]
+
+
+def test_deep_source_items_finish_before_threat_checks(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sast_scanner.workprogram_svc,
+        "worker_payload",
+        lambda _worker_id: {"work_items": [{"work_item_id": 7}]},
+    )
+    open_items = [7]
+    monkeypatch.setattr(
+        sast_scanner.workprogram_svc,
+        "unresolved_for_worker",
+        lambda _worker_id: open_items,
+    )
+    recorded = []
+    monkeypatch.setattr(
+        sast_scanner.semantic_svc,
+        "record_obligation_disposition",
+        lambda *_args, **_kwargs: (recorded.append(True) or True, "Recorded."),
+    )
+    monkeypatch.setattr(sast_scanner, "_set_phase", lambda *_args, **_kwargs: None)
+    executor = sast_scanner._make_tool_executor(
+        9001,
+        tmp_path,
+        None,
+        coverage={},
+        assigned_worker_id=3,
+        semantic_planning={},
+        semantic_obligation_keys={"check-1"},
+    )
+    try:
+        blocked = asyncio.run(
+            executor(
+                "record_semantic_disposition",
+                {"obligation_key": "check-1", "status": "safe"},
+                1,
+            )
+        )
+        assert "work item IDs: 7" in blocked
+        assert recorded == []
+
+        open_items.clear()
+        accepted = asyncio.run(
+            executor(
+                "record_semantic_disposition",
+                {"obligation_key": "check-1", "status": "safe"},
+                2,
+            )
+        )
+        assert accepted == "Recorded."
+        assert recorded == [True]
+    finally:
+        sast_scanner._candidates.pop(9001, None)
 
 
 @pytest.mark.parametrize("analysis_mode", ["light", "deep"])

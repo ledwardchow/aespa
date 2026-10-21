@@ -170,8 +170,8 @@ def _candidate_validation_message(candidate: dict) -> str:
     return (
         f"Validate only lead {reference} (internal candidate #{candidate_id}). "
         "Do not validate any other "
-        "lead in the run. Call get_candidate for this candidate, inspect "
-        "the relevant source with the read-only file tools, then call "
+        "lead in the run. Inspect the relevant source with the read-only "
+        "file tools, then call "
         "validate_candidate exactly once followed by done.\n\n"
         "Assigned candidate:\n" + json.dumps(candidate, ensure_ascii=False, indent=2)
     )

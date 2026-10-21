@@ -767,6 +767,14 @@ def _make_tool_executor(
             obligation_key = str(tool_input.get("obligation_key", ""))
             if semantic_planning is None or obligation_key not in assigned_semantic:
                 return "Error: security check is not assigned to this worker."
+            if assigned_worker_id is not None:
+                unresolved = workprogram_svc.unresolved_for_worker(assigned_worker_id)
+                if unresolved:
+                    return (
+                        "Error: finish the assigned source work items before "
+                        "closing threat-based security checks. Open work item IDs: "
+                        + ", ".join(str(item_id) for item_id in unresolved[:20])
+                    )
             ok, message = semantic_svc.record_obligation_disposition(
                 semantic_planning,
                 obligation_key,
@@ -2741,8 +2749,22 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                     "from its saved checkpoint."
                 ) from exc
 
-        if len(candidates) > candidates_before_closure:
+        pending_closure = any(
+            candidate.get("discovery_strategy") == "closure"
+            and candidate.get("validation_status") == "pending"
+            for candidate in candidates
+        )
+        if len(candidates) > candidates_before_closure or pending_closure:
             closure_reconciliation = _reconcile_candidate_ledger(sast_run_id)
+            closure_fix_merges = semantic_svc.reconcile_closure_candidates_by_fix(
+                candidates
+            )
+            closure_reconciliation["closure_fix_merged"] = closure_fix_merges
+            closure_reconciliation["merged"] += closure_fix_merges
+            closure_reconciliation["unique"] -= closure_fix_merges
+            if closure_fix_merges:
+                _sync_candidates_to_db(sast_run_id, run.collection_id)
+                _persist_candidate_state(sast_run_id)
             unscored_count = _close_unscored_candidates(candidates)
             if unscored_count:
                 completion_status = "partial"
@@ -3523,8 +3545,13 @@ async def stop_sast_scan_and_wait(sast_run_id: int, timeout: float = 5.0) -> boo
     return stopped
 
 
-def is_sast_scan_running(sast_run_id: int) -> bool:
-    if _is_light_run(sast_run_id):
+def is_sast_scan_running(sast_run_id: int, *, analysis_mode: str | None = None) -> bool:
+    is_light = (
+        analysis_mode == "light"
+        if analysis_mode is not None
+        else _is_light_run(sast_run_id)
+    )
+    if is_light:
         from aespa.services import sast_scanner_light
 
         return sast_scanner_light.is_sast_scan_running(sast_run_id)

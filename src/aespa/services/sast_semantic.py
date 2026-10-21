@@ -1099,6 +1099,69 @@ def reconcile_candidate_ledger(candidates: list[dict[str, Any]]) -> dict[str, in
     }
 
 
+def reconcile_closure_candidates_by_fix(candidates: list[dict[str, Any]]) -> int:
+    """Fold new closure leads into an earlier validated lead with the same fix.
+
+    The ordinary pre-validation reconciliation already handles matching source
+    paths. Closure can also describe the same validated cause from another
+    route, so compare exact fix anchors and root causes before scheduling a
+    second validator. Keep the validated lead as the canonical result.
+    """
+
+    validated = [
+        item
+        for item in candidates
+        if item.get("validation_status") == "confirmed"
+        and item.get("reportable")
+        and not item.get("reconciled_duplicate")
+        and item.get("fix_location")
+        and item.get("validated_root_cause")
+    ]
+    merged = 0
+    for closure in candidates:
+        if (
+            closure.get("discovery_strategy") != "closure"
+            or closure.get("reconciled_duplicate")
+            or closure.get("validation_status") != "pending"
+        ):
+            continue
+        fix = closure.get("discovery_fix_location")
+        cause = closure.get("discovery_root_cause")
+        if not fix or not cause:
+            continue
+        for previous in validated:
+            if not same_fix_anchor(previous["fix_location"], fix):
+                continue
+            cause_tokens = _tokens(cause)
+            if not cause_tokens or cause_tokens != _tokens(
+                previous["validated_root_cause"]
+            ):
+                continue
+            if not _compatible_issue_markers(previous, closure):
+                continue
+            previous_family = _candidate_family(previous)
+            closure_family = _candidate_family(closure)
+            if previous_family and closure_family and previous_family != closure_family:
+                continue
+            previous_params = _candidate_query_parameters(previous)
+            closure_params = _candidate_query_parameters(closure)
+            if (
+                previous_params
+                and closure_params
+                and not previous_params & closure_params
+            ):
+                continue
+            if _merge_reconciled_candidate(
+                previous,
+                closure,
+                stage="closure_before_validation",
+                reason="Same validated root cause and fix location.",
+            ):
+                merged += 1
+            break
+    return merged
+
+
 def _uncertain_duplicate_pairs(
     candidates: list[dict[str, Any]], limit: int = 32
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:

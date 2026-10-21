@@ -8,6 +8,7 @@ from aespa.services.sast_semantic import (
     lead_anchor_error,
     merge_candidate_by_worker,
     parse_fix_anchor,
+    reconcile_closure_candidates_by_fix,
     reconcile_validated_candidates,
     related_candidate_summary,
     same_fix_anchor,
@@ -235,6 +236,62 @@ def test_fix_grouping_skips_leads_without_shared_files():
     result = asyncio.run(group_candidates_by_fix(candidates, llm, None))
     assert result["status"] == "no_groups"
     assert llm.prompts == []
+
+
+def test_closure_reuses_validated_fix_without_another_validator():
+    validated = _lead(
+        1,
+        title="JWT signature verification missing",
+        validation_status="confirmed",
+        reportable=True,
+        fix_location="src/Auth.php:50 (Auth::decode)",
+        validated_root_cause="JWT signature is never verified in decode.",
+        evidence="First route reaches decode.",
+    )
+    closure = _lead(
+        2,
+        title="Forged JWT reaches another route",
+        location="src/Admin.php:20",
+        source_trace={"file": "src/Admin.php", "line": 20},
+        sink_trace={"file": "src/Admin.php", "line": 25},
+        discovery_root_cause="JWT signature is never verified in decode.",
+        discovery_strategy="closure",
+        evidence="Second route also reaches decode.",
+    )
+    candidates = [validated, closure]
+
+    assert reconcile_closure_candidates_by_fix(candidates) == 1
+    assert closure["validation_status"] == "dismissed"
+    assert closure["reconciled_into_candidate_id"] == 1
+    assert "Second route" in validated["evidence"]
+    assert reconcile_closure_candidates_by_fix(candidates) == 0
+
+
+def test_closure_keeps_distinct_cause_for_independent_validation():
+    validated = _lead(
+        1,
+        validation_status="confirmed",
+        reportable=True,
+        fix_location="src/Auth.php:50 (Auth::decode)",
+        validated_root_cause="JWT signature is never verified in decode.",
+    )
+    closure = _lead(
+        2,
+        discovery_strategy="closure",
+        discovery_root_cause="Admin role check is missing on routes.",
+    )
+    different_jwt_check = _lead(
+        3,
+        discovery_strategy="closure",
+        discovery_root_cause="JWT expiration is never verified in decode.",
+    )
+
+    assert (
+        reconcile_closure_candidates_by_fix([validated, closure, different_jwt_check])
+        == 0
+    )
+    assert closure["validation_status"] == "pending"
+    assert different_jwt_check["validation_status"] == "pending"
 
 
 def test_validated_match_uses_shared_fix_across_categories():

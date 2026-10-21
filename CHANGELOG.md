@@ -28,6 +28,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **SAST scans list**: The list now loads one page at a time. You can show 10, 25, 50, or 100 scans per page and move between pages. Sorting still applies to the full list. Benchmark badges now load link IDs instead of full saved results, and checking scan status no longer reloads each listed scan from the database.
 
+- **SAST source review efficiency**: Light and Deep scan agents can begin reviewing their assigned work or candidate without fetching the same details again. They can still look up the current record when needed.
+
+- **Deep source reviews**: Deep scan workers now finish their assigned source checks before closing threat-based checks. They record separate leads found during a trace, and closure leads that match an already validated root cause and fix share that result instead of starting another validator.
+
 - **Python sandbox image**: AESPA now looks for `ledwardchow/aespa-python-executor:latest` by default. Saved settings using the previous default image move to `:latest`; custom image names stay the same. Pull the latest image before enabling the sandbox.
 
 - **Site page tabs**: A site's page now has Test runs, Saved crawls, and Site details tabs. The base URL, login setting, and account count appear under the site name. Site details holds the site settings that used to open on a separate Edit site page, and saves without leaving the page; unsaved changes are kept while you look at another tab and can be discarded. Old Edit site links open the Site details tab. Test runs now fills the space below the tabs, so it stays visible in short windows, and each run takes one line with its profile in its own column, matching the API test runs list. Saved crawls uses the same table layout as other lists.

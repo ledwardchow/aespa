@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -17,6 +18,7 @@ from aespa.services.prompts.test_lead import (
 )
 from aespa.services.scan_leads import (
     format_lead_index_for_validation,
+    format_leads_for_run,
     format_leads_for_scan_context,
     get_lead_detail_for_run,
 )
@@ -216,6 +218,37 @@ def test_validation_index_includes_all_leads_and_dynamic_objective(
     assert "/items/24" in index
     assert "validate object 24" in index
     assert "static-analysis hypothesis" in index.lower()
+
+
+def test_imported_unknown_confidence_stays_unknown_in_scanner_context(
+    isolated_db_engine,
+):
+    run = _web_run(isolated_db_engine)
+    unknown = _imported_lead(
+        isolated_db_engine,
+        run_type="web",
+        run_id=run.id,
+        title="Unknown score",
+        producer_run_type="external",
+        confidence=0,
+        source_trace_json=json.dumps({"confidence_unknown": True}),
+    )
+    _imported_lead(
+        isolated_db_engine,
+        run_type="web",
+        run_id=run.id,
+        title="Explicit zero",
+        producer_run_type="external",
+        confidence=0,
+        source_trace_json=json.dumps({"confidence_unknown": False}),
+    )
+    index = format_lead_index_for_validation("web", run.id)
+    context = format_leads_for_run("web", run.id)
+    assert "[Unknown confidence] Unknown score" in index
+    assert "[0% confidence] Explicit zero" in index
+    assert "Confidence: Unknown" in context
+    assert "Confidence: 0%" in context
+    assert get_lead_detail_for_run("web", run.id, unknown.id)["confidence"] is None
 
 
 def test_quick_scan_context_includes_every_open_lead(isolated_db_engine):
