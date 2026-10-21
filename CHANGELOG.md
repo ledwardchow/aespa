@@ -22,6 +22,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **External scanner leads**: Import other JSON, unstructured Markdown, and plain text reports using the selected run's model. Preview shows the proposed leads and marks missing confidence as Unknown. Import saves the previewed leads without another model call. Reports needing model review have a 128 KiB limit; SARIF and structured Markdown keep their direct import path.
+
 - **Python sandbox image**: AESPA now looks for `ledwardchow/aespa-python-executor:latest` by default. Saved settings using the previous default image move to `:latest`; custom image names stay the same. Pull the latest image before enabling the sandbox.
 
 - **Site page tabs**: A site's page now has Test runs, Saved crawls, and Site details tabs. The base URL, login setting, and account count appear under the site name. Site details holds the site settings that used to open on a separate Edit site page, and saves without leaving the page; unsaved changes are kept while you look at another tab and can be discarded. Old Edit site links open the Site details tab. Test runs now fills the space below the tabs, so it stays visible in short windows, and each run takes one line with its profile in its own column, matching the API test runs list. Saved crawls uses the same table layout as other lists.

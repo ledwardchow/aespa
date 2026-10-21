@@ -30,3 +30,26 @@ test("keeps ordinary proof gap lists intact", () => {
     "Missing route proof\n\nNo live test",
   );
 });
+
+test("shows missing imported confidence as Unknown and explicit zero as 0%", () => {
+  const { rerender } = render(
+    <SastLeadDetails
+      lead={{
+        producer_run_type: "external",
+        confidence: 0,
+        source_trace_json: JSON.stringify({ confidence_unknown: true }),
+      }}
+    />,
+  );
+  expect(screen.getByText("Confidence").parentElement.textContent).toContain("Unknown");
+  rerender(
+    <SastLeadDetails
+      lead={{
+        producer_run_type: "external",
+        confidence: 0,
+        source_trace_json: JSON.stringify({ confidence_unknown: false }),
+      }}
+    />,
+  );
+  expect(screen.getByText("Confidence").parentElement.textContent).toContain("0%");
+});

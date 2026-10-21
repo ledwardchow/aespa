@@ -67,7 +67,13 @@ export function ReportImportPanel({
     onBusyChange(true);
     setError(null);
     try {
-      const result = await importLeadReport(runKind, runId, file, !importNow);
+      const result = await importLeadReport(
+        runKind,
+        runId,
+        file,
+        !importNow,
+        importNow ? preview?.prepared : undefined,
+      );
       if (importNow) {
         await onImported(result.imported);
         onClose();
@@ -93,7 +99,7 @@ export function ReportImportPanel({
         <input
           id="sast-report-file"
           type="file"
-          accept=".sarif,.json,.md,.markdown"
+          accept=".sarif,.json,.md,.markdown,.txt"
           disabled={busy}
           onChange={(event) => {
             setFile(event.target.files?.[0] ?? null);
@@ -102,8 +108,10 @@ export function ReportImportPanel({
           }}
         />
         <p>
-          SARIF 2.1.0 or structured Markdown, up to 5 MiB. Imported findings remain unverified until
-          DAST investigates them.
+          SARIF 2.1.0 and structured Markdown use direct import. Other JSON, Markdown, and text
+          reports use the run's model during preview. Reports can be up to 5 MiB; reports needing AI
+          review must be 128 KiB or smaller. Imported findings remain unverified until DAST
+          investigates them.
         </p>
         <p>
           For Markdown, use one <code>## Finding title</code> section per lead, with Severity and
@@ -142,6 +150,12 @@ export function ReportImportPanel({
             {preview.warnings.map((warning) => (
               <span key={warning}>{warning}</span>
             ))}
+            {preview.format === "AI-reviewed report" && (
+              <span>
+                These are proposed leads. Compare them with the source report for missing findings
+                before importing.
+              </span>
+            )}
             {preview.total === 0 && <span>No importable findings were found in this report.</span>}
           </div>
           <div className={styles.results}>
@@ -154,6 +168,25 @@ export function ReportImportPanel({
                     {item.already_imported ? " · Already imported" : ""}
                   </span>
                   <span>{item.location || "Location not provided"}</span>
+                  <span>
+                    Confidence:{" "}
+                    {item.confidence == null ? "Unknown" : `${Math.round(item.confidence * 100)}%`}
+                  </span>
+                  <details>
+                    <summary>Finding details</summary>
+                    {item.category && <p>Category: {item.category}</p>}
+                    {item.rule_id && <p>Rule ID: {item.rule_id}</p>}
+                    {item.suggested_endpoint && (
+                      <p>Suggested endpoint: {item.suggested_endpoint}</p>
+                    )}
+                    <p>{item.description}</p>
+                    {item.source_quote && (
+                      <pre className={styles.previewEvidence}>
+                        Report quote: {item.source_quote}
+                      </pre>
+                    )}
+                    {item.evidence && <pre className={styles.previewEvidence}>{item.evidence}</pre>}
+                  </details>
                 </li>
               ))}
             </ul>

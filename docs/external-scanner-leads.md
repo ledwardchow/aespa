@@ -13,14 +13,26 @@ findings into the same run skips duplicates, even if the report was renamed.
 Other runs can import and investigate their own independent copies.
 
 Reports must be UTF-8, at most 5 MiB, and contain at most 5,000 findings/results.
-The preview shows at most 100 findings; its counts cover the complete report.
+The preview shows at most 100 findings. Counts for SARIF and structured Markdown
+cover the complete report.
+Other JSON, unstructured Markdown, and plain text reports can be reviewed with
+the model selected for the destination run. These reports must be 128 KiB or
+smaller and can produce at most 100 leads. Split larger reports into separate
+files before importing them. AESPA sends the report text to the selected model
+only when you preview it. Each proposed lead must include an exact quote from
+the uploaded file. Review the preview before importing. Import uses the same
+reviewed leads and does not call the model again. A changed file needs a new
+preview. Model-generated previews contain proposed leads. Compare them with the
+source report for missing findings before importing. Missing confidence scores
+appear as **Unknown**. A model or provider
+error leaves the run without imported leads.
 Report paths and links are stored as evidence; AESPA does not open them while
 importing. File imports require the updated backend: wait for active scans to
 finish before restarting an older AESPA server.
 
 ## SARIF
 
-Upload a `.sarif` or `.json` file using
+Upload a `.sarif` file or SARIF `.json` file using
 [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/sarif-v2.1.0-os.html).
 AESPA reads results across all runs, including rules defined in tool extensions,
 message templates, artifact indexes, and physical or logical locations. Results
@@ -69,5 +81,5 @@ Missing locations and confidence scores are called out in the preview.
 
 AESPA's **Export leads** Markdown files are also supported, including their
 embedded structured data. Import resets investigation and validation status.
-Arbitrary prose and Markdown tables are not automatically converted into leads;
-convert those reports to the template or export SARIF from the source scanner.
+Unstructured Markdown and plain text reports use model review during preview.
+Malformed SARIF files return an error instead of being sent to the model.

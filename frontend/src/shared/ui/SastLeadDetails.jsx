@@ -99,7 +99,13 @@ export function SastLeadDetails({ lead, showSummary = true, findingHref }) {
             />
             <MetaItem
               label="Confidence"
-              value={lead.confidence == null ? null : `${Math.round(lead.confidence * 100)}%`}
+              value={
+                lead.producer_run_type === "external" && source.confidence_unknown === true
+                  ? "Unknown"
+                  : lead.confidence == null
+                    ? null
+                    : `${Math.round(lead.confidence * 100)}%`
+              }
             />
             <MetaItem label="Status" value={lead.status} />
             <MetaItem label="Validation" value={lead.validation_status} />

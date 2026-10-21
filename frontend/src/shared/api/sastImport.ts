@@ -63,7 +63,8 @@ export async function importSastSource(kind: DynamicRunKind, id: number, sourceI
 }
 
 export type ReportPreview = {
-  format: "SARIF" | "Markdown";
+  format: "SARIF" | "Markdown" | "AI-reviewed report";
+  prepared?: string;
   filename: string;
   total: number;
   new_count: number;
@@ -74,9 +75,16 @@ export type ReportPreview = {
   warnings: string[];
   items: Array<{
     title: string;
+    description: string;
     severity: string;
+    category: string;
     location: string;
+    evidence: string;
+    source_quote: string;
     scanner: string;
+    rule_id: string;
+    suggested_endpoint: string;
+    confidence: number | null;
     already_imported: boolean;
   }>;
 };
@@ -86,10 +94,12 @@ export async function importLeadReport(
   id: number,
   file: File,
   preview: boolean,
+  prepared?: string,
 ): Promise<ReportPreview> {
   const body = new FormData();
   body.append("file", file);
   body.append("preview", String(preview));
+  if (prepared) body.append("prepared", prepared);
   const result = await req<ReportPreview>(`${base(kind, id)}/import-report`, {
     method: "POST",
     body,

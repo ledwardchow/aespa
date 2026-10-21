@@ -22,7 +22,7 @@ export function leadImportPayload(l) {
     title: l.title,
     severity: l.severity,
     category: l.category,
-    confidence: l.confidence,
+    confidence: leadConfidenceUnknown(l) ? null : l.confidence,
     location: l.location,
     description: l.description,
     evidence: l.evidence,
@@ -30,6 +30,23 @@ export function leadImportPayload(l) {
     note: l.note,
     source: l.source,
   };
+}
+
+export function leadConfidenceUnknown(lead) {
+  if (lead.producer_run_type !== "external") return false;
+  try {
+    const trace =
+      typeof lead.source_trace_json === "string"
+        ? JSON.parse(lead.source_trace_json)
+        : lead.source_trace_json;
+    return trace?.confidence_unknown === true;
+  } catch {
+    return false;
+  }
+}
+
+export function leadConfidenceLabel(lead) {
+  return leadConfidenceUnknown(lead) ? "Unknown" : `${Math.round((lead.confidence || 0) * 100)}%`;
 }
 
 export function leadsExportFilename(name, runId) {
@@ -59,7 +76,7 @@ export function leadsToMarkdown(leads, meta = {}) {
       "",
       `- Severity: ${markdownListValue(l.severity)}`,
       `- Category: ${markdownListValue(l.category)}`,
-      `- Confidence: ${Math.round((l.confidence || 0) * 100)}%`,
+      ...(leadConfidenceUnknown(l) ? [] : [`- Confidence: ${leadConfidenceLabel(l)}`]),
       `- Status: ${markdownListValue(l.status)}`,
       `- Location: ${markdownListValue(l.location)}`,
       "",

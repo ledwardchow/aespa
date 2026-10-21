@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { leadsToMarkdown } from "./files.js";
+import { leadConfidenceLabel, leadsToMarkdown } from "./files.js";
 
 test("Markdown lead exports retain external scanner and rule identity for re-import", () => {
   const text = leadsToMarkdown([
@@ -21,4 +21,20 @@ test("Markdown lead exports retain external scanner and rule identity for re-imp
     rule_id: "sql-001",
     suggested_endpoint: "GET /query",
   });
+});
+
+test("an imported lead without a confidence score stays unknown in the table and export", () => {
+  const lead = {
+    title: "Unchecked account lookup",
+    producer_run_type: "external",
+    confidence: 0,
+    source_trace_json: JSON.stringify({ confidence_unknown: true }),
+  };
+  expect(leadConfidenceLabel(lead)).toBe("Unknown");
+  const markdown = leadsToMarkdown([lead]);
+  expect(markdown).not.toContain("Confidence: 0%");
+  const payload = JSON.parse(
+    decodeURIComponent(markdown.match(/aespa-sast-leads-json\n([^\n]+)/)[1]),
+  );
+  expect(payload[0].confidence).toBeNull();
 });

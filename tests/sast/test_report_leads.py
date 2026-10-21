@@ -106,6 +106,7 @@ def test_preview_import_duplicate_and_run_isolation(
     assert preview.status_code == 200
     assert preview.json()["new_count"] == 1
     assert preview.json()["items"][0]["severity"] == "critical"
+    assert preview.json()["items"][0]["confidence"] is None
     assert db_session.exec(select(ScanLead)).all() == []
     assert db_session.exec(select(ScanFinding)).all() == []
     imported = client.post(
@@ -392,3 +393,285 @@ def test_invalid_unicode_in_sarif_fails_before_writing(
     )
     assert result.status_code == 422
     assert db_session.exec(select(ScanLead)).all() == []
+
+
+@pytest.mark.parametrize("kind", ["web", "api"])
+def test_ai_report_preview_imports_exact_reviewed_lead(
+    client, db_session, destinations, monkeypatch, kind
+):
+    calls = []
+
+    async def complete(_config, prompt):
+        calls.append(prompt)
+        return json.dumps(
+            {
+                "total_found": 1,
+                "findings": [
+                    {
+                        "title": "Missing ownership check",
+                        "severity": "high",
+                        "description": "The report describes an unchecked account lookup.",
+                        "source_quote": "Account lookup has no ownership check",
+                        "location": "src/accounts.py:10",
+                        "confidence": None,
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(report_leads, "get_llm_config_for_run", lambda *_: object())
+    monkeypatch.setattr(report_leads.llm_service, "plain_completion", complete)
+    prefix = "api-test-runs" if kind == "api" else "test-runs"
+    url = f"/api/{prefix}/{destinations[kind]}/import-report"
+    content = b"Account lookup has no ownership check"
+    preview = client.post(url, files={"file": ("notes.txt", content)})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["format"] == "AI-reviewed report"
+    assert preview.json()["items"][0]["confidence"] is None
+    assert preview.json()["items"][0]["source_quote"] == content.decode()
+    assert (
+        preview.json()["items"][0]["description"]
+        == "The report describes an unchecked account lookup."
+    )
+    assert db_session.exec(select(ScanLead)).all() == []
+    prepared = preview.json()["prepared"]
+    imported = client.post(
+        url,
+        files={"file": ("notes.txt", content)},
+        data={"preview": "false", "prepared": prepared},
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["imported"] == 1
+    assert len(calls) == 1
+    [lead] = get_leads_for_run(kind, destinations[kind])
+    assert lead.title == preview.json()["items"][0]["title"]
+    assert lead.description == preview.json()["items"][0]["description"]
+    assert json.loads(lead.source_trace_json)["confidence_unknown"] is True
+    assert (
+        json.loads(lead.source_trace_json)["external_report"]["filename"] == "notes.txt"
+    )
+
+
+def test_ai_report_rejects_changed_file_and_ungrounded_quote(
+    client, db_session, destinations, monkeypatch
+):
+    async def complete(_config, _prompt):
+        return json.dumps(
+            {
+                "total_found": 1,
+                "findings": [{"title": "Claim", "source_quote": "Missing source"}],
+            }
+        )
+
+    monkeypatch.setattr(report_leads, "get_llm_config_for_run", lambda *_: object())
+    monkeypatch.setattr(report_leads.llm_service, "plain_completion", complete)
+    url = f"/api/test-runs/{destinations['web']}/import-report"
+    rejected = client.post(url, files={"file": ("notes.txt", b"Different text")})
+    assert rejected.status_code == 422
+    assert "exact source quote" in rejected.json()["detail"]
+    assert db_session.exec(select(ScanLead)).all() == []
+
+    async def grounded(_config, _prompt):
+        return json.dumps(
+            {
+                "total_found": 1,
+                "findings": [{"title": "Claim", "source_quote": "Different text"}],
+            }
+        )
+
+    monkeypatch.setattr(report_leads.llm_service, "plain_completion", grounded)
+    prepared = client.post(
+        url, files={"file": ("notes.txt", b"Different text")}
+    ).json()["prepared"]
+    changed = client.post(
+        url,
+        files={"file": ("notes.txt", b"Changed text")},
+        data={"preview": "false", "prepared": prepared},
+    )
+    assert changed.status_code == 422
+    assert db_session.exec(select(ScanLead)).all() == []
+
+
+def test_malformed_sarif_does_not_call_model(client, destinations, monkeypatch):
+    async def fail_if_called(*_args):
+        pytest.fail("Malformed SARIF must not use the model")
+
+    monkeypatch.setattr(report_leads.llm_service, "plain_completion", fail_if_called)
+    url = f"/api/test-runs/{destinations['web']}/import-report"
+    response = client.post(url, files={"file": ("broken.sarif", b'{"runs": []}')})
+    assert response.status_code == 422
+
+
+def test_ai_report_size_limit_is_explicit(client, destinations):
+    url = f"/api/test-runs/{destinations['web']}/import-report"
+    response = client.post(
+        url,
+        files={"file": ("large.txt", b"a" * (report_leads.MAX_LLM_REPORT_BYTES + 1))},
+    )
+    assert response.status_code == 422
+    assert "128 KiB" in response.json()["detail"]
+
+
+def test_ai_report_rejects_model_context_truncation(client, destinations, monkeypatch):
+    from types import SimpleNamespace
+
+    async def fail_if_called(*_args):
+        pytest.fail("A truncated report must not be sent to the model")
+
+    monkeypatch.setattr(
+        report_leads,
+        "get_llm_config_for_run",
+        lambda *_: SimpleNamespace(max_context_tokens=100),
+    )
+    monkeypatch.setattr(
+        report_leads.llm_service,
+        "_fit_plain_prompt_to_context",
+        lambda config, prompt, system: (config, prompt[:20], {}),
+    )
+    monkeypatch.setattr(report_leads.llm_service, "plain_completion", fail_if_called)
+    url = f"/api/test-runs/{destinations['web']}/import-report"
+    response = client.post(url, files={"file": ("notes.txt", b"One long report")})
+    assert response.status_code == 422
+    assert "context window" in response.json()["detail"]
+
+
+def test_ai_report_uses_only_quoted_confidence(client, destinations, monkeypatch):
+    async def complete(_config, _prompt):
+        return json.dumps(
+            {
+                "total_found": 2,
+                "findings": [
+                    {
+                        "title": "First",
+                        "source_quote": "First finding",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "title": "Second",
+                        "source_quote": "Second finding",
+                        "confidence_quote": "80%",
+                    },
+                ],
+            }
+        )
+
+    monkeypatch.setattr(report_leads, "get_llm_config_for_run", lambda *_: object())
+    monkeypatch.setattr(report_leads.llm_service, "plain_completion", complete)
+    url = f"/api/test-runs/{destinations['web']}/import-report"
+    result = client.post(
+        url,
+        files={
+            "file": ("notes.txt", b"First finding\nSecond finding\nConfidence: 80%")
+        },
+    )
+    assert result.status_code == 200, result.text
+    assert [item["confidence"] for item in result.json()["items"]] == [None, 0.8]
+
+
+@pytest.mark.parametrize(
+    "extension,content",
+    [
+        ("md", b"## Finding\n- Severity: high\n### Description\nA reported issue."),
+        ("sarif", json.dumps(sarif()).encode()),
+    ],
+)
+def test_missing_confidence_is_unknown_but_explicit_zero_is_zero(
+    client, destinations, extension, content
+):
+    url = f"/api/test-runs/{destinations['web']}/import-report"
+    preview = client.post(url, files={"file": (f"report.{extension}", content)})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["items"][0]["confidence"] is None
+    if extension == "md":
+        explicit = content.replace(
+            b"- Severity: high", b"- Severity: high\n- Confidence: 0%"
+        )
+        result = client.post(url, files={"file": ("explicit.md", explicit)})
+        assert result.json()["items"][0]["confidence"] == 0
+
+
+@pytest.mark.parametrize(
+    "total,findings",
+    [
+        (101, []),
+        (2, [{"title": "One", "source_quote": "One finding"}]),
+    ],
+)
+def test_ai_report_rejects_incomplete_or_oversized_finding_list(
+    client, destinations, monkeypatch, total, findings
+):
+    async def complete(_config, _prompt):
+        return json.dumps({"total_found": total, "findings": findings})
+
+    monkeypatch.setattr(report_leads, "get_llm_config_for_run", lambda *_: object())
+    monkeypatch.setattr(report_leads.llm_service, "plain_completion", complete)
+    url = f"/api/test-runs/{destinations['web']}/import-report"
+    result = client.post(url, files={"file": ("notes.txt", b"One finding")})
+    assert result.status_code == 422
+
+
+def test_bad_signed_preview_returns_error(client, destinations):
+    import hashlib
+    import hmac
+
+    url = f"/api/test-runs/{destinations['web']}/import-report"
+    payload = "%%%"
+    signature = hmac.new(
+        client.app.state.auth.secret.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+    result = client.post(
+        url,
+        files={"file": ("notes.txt", b"One finding")},
+        data={"preview": "false", "prepared": f"{payload}.{signature}"},
+    )
+    assert result.status_code == 422
+    assert "Preview it again" in result.json()["detail"]
+
+
+def test_plain_text_with_json_braces_uses_model(client, destinations, monkeypatch):
+    async def complete(_config, _prompt):
+        return json.dumps({"total_found": 0, "findings": []})
+
+    monkeypatch.setattr(report_leads, "get_llm_config_for_run", lambda *_: object())
+    monkeypatch.setattr(report_leads.llm_service, "plain_completion", complete)
+    url = f"/api/test-runs/{destinations['web']}/import-report"
+    result = client.post(url, files={"file": ("notes.txt", b'{"note": "report"}')})
+    assert result.status_code == 200, result.text
+    assert result.json()["format"] == "AI-reviewed report"
+
+
+@pytest.mark.parametrize(
+    "filename,content,findings",
+    [
+        (
+            "scanner.json",
+            b'{"runs":[{"id":"scan-1","summary":"One issue"}]}',
+            [{"title": "One issue", "source_quote": "One issue"}],
+        ),
+        (
+            "mixed.md",
+            b"## First issue\n- Severity: high\n### Description\nFirst detail\n\n## Second issue\nSecond detail",
+            [
+                {"title": "First issue", "source_quote": "First detail"},
+                {"title": "Second issue", "source_quote": "Second detail"},
+            ],
+        ),
+    ],
+)
+def test_non_sarif_runs_and_mixed_markdown_use_model_without_dropping_findings(
+    client, destinations, monkeypatch, filename, content, findings
+):
+    calls = []
+
+    async def complete(_config, prompt):
+        calls.append(prompt)
+        return json.dumps({"total_found": len(findings), "findings": findings})
+
+    monkeypatch.setattr(report_leads, "get_llm_config_for_run", lambda *_: object())
+    monkeypatch.setattr(report_leads.llm_service, "plain_completion", complete)
+    url = f"/api/test-runs/{destinations['web']}/import-report"
+    result = client.post(url, files={"file": (filename, content)})
+    assert result.status_code == 200, result.text
+    assert result.json()["format"] == "AI-reviewed report"
+    assert result.json()["total"] == len(findings)
+    assert len(calls) == 1

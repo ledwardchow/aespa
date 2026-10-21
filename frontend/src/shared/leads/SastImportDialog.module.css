@@ -278,6 +278,11 @@
   color: var(--muted);
   font-size: 12px;
 }
+.previewEvidence {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
 @media (max-width: 520px) {
   .tabs {
     padding: 0 16px;

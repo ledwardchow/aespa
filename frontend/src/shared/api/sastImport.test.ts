@@ -42,10 +42,11 @@ test("file previews and imports use multipart data and explicit preview state", 
   vi.stubGlobal("fetch", fetch);
   const file = new File(["## Finding\n- Severity: high"], "report.md");
   await importLeadReport("api", 3, file, true);
-  await importLeadReport("api", 3, file, false);
+  await importLeadReport("api", 3, file, false, "signed-preview");
   expect(fetch.mock.calls[0][0]).toBe("/api/api-test-runs/3/import-report");
   expect(fetch.mock.calls[0][1].body.get("preview")).toBe("true");
   expect(fetch.mock.calls[1][1].body.get("preview")).toBe("false");
+  expect(fetch.mock.calls[1][1].body.get("prepared")).toBe("signed-preview");
   expect(fetch.mock.calls[0][1].body.get("file").name).toBe("report.md");
   expect(fetch.mock.calls[0][1].headers.has("Content-Type")).toBe(false);
 });

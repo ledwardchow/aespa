@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 import { SastImportDialog } from "./SastImportDialog.tsx";
 
-import { leadsExportFilename, leadsToMarkdown } from "./files.js";
+import { leadConfidenceLabel, leadsExportFilename, leadsToMarkdown } from "./files.js";
 import { downloadTextFile } from "../lib/download.js";
 import { usePolling } from "../hooks/usePolling.js";
 import { SastLeadDetails } from "../ui/SastLeadDetails.jsx";
@@ -267,7 +267,7 @@ export function WebRunSastLeadsTab({ runId, scanRunning, runKind = "web", initia
                       <span>{l.title}</span>
                     </td>
                     <td>{l.category || "—"}</td>
-                    <td>{Math.round((l.confidence || 0) * 100)}%</td>
+                    <td>{leadConfidenceLabel(l)}</td>
                     <td
                       className="subtle"
                       style={{

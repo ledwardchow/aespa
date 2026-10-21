@@ -46,6 +46,21 @@ def _decode_structured_json(value: str | None, default: object) -> object:
     return parsed
 
 
+def _lead_confidence_unknown(lead: ScanLead) -> bool:
+    if lead.producer_run_type != "external":
+        return False
+    trace = _decode_structured_json(lead.source_trace_json, {})
+    return isinstance(trace, dict) and trace.get("confidence_unknown") is True
+
+
+def _lead_confidence_text(lead: ScanLead) -> str:
+    return (
+        "Unknown"
+        if _lead_confidence_unknown(lead)
+        else f"{int((lead.confidence or 0) * 100)}%"
+    )
+
+
 def _prompt_text(value: object, limit: int = 600) -> str:
     """Return bounded, readable text for an agent context block."""
     text = str(value or "").strip()
@@ -652,7 +667,7 @@ def get_lead_detail_for_run(
             "fingerprint": lead.fingerprint,
             "category": lead.category,
             "severity": lead.severity,
-            "confidence": lead.confidence,
+            "confidence": None if _lead_confidence_unknown(lead) else lead.confidence,
             "title": lead.title,
             "description": lead.description,
             "location": lead.location,
@@ -1035,7 +1050,7 @@ def format_lead_index_for_validation(
         objective = _prompt_text(attack_path.get("dynamic_test"), 240)
         lines.append(
             f"[Lead {lead.reference or f'#{lead.id}'}] [{(lead.severity or 'medium').upper()}] "
-            f"[{int((lead.confidence or 0) * 100)}% confidence] {lead.title}"
+            f"[{_lead_confidence_text(lead)} confidence] {lead.title}"
         )
         lines.append(
             f"  Category: {lead.category or 'unknown'}  "
@@ -1066,10 +1081,10 @@ def _format_leads_block(leads: list[ScanLead]) -> str:
     ]
     for lead in leads:
         sev = (lead.severity or "medium").upper()
-        conf_pct = int((lead.confidence or 0) * 100)
+        confidence = _lead_confidence_text(lead)
         lines.append(f"[Lead {lead.reference or f'#{lead.id}'}] [{sev}] {lead.title}")
         lines.append(
-            f"  Category: {lead.category or 'unknown'}  Confidence: {conf_pct}%"
+            f"  Category: {lead.category or 'unknown'}  Confidence: {confidence}"
         )
         lines.append(f"  Location: {lead.location or 'unknown'}")
         lines.append(f"  Description: {lead.description}")
