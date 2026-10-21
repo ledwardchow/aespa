@@ -60,7 +60,7 @@ def test_code_execution_config_round_trip(client: TestClient, monkeypatch):
     initial = client.get("/api/settings/code-execution")
     assert initial.status_code == 200
     assert initial.json()["enabled"] is False
-    assert initial.json()["image_ref"] == "ledwardchow/aespa-python-executor:0.1"
+    assert initial.json()["image_ref"] == "ledwardchow/aespa-python-executor:latest"
     assert initial.json()["allowed_roles"] == [
         "alice",
         "specialist",

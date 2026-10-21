@@ -709,7 +709,7 @@ def test_console_warns_below_ready_line_when_python_executor_is_missing(
         "Ready - listening on http://127.0.0.1:8000",
         (
             "Python executor image is not installed - run docker pull "
-            "ledwardchow/aespa-python-executor:0.1"
+            "ledwardchow/aespa-python-executor:latest"
         ),
     ]
 
@@ -749,7 +749,7 @@ def test_python_executor_check_inspects_the_published_image(monkeypatch) -> None
             "docker",
             "image",
             "inspect",
-            "ledwardchow/aespa-python-executor:0.1",
+            "ledwardchow/aespa-python-executor:latest",
         ],
     ]
 

@@ -676,7 +676,7 @@ class CodeExecutionConfig(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     enabled: bool = Field(default=False)
     backend: str = Field(default="docker")
-    image_ref: str = Field(default="ledwardchow/aespa-python-executor:0.1")
+    image_ref: str = Field(default="ledwardchow/aespa-python-executor:latest")
     allowed_roles_json: str = Field(default='["alice","specialist","test_lead"]')
     timeout_s: int = Field(default=30)
     memory_mb: int = Field(default=256)

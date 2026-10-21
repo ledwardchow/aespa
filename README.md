@@ -153,10 +153,10 @@ The UI is available at `http://127.0.0.1:8000` by default.
 AESPA can let Test Leads, A.L.I.C.E., and specialist agents run short Python programs in a sandbox for custom payload generation, parsing, and bounded request workflows. HTTP traffic is only permitted from the sandbox via AESPA function calls (which checks scope and logs the traffic as part of the test). This capability requires a local Docker daemon plus the dedicated executor image:
 
 ```bash
-docker pull ledwardchow/aespa-python-executor:0.1
+docker pull ledwardchow/aespa-python-executor:latest
 
 # Or build the same image reference locally
-docker build -t ledwardchow/aespa-python-executor:0.1 runtime/python-executor
+docker build -t ledwardchow/aespa-python-executor:latest runtime/python-executor
 ```
 
 To publish one Docker Hub executor tag for both Intel/AMD64 and Apple
@@ -169,7 +169,7 @@ docker login docker.io
 
 The script creates or reuses an `aespa-multiarch` buildx builder, publishes
 `linux/amd64` and `linux/arm64` variants as
-`docker.io/YOUR_DOCKER_HUB_USERNAME/aespa-python-executor:0.1`, and verifies
+`docker.io/YOUR_DOCKER_HUB_USERNAME/aespa-python-executor:latest`, and verifies
 the published manifest. Set `AESPA_BUILDX_BUILDER` to use a different builder.
 
 Enable and tune it under **Agent Settings → Python Sandbox**. Generated code has no direct network access; it can reach the test target only through AESPA's broker API. The broker applies the run's scope and request policy, and every transmitted request is recorded in the Traffic Log with its execution provenance. Do not mount the Docker socket into the main AESPA container when enabling this feature.

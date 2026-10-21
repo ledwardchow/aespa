@@ -1022,7 +1022,7 @@ class CodeExecutionConfigBase(BaseModel):
     enabled: bool = False
     backend: Literal["docker"] = "docker"
     image_ref: str = Field(
-        default="ledwardchow/aespa-python-executor:0.1", min_length=1, max_length=300
+        default="ledwardchow/aespa-python-executor:latest", min_length=1, max_length=300
     )
     allowed_roles: list[Literal["alice", "specialist", "test_lead"]] = Field(
         default_factory=lambda: ["alice", "specialist", "test_lead"]

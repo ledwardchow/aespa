@@ -7,7 +7,7 @@ vi.mock("../../shared/api/settings.js");
 
 const config = {
   enabled: true,
-  image_ref: "ledwardchow/aespa-python-executor:0.1",
+  image_ref: "ledwardchow/aespa-python-executor:latest",
   allowed_roles: ["alice", "specialist", "test_lead"],
   timeout_s: 30,
   memory_mb: 256,

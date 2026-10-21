@@ -8,7 +8,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from aespa import db, db_legacy
 from aespa.config import Settings
-from aespa.models import DeepScanTask
+from aespa.models import CodeExecutionConfig, DeepScanTask
 from aespa.services import settings_providers
 from alembic import command
 
@@ -23,6 +23,44 @@ def _upgrade_to(engine, revision: str) -> None:
 
 def _downgrade_to(engine, revision: str) -> None:
     command.downgrade(db._get_alembic_config(engine), revision)
+
+
+def test_python_executor_image_migration_updates_only_the_old_default():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        _upgrade_to(engine, "e95fdda94987")
+        with Session(engine) as session:
+            session.add(
+                CodeExecutionConfig(
+                    id=1, image_ref="ledwardchow/aespa-python-executor:0.1"
+                )
+            )
+            session.commit()
+
+        _upgrade_to(engine, "4a7c1e9d2b60")
+        with Session(engine) as session:
+            assert session.get(CodeExecutionConfig, 1).image_ref == (
+                "ledwardchow/aespa-python-executor:latest"
+            )
+
+        _downgrade_to(engine, "e95fdda94987")
+        with Session(engine) as session:
+            config = session.get(CodeExecutionConfig, 1)
+            config.image_ref = "example/custom-python:1"
+            session.add(config)
+            session.commit()
+
+        _upgrade_to(engine, "4a7c1e9d2b60")
+        with Session(engine) as session:
+            assert session.get(CodeExecutionConfig, 1).image_ref == (
+                "example/custom-python:1"
+            )
+    finally:
+        engine.dispose()
 
 
 def test_sast_analysis_mode_migration_marks_existing_runs_light():

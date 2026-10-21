@@ -327,7 +327,7 @@ wall-clock timeout.
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Master switch for Python execution |
-| `image_ref` | `ledwardchow/aespa-python-executor:0.1` | Published multi-architecture executor image |
+| `image_ref` | `ledwardchow/aespa-python-executor:latest` | Published multi-architecture executor image |
 | `allowed_roles_json` | `["alice", "specialist", "test_lead"]` | Agent roles that may receive the tool |
 | `max_concurrent_executions` | `2` | Concurrent executor container limit |
 | `timeout_s` | `30` | Per-execution wall-clock limit |

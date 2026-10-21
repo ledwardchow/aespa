@@ -34,7 +34,7 @@ def _runner_config(**overrides):
     values = {
         "enabled": True,
         "backend": "docker",
-        "image_ref": "ledwardchow/aespa-python-executor:0.1",
+        "image_ref": "ledwardchow/aespa-python-executor:latest",
         "timeout_s": 30,
         "memory_mb": 256,
         "cpu_cores": 0.5,
@@ -176,13 +176,13 @@ async def test_runtime_status_checks_image_after_docker_service(monkeypatch):
             "docker",
             "image",
             "inspect",
-            "ledwardchow/aespa-python-executor:0.1",
+            "ledwardchow/aespa-python-executor:latest",
         ),
     ]
     assert status["docker_available"] is True
     assert status["image_present"] is False
     assert status["message"] == (
-        "Sandbox image 'ledwardchow/aespa-python-executor:0.1' is not installed."
+        "Sandbox image 'ledwardchow/aespa-python-executor:latest' is not installed."
     )
 
 

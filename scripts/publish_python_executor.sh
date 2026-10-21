@@ -13,7 +13,7 @@ Examples:
   ./scripts/publish_python_executor.sh acme
 
 Authenticate with Docker Hub before running this script. It publishes
-docker.io/USERNAME/aespa-python-executor:0.1 with both linux/amd64 and
+docker.io/USERNAME/aespa-python-executor:latest with both linux/amd64 and
 linux/arm64 images.
 EOF
 }
@@ -29,7 +29,7 @@ if [[ ! "$DOCKER_HUB_USERNAME" =~ ^[a-z0-9][a-z0-9_-]{0,254}$ ]]; then
   usage >&2
   exit 2
 fi
-IMAGE_REF="docker.io/$DOCKER_HUB_USERNAME/aespa-python-executor:0.1"
+IMAGE_REF="docker.io/$DOCKER_HUB_USERNAME/aespa-python-executor:latest"
 
 command -v docker >/dev/null || {
   echo "Error: Docker is not installed or is not on PATH." >&2
