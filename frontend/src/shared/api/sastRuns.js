@@ -3,6 +3,17 @@ import { req } from "./request.ts";
 
 export const listAllSastRuns = () => req(`/api/sast-runs`);
 
+export const listSastRunsPage = ({ page, pageSize, sortField, sortDir }, signal) =>
+  req(
+    `/api/sast-runs/page?${new URLSearchParams({
+      page,
+      page_size: pageSize,
+      sort_field: sortField,
+      sort_dir: sortDir,
+    })}`,
+    { signal },
+  );
+
 export const getSastScanLog = (id) => req(`/api/sast-runs/${id}/scan-log`);
 
 export const getSastRun = (id) => req(`/api/sast-runs/${id}`);

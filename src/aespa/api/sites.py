@@ -14,10 +14,11 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel as _BaseModel
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import SavedCrawl, Site, TestRun
+from aespa.models import Credential, SavedCrawl, Site, TestRun
 from aespa.schemas import (
     CredentialIn,
     CredentialOut,
@@ -36,6 +37,14 @@ from aespa.services import sites as sites_service
 from aespa.services.crawl_archives import ArchiveError
 
 router = APIRouter(prefix="/api/sites", tags=["sites"])
+
+
+class SiteHeader(_BaseModel):
+    id: int
+    name: str
+    base_url: str
+    requires_auth: bool
+    credential_count: int
 
 
 def _to_summary(site: Site) -> SiteSummary:
@@ -73,6 +82,33 @@ def _to_detail(site: Site) -> SiteDetail:
 @router.get("", response_model=list[SiteSummary])
 def list_sites(session: Session = Depends(get_session)) -> list[SiteSummary]:
     return [_to_summary(s) for s in sites_service.list_sites(session)]
+
+
+@router.get("/{site_id}/header", response_model=SiteHeader)
+def get_site_header(
+    site_id: int, session: Session = Depends(get_session)
+) -> SiteHeader:
+    row = session.exec(
+        select(Site.id, Site.name, Site.base_url, Site.requires_auth).where(
+            Site.id == site_id
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Site not found"
+        )
+    credential_count = session.exec(
+        select(func.count())
+        .select_from(Credential)
+        .where(Credential.site_id == site_id)
+    ).one()
+    return SiteHeader(
+        id=row.id,
+        name=row.name,
+        base_url=row.base_url,
+        requires_auth=row.requires_auth,
+        credential_count=credential_count,
+    )
 
 
 @router.post("", response_model=SiteDetail, status_code=status.HTTP_201_CREATED)

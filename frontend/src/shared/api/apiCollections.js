@@ -55,5 +55,16 @@ export const purgeCollectionData = (id) =>
 
 export const listApiRuns = (id) => req(`/api/api-collections/${id}/test-runs`);
 
+export const listApiRunsPage = (id, { page, pageSize, sortField, sortDir }, signal) =>
+  req(
+    `/api/api-collections/${id}/test-runs/page?${new URLSearchParams({
+      page,
+      page_size: pageSize,
+      sort_field: sortField,
+      sort_dir: sortDir,
+    })}`,
+    { signal },
+  );
+
 export const createApiRun = (id, b) =>
   req(`/api/api-collections/${id}/test-runs`, { method: "POST", body: b });

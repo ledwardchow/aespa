@@ -864,6 +864,30 @@ def build_router(store: ExtensionDataStore) -> APIRouter:
                 "dataset": dataset_out(dataset),
             }
 
+    @router.get("/links")
+    def list_benchmark_links() -> dict[str, list[dict[str, Any]]]:
+        with store.session() as session:
+            results = session.exec(
+                select(ScanResult.id, ScanResult.run_kind, ScanResult.run_id).order_by(
+                    ScanResult.id.desc()
+                )
+            ).all()
+            evaluations = session.exec(
+                select(Evaluation.id, Evaluation.sast_run_id)
+                .where(Evaluation.status == "completed")
+                .order_by(Evaluation.id.desc())
+            ).all()
+        return {
+            "results": [
+                {"id": result_id, "run_kind": run_kind, "run_id": run_id}
+                for result_id, run_kind, run_id in results
+            ],
+            "evaluations": [
+                {"id": evaluation_id, "sast_run_id": sast_run_id}
+                for evaluation_id, sast_run_id in evaluations
+            ],
+        }
+
     @router.get("/results")
     def list_scan_results() -> list[dict[str, Any]]:
         with store.session() as session, Session(get_engine()) as core:

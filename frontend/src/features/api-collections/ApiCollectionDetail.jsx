@@ -4,7 +4,7 @@ import { fmtDate } from "../../shared/lib/dates.js";
 import { useBenchmarkLinks } from "../../shared/hooks/useBenchmarkLinks.js";
 import { BenchmarkBadge } from "../../shared/ui/BenchmarkBadge.jsx";
 import * as apiCollectionsApi from "../../shared/api/apiCollections.js";
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
@@ -12,6 +12,7 @@ import { EmptyState } from "../../shared/ui/EmptyState.jsx";
 import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
 import { Notice, PageError } from "../../shared/ui/Notice.jsx";
+import { RunListPager } from "../../shared/ui/RunListPager.jsx";
 
 const API_COLLECTION_TABS = [
   {
@@ -29,12 +30,15 @@ const API_COLLECTION_TABS = [
 ];
 
 export function ApiCollectionDetail({ collectionId, initialTab }) {
-  const benchmarkLinks = useBenchmarkLinks();
   const activeTab = API_COLLECTION_TABS.some((tab) => tab.key === initialTab) ? initialTab : "runs";
+  const benchmarkLinks = useBenchmarkLinks(activeTab === "runs");
   const [collection, setCollection] = useState(null);
   const [endpoints, setEndpoints] = useState(null);
   const [readiness, setReadiness] = useState(null);
   const [apiRuns, setApiRuns] = useState(null);
+  const [runTotal, setRunTotal] = useState(0);
+  const [runPage, setRunPage] = useState(1);
+  const [runPageSize, setRunPageSize] = useState(25);
   const [credentials, setCredentials] = useState(null);
   const [error, setError] = useState(null);
   const [message, setMessage] = useState(null);
@@ -45,6 +49,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
   const [sortDir, setSortDir] = useState("desc");
 
   const toggleSort = (field) => {
+    setRunPage(1);
     if (sortField === field) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
@@ -62,55 +67,72 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
     );
   };
 
-  const sortedApiRuns = useMemo(() => {
-    if (!apiRuns) return [];
-    return [...apiRuns].sort((a, b) => {
-      let valA = a[sortField];
-      let valB = b[sortField];
-
-      if (sortField === "created_at") {
-        valA = a.created_at ? new Date(a.created_at).getTime() : 0;
-        valB = b.created_at ? new Date(b.created_at).getTime() : 0;
-      }
-
-      if (valA == null) valA = "";
-      if (valB == null) valB = "";
-
-      let cmp =
-        typeof valA === "number" && typeof valB === "number"
-          ? valA - valB
-          : String(valA).localeCompare(String(valB), undefined, {
-              sensitivity: "base",
-              numeric: true,
-            });
-      return sortDir === "asc" ? cmp : -cmp;
-    });
-  }, [apiRuns, sortField, sortDir]);
-  const load = useCallback(async () => {
+  const loadCollection = useCallback(async () => {
     try {
-      const [c, eps, rd, runs, creds] = await Promise.all([
-        apiCollectionsApi.getApiCollection(collectionId),
-        apiCollectionsApi.listApiEndpoints(collectionId),
-        apiCollectionsApi.getApiReadiness(collectionId),
-        apiCollectionsApi.listApiRuns(collectionId),
-        apiCollectionsApi.listApiCredentials(collectionId),
-      ]);
-      setCollection(c);
-      setEndpoints(eps);
-      setReadiness(rd && rd.status !== "not_assessed" ? rd : null);
-      setApiRuns(runs);
-      setCredentials(creds);
+      setCollection(await apiCollectionsApi.getApiCollection(collectionId));
     } catch (e) {
       setError(e.message);
     }
   }, [collectionId]);
+  const loadEndpoints = useCallback(async () => {
+    try {
+      const [eps, rd] = await Promise.all([
+        apiCollectionsApi.listApiEndpoints(collectionId),
+        apiCollectionsApi.getApiReadiness(collectionId),
+      ]);
+      setEndpoints(eps);
+      setReadiness(rd && rd.status !== "not_assessed" ? rd : null);
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [collectionId]);
+  const loadCredentials = useCallback(async () => {
+    try {
+      setCredentials(await apiCollectionsApi.listApiCredentials(collectionId));
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [collectionId]);
+  const loadRuns = useCallback(
+    async (signal) => {
+      try {
+        const result = await apiCollectionsApi.listApiRunsPage(
+          collectionId,
+          { page: runPage, pageSize: runPageSize, sortField, sortDir },
+          signal,
+        );
+        if (signal?.aborted) return;
+        if (result.total && runPage > Math.ceil(result.total / runPageSize)) {
+          setRunPage(Math.ceil(result.total / runPageSize));
+          return;
+        }
+        setApiRuns(result.items);
+        setRunTotal(result.total);
+      } catch (e) {
+        if (!signal?.aborted) setError(e.message);
+      }
+    },
+    [collectionId, runPage, runPageSize, sortField, sortDir],
+  );
   useEffect(() => {
-    load();
-  }, [load]);
+    void loadCollection();
+  }, [loadCollection]);
+  useEffect(() => {
+    if (activeTab === "endpoints") void loadEndpoints();
+  }, [activeTab, loadEndpoints]);
+  useEffect(() => {
+    if (activeTab === "credentials") void loadCredentials();
+  }, [activeTab, loadCredentials]);
+  useEffect(() => {
+    if (activeTab !== "runs") return undefined;
+    const controller = new AbortController();
+    void loadRuns(controller.signal);
+    return () => controller.abort();
+  }, [activeTab, loadRuns]);
   const onRefresh = async () => {
     setRefreshing(true);
     try {
-      await load();
+      await loadEndpoints();
     } finally {
       setRefreshing(false);
     }
@@ -809,7 +831,7 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                 <div>
                   <div className="section-label">Test runs</div>
                   {apiRuns === null && <div className="subtle">Loading…</div>}
-                  {apiRuns !== null && apiRuns.length === 0 && (
+                  {apiRuns !== null && runTotal === 0 && (
                     <div
                       className="subtle"
                       style={{
@@ -819,84 +841,99 @@ export function ApiCollectionDetail({ collectionId, initialTab }) {
                       No test runs yet. Click <strong>New test run</strong> to start one.
                     </div>
                   )}
-                  {apiRuns !== null && apiRuns.length > 0 && (
-                    <div className="table-wrap">
-                      <table
-                        style={{
-                          width: "100%",
-                        }}
-                      >
-                        <thead>
-                          <tr>
-                            <th
-                              style={{ cursor: "pointer", userSelect: "none" }}
-                              onClick={() => toggleSort("name")}
-                            >
-                              Name {sortArrow("name")}
-                            </th>
-                            <th
-                              style={{ cursor: "pointer", userSelect: "none" }}
-                              onClick={() => toggleSort("status")}
-                            >
-                              Status {sortArrow("status")}
-                            </th>
-                            <th
-                              style={{ cursor: "pointer", userSelect: "none" }}
-                              onClick={() => toggleSort("coverage_mode")}
-                            >
-                              Scan mode {sortArrow("coverage_mode")}
-                            </th>
-                            <th
-                              style={{ cursor: "pointer", userSelect: "none" }}
-                              onClick={() => toggleSort("created_at")}
-                            >
-                              Created {sortArrow("created_at")}
-                            </th>
-                            <th></th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {sortedApiRuns.map((r) => (
-                            <NavigationRow
-                              key={r.id}
-                              href={`#/api-runs/${r.id}/status`}
-                              label={`Open ${r.name}`}
-                            >
-                              <td>
-                                <span className="run-name">
+                  {apiRuns !== null && runTotal > 0 && (
+                    <>
+                      <div className="table-wrap">
+                        <table
+                          style={{
+                            width: "100%",
+                          }}
+                        >
+                          <thead>
+                            <tr>
+                              <th
+                                style={{ cursor: "pointer", userSelect: "none" }}
+                                onClick={() => toggleSort("name")}
+                              >
+                                Name {sortArrow("name")}
+                              </th>
+                              <th
+                                style={{ cursor: "pointer", userSelect: "none" }}
+                                onClick={() => toggleSort("status")}
+                              >
+                                Status {sortArrow("status")}
+                              </th>
+                              <th
+                                style={{ cursor: "pointer", userSelect: "none" }}
+                                onClick={() => toggleSort("coverage_mode")}
+                              >
+                                Scan mode {sortArrow("coverage_mode")}
+                              </th>
+                              <th
+                                style={{ cursor: "pointer", userSelect: "none" }}
+                                onClick={() => toggleSort("created_at")}
+                              >
+                                Created {sortArrow("created_at")}
+                              </th>
+                              <th></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {apiRuns.map((r) => (
+                              <NavigationRow
+                                key={r.id}
+                                href={`#/api-runs/${r.id}/status`}
+                                label={`Open ${r.name}`}
+                              >
+                                <td>
+                                  <span className="run-name">
+                                    <a
+                                      href={`#/api-runs/${r.id}/status`}
+                                      style={{
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      {r.name}
+                                    </a>
+                                    <BenchmarkBadge inline href={benchmarkLinks[`api:${r.id}`]} />
+                                  </span>
+                                </td>
+                                <td>
+                                  <StatusBadge status={r.status} />
+                                </td>
+                                <td>{coverageModeLabel(r.coverage_mode)}</td>
+                                <td
+                                  style={{
+                                    fontSize: 12,
+                                    color: "var(--muted)",
+                                  }}
+                                >
+                                  {fmtDate(r.created_at)}
+                                </td>
+                                <td>
                                   <a
                                     href={`#/api-runs/${r.id}/status`}
-                                    style={{
-                                      fontWeight: 600,
-                                    }}
+                                    className="btn secondary sm"
                                   >
-                                    {r.name}
+                                    Open
                                   </a>
-                                  <BenchmarkBadge inline href={benchmarkLinks[`api:${r.id}`]} />
-                                </span>
-                              </td>
-                              <td>
-                                <StatusBadge status={r.status} />
-                              </td>
-                              <td>{coverageModeLabel(r.coverage_mode)}</td>
-                              <td
-                                style={{
-                                  fontSize: 12,
-                                  color: "var(--muted)",
-                                }}
-                              >
-                                {fmtDate(r.created_at)}
-                              </td>
-                              <td>
-                                <a href={`#/api-runs/${r.id}/status`} className="btn secondary sm">
-                                  Open
-                                </a>
-                              </td>
-                            </NavigationRow>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                                </td>
+                              </NavigationRow>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <RunListPager
+                        page={runPage}
+                        pageSize={runPageSize}
+                        total={runTotal}
+                        onPageChange={setRunPage}
+                        onPageSizeChange={(size) => {
+                          setRunPageSize(size);
+                          setRunPage(1);
+                        }}
+                      />
+                    </>
                   )}
                 </div>
               </>

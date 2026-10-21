@@ -1,10 +1,23 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from enum import Enum
+from typing import Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel as _BaseModel
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from aespa.db import get_session
@@ -551,6 +564,26 @@ def purge_collection_data(
 # ── API Test Runs ─────────────────────────────────────────────────────────────
 
 
+class ApiTestRunPageItem(_BaseModel):
+    id: int
+    name: str
+    status: str
+    coverage_mode: str
+    created_at: datetime
+
+
+class ApiTestRunsPage(_BaseModel):
+    items: list[ApiTestRunPageItem]
+    total: int
+
+
+class ApiRunPageSize(int, Enum):
+    TEN = 10
+    TWENTY_FIVE = 25
+    FIFTY = 50
+    ONE_HUNDRED = 100
+
+
 def _utcnow():
     from datetime import datetime, timezone
 
@@ -571,6 +604,65 @@ def list_api_test_runs(
         .order_by(ApiTestRun.id.desc())  # type: ignore[union-attr]
     ).all()
     return [ApiTestRunSummary.model_validate(r) for r in runs]
+
+
+@router.get("/{collection_id}/test-runs/page", response_model=ApiTestRunsPage)
+def list_api_test_runs_page(
+    collection_id: int,
+    page: int = Query(default=1, ge=1),
+    page_size: ApiRunPageSize = ApiRunPageSize.TWENTY_FIVE,
+    sort_field: Literal["name", "status", "coverage_mode", "created_at"] = "created_at",
+    sort_dir: Literal["asc", "desc"] = "desc",
+    session: Session = Depends(get_session),
+) -> ApiTestRunsPage:
+    if session.get(ApiCollection, collection_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="API collection not found"
+        )
+
+    sort_columns = {
+        "name": ApiTestRun.name,
+        "status": ApiTestRun.status,
+        "coverage_mode": ApiTestRun.coverage_mode,
+        "created_at": ApiTestRun.created_at,
+    }
+    sort_column = sort_columns[sort_field]
+    if sort_field != "created_at":
+        sort_column = func.lower(sort_column)
+    direction = "asc" if sort_dir == "asc" else "desc"
+    rows = session.exec(
+        select(
+            ApiTestRun.id,
+            ApiTestRun.name,
+            ApiTestRun.status,
+            ApiTestRun.coverage_mode,
+            ApiTestRun.created_at,
+        )
+        .where(ApiTestRun.collection_id == collection_id)
+        .order_by(
+            getattr(sort_column, direction)(), getattr(ApiTestRun.id, direction)()
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    total = session.exec(
+        select(func.count())
+        .select_from(ApiTestRun)
+        .where(ApiTestRun.collection_id == collection_id)
+    ).one()
+    return ApiTestRunsPage(
+        items=[
+            ApiTestRunPageItem(
+                id=run_id,
+                name=name,
+                status=run_status,
+                coverage_mode=coverage_mode,
+                created_at=created_at,
+            )
+            for run_id, name, run_status, coverage_mode, created_at in rows
+        ],
+        total=total,
+    )
 
 
 @router.post(

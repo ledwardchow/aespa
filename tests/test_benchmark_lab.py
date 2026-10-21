@@ -1005,6 +1005,52 @@ def test_benchmarking_is_an_extension(client):
     assert extension["data_namespace"] == "benchmarking"
 
 
+def test_benchmark_links_return_only_saved_ids_and_completed_evaluations(client):
+    from aespa.extensions import get_extension_manager
+
+    models = importlib.import_module("aespa_external_aespa_benchmarking.models")
+    store = get_extension_manager().data_store_for("aespa.benchmarking")
+    with store.session() as session:
+        dataset = models.Dataset(
+            name="fixture", ground_truth_digest="digest", ground_truth_json="{}"
+        )
+        session.add(dataset)
+        session.flush()
+        session.add_all(
+            [
+                models.ScanResult(
+                    run_kind="sast",
+                    run_id=42,
+                    dataset_id=dataset.id,
+                    run_name="scan",
+                    ground_truth_json="{}",
+                    findings_json='{"large":"payload"}',
+                    rows_json="[]",
+                ),
+                models.Evaluation(
+                    name="finished",
+                    sast_run_id=42,
+                    dataset_id=dataset.id,
+                    status="completed",
+                ),
+                models.Evaluation(
+                    name="pending",
+                    sast_run_id=43,
+                    dataset_id=dataset.id,
+                    status="created",
+                ),
+            ]
+        )
+        session.commit()
+
+    response = client.get(f"{BASE}/links")
+    assert response.status_code == 200
+    assert response.json() == {
+        "results": [{"id": 1, "run_kind": "sast", "run_id": 42}],
+        "evaluations": [{"id": 1, "sast_run_id": 42}],
+    }
+
+
 def test_benchmark_evaluation_matches_without_mutating_sast_run(
     client, db_engine, monkeypatch
 ):

@@ -24,16 +24,24 @@ export function SiteDetail({ siteId, initialTab }) {
   const [detailsOpened, setDetailsOpened] = useState(tab === "details");
 
   useEffect(() => {
+    let active = true;
     sitesApi
-      .getSite(siteId)
-      .then(setSite)
-      .catch((e) => setError(e.message));
+      .getSiteHeader(siteId)
+      .then((header) => {
+        if (active) setSite(header);
+      })
+      .catch((e) => {
+        if (active) setError(e.message);
+      });
+    return () => {
+      active = false;
+    };
   }, [siteId]);
   useEffect(() => {
     if (tab === "details") setDetailsOpened(true);
   }, [tab]);
 
-  const accountCount = site?.credentials.length || 0;
+  const accountCount = site?.credential_count ?? site?.credentials?.length ?? 0;
   return (
     <>
       <PageHeader

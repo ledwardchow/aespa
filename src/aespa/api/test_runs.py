@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from enum import IntEnum
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from aespa.db import get_session
@@ -75,6 +79,36 @@ class WorkflowRetryBody(BaseModel):
     instructions: str
     save_to_site: bool = False
     generate_sample_data: bool = False
+
+
+class SiteRunPageItem(BaseModel):
+    id: int
+    name: str
+    status: str
+    phase: str
+    thinking_status: str
+    coverage_mode: str
+    pages_discovered: int
+    created_at: datetime
+    llm_profile_id: int | None
+    max_depth: int
+    max_pages: int
+    crawler_mode: str
+    page_selection: str
+    crawl_started_once: bool
+    llm_budget_usd: float | None
+
+
+class SiteRunsPage(BaseModel):
+    items: list[SiteRunPageItem]
+    total: int
+
+
+class SiteRunPageSize(IntEnum):
+    TEN = 10
+    TWENTY_FIVE = 25
+    FIFTY = 50
+    HUNDRED = 100
 
 
 _CRAWL_OWNED_PHASES = web_runs_svc.CRAWL_OWNED_PHASES
@@ -291,6 +325,93 @@ def list_test_runs(
         .order_by(TestRun.created_at.desc())
     ).all()
     return [_run_summary(r, session) for r in runs]
+
+
+@router.get("/api/sites/{site_id}/test-runs/page", response_model=SiteRunsPage)
+def list_test_runs_page(
+    site_id: int,
+    page: int = Query(default=1, ge=1),
+    page_size: SiteRunPageSize = SiteRunPageSize.TWENTY_FIVE,
+    sort_field: Literal[
+        "name", "status", "pages_discovered", "created_at"
+    ] = "created_at",
+    sort_dir: Literal["asc", "desc"] = "desc",
+    session: Session = Depends(get_session),
+) -> SiteRunsPage:
+    _get_site_or_404(session, site_id)
+    sort_columns = {
+        "name": TestRun.name,
+        "status": TestRun.status,
+        "pages_discovered": TestRun.pages_discovered,
+        "created_at": TestRun.created_at,
+    }
+    sort_column = sort_columns[sort_field]
+    if sort_field in {"name", "status"}:
+        sort_column = func.lower(sort_column)
+    direction = "asc" if sort_dir == "asc" else "desc"
+    runs = session.exec(
+        select(
+            TestRun.id,
+            TestRun.name,
+            TestRun.status,
+            TestRun.phase,
+            TestRun.coverage_mode,
+            TestRun.pages_discovered,
+            TestRun.created_at,
+            TestRun.llm_profile_id,
+            TestRun.max_depth,
+            TestRun.max_pages,
+            TestRun.crawler_mode,
+            TestRun.page_selection,
+            TestRun.crawl_started_once,
+            TestRun.llm_budget_usd,
+        )
+        .where(TestRun.site_id == site_id)
+        .order_by(getattr(sort_column, direction)(), getattr(TestRun.id, direction)())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    total = session.exec(
+        select(func.count()).select_from(TestRun).where(TestRun.site_id == site_id)
+    ).one()
+    return SiteRunsPage(
+        items=[
+            SiteRunPageItem(
+                id=run_id,
+                name=name,
+                status=run_status,
+                phase=phase,
+                thinking_status=scanner_svc.get_thinking_scan_state(run_id, run_status),
+                coverage_mode=coverage_mode,
+                pages_discovered=pages_discovered,
+                created_at=created_at,
+                llm_profile_id=llm_profile_id,
+                max_depth=max_depth,
+                max_pages=max_pages,
+                crawler_mode=crawler_mode,
+                page_selection=page_selection,
+                crawl_started_once=crawl_started_once,
+                llm_budget_usd=llm_budget_usd,
+            )
+            for (
+                run_id,
+                name,
+                run_status,
+                phase,
+                coverage_mode,
+                pages_discovered,
+                created_at,
+                llm_profile_id,
+                max_depth,
+                max_pages,
+                crawler_mode,
+                page_selection,
+                crawl_started_once,
+                llm_budget_usd,
+            ) in runs
+        ],
+        total=total,
+    )
 
 
 @router.get("/api/test-runs/active", response_model=list[ActiveJobSummary])

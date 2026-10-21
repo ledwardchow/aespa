@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from enum import IntEnum
+from typing import Literal
 
 from fastapi import (
     APIRouter,
@@ -19,6 +21,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.responses import Response as HTTPResponse
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from aespa.db import get_session
@@ -57,6 +60,28 @@ class SastSourceRunCreate(BaseModel):
     start_scan: bool = True
 
 
+class SastRunPageItem(BaseModel):
+    id: int
+    name: str
+    status: str
+    analysis_mode: str
+    leads_count: int
+    started_at: datetime | None
+    llm_profile_id: int | None
+
+
+class SastRunsPage(BaseModel):
+    items: list[SastRunPageItem]
+    total: int
+
+
+class SastPageSize(IntEnum):
+    TEN = 10
+    TWENTY_FIVE = 25
+    FIFTY = 50
+    HUNDRED = 100
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -74,14 +99,28 @@ def _to_summary(run: SastRun) -> SastRunSummary:
     if run.id is None:
         return summary
 
+    return summary.model_copy(
+        update={
+            "status": _sast_run_status(
+                run.id, run.status, analysis_mode=run.analysis_mode
+            )
+        }
+    )
+
+
+def _sast_run_status(
+    run_id: int, saved_status: str, *, analysis_mode: str | None = None
+) -> str:
     # The task registry is authoritative while a scan is active. A previous
     # terminal DB status can otherwise briefly leak into list/detail responses
     # while a rerun is already in progress.
     from aespa.services import sast_scanner
 
-    if sast_scanner.is_sast_scan_running(run.id):
-        return summary.model_copy(update={"status": "scanning"})
-    return summary
+    return (
+        "scanning"
+        if sast_scanner.is_sast_scan_running(run_id, analysis_mode=analysis_mode)
+        else saved_status
+    )
 
 
 def _sast_agent_activity(session: Session, run_id: int) -> list[dict]:
@@ -335,6 +374,69 @@ def list_all_sast_runs(session: Session = Depends(get_session)) -> list[SastRunS
         select(SastRun).order_by(SastRun.id.desc())  # type: ignore[attr-defined]
     ).all()
     return [_to_summary(r) for r in runs]
+
+
+@router.get("/api/sast-runs/page", response_model=SastRunsPage)
+def list_sast_runs_page(
+    page: int = Query(default=1, ge=1),
+    page_size: SastPageSize = SastPageSize.TWENTY_FIVE,
+    sort_field: Literal[
+        "name", "status", "analysis_mode", "leads_count", "started_at"
+    ] = "started_at",
+    sort_dir: Literal["asc", "desc"] = "desc",
+    session: Session = Depends(get_session),
+) -> SastRunsPage:
+    sort_columns = {
+        "name": SastRun.name,
+        "status": SastRun.status,
+        "analysis_mode": SastRun.analysis_mode,
+        "leads_count": SastRun.leads_count,
+        "started_at": SastRun.started_at,
+    }
+    sort_column = sort_columns[sort_field]
+    if sort_field in {"name", "status", "analysis_mode"}:
+        sort_column = func.lower(sort_column)
+    direction = "asc" if sort_dir == "asc" else "desc"
+    runs = session.exec(
+        select(
+            SastRun.id,
+            SastRun.name,
+            SastRun.status,
+            SastRun.analysis_mode,
+            SastRun.leads_count,
+            SastRun.started_at,
+            SastRun.llm_profile_id,
+        )
+        .order_by(getattr(sort_column, direction)(), getattr(SastRun.id, direction)())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    total = session.exec(select(func.count()).select_from(SastRun)).one()
+    return SastRunsPage(
+        items=[
+            SastRunPageItem(
+                id=run_id,
+                name=name,
+                status=_sast_run_status(
+                    run_id, saved_status, analysis_mode=analysis_mode
+                ),
+                analysis_mode=analysis_mode,
+                leads_count=leads_count,
+                started_at=started_at,
+                llm_profile_id=llm_profile_id,
+            )
+            for (
+                run_id,
+                name,
+                saved_status,
+                analysis_mode,
+                leads_count,
+                started_at,
+                llm_profile_id,
+            ) in runs
+        ],
+        total=total,
+    )
 
 
 @router.get("/api/sast-runs/{run_id}/export")

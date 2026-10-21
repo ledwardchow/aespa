@@ -22,7 +22,11 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Site and API test runs**: Test run lists now load one page at a time, with choices of 10, 25, 50, or 100 runs per page. Sorting covers all runs. Site rows load only the details needed for the list and Edit run, and the site header no longer loads saved workflows or account details. API collections load endpoints and credentials when you open those tabs instead of loading them with Test runs.
+
 - **External scanner leads**: Import other JSON, unstructured Markdown, and plain text reports using the selected run's model. Preview shows the proposed leads and marks missing confidence as Unknown. Import saves the previewed leads without another model call. Reports needing model review have a 128 KiB limit; SARIF and structured Markdown keep their direct import path.
+
+- **SAST scans list**: The list now loads one page at a time. You can show 10, 25, 50, or 100 scans per page and move between pages. Sorting still applies to the full list. Benchmark badges now load link IDs instead of full saved results, and checking scan status no longer reloads each listed scan from the database.
 
 - **Python sandbox image**: AESPA now looks for `ledwardchow/aespa-python-executor:latest` by default. Saved settings using the previous default image move to `:latest`; custom image names stay the same. Pull the latest image before enabling the sandbox.
 

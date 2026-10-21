@@ -19,29 +19,39 @@ const site = {
 beforeEach(() => {
   vi.clearAllMocks();
   sitesApi.getSite.mockResolvedValue(site);
+  sitesApi.getSiteHeader.mockResolvedValue({
+    id: site.id,
+    name: site.name,
+    base_url: site.base_url,
+    requires_auth: site.requires_auth,
+    credential_count: 0,
+  });
   settingsApi.listLLMProfiles.mockResolvedValue([]);
   settingsApi.getBrowserDebugConfig.mockResolvedValue({});
 });
 
 test("shows a Deep badge beside runs started in Deep mode", async () => {
-  sitesApi.listRuns.mockResolvedValue([
-    {
-      id: 1,
-      name: "Deep checkout scan",
-      status: "complete",
-      coverage_mode: "deep",
-      pages_discovered: 12,
-      created_at: "2026-09-14T01:00:00Z",
-    },
-    {
-      id: 2,
-      name: "Standard checkout scan",
-      status: "complete",
-      coverage_mode: "standard",
-      pages_discovered: 12,
-      created_at: "2026-09-14T02:00:00Z",
-    },
-  ]);
+  sitesApi.listSiteRunsPage.mockResolvedValue({
+    items: [
+      {
+        id: 1,
+        name: "Deep checkout scan",
+        status: "complete",
+        coverage_mode: "deep",
+        pages_discovered: 12,
+        created_at: "2026-09-14T01:00:00Z",
+      },
+      {
+        id: 2,
+        name: "Standard checkout scan",
+        status: "complete",
+        coverage_mode: "standard",
+        pages_discovered: 12,
+        created_at: "2026-09-14T02:00:00Z",
+      },
+    ],
+    total: 2,
+  });
 
   render(<SiteDetail siteId={site.id} />);
 
@@ -58,7 +68,13 @@ test("shows the site's address and login summary in the header", async () => {
     requires_auth: true,
     credentials: [{ id: 8, label: "Admin account", auth_mode: "form", login_fields: [] }],
   });
-  sitesApi.listRuns.mockResolvedValue([]);
+  sitesApi.getSiteHeader.mockResolvedValue({
+    id: site.id,
+    name: site.name,
+    base_url: site.base_url,
+    requires_auth: true,
+    credential_count: 1,
+  });
 
   render(<SiteDetail siteId={site.id} />);
 
@@ -73,7 +89,6 @@ test("shows the site's address and login summary in the header", async () => {
 
 test("edits the site on the Site details tab and stays on the page", async () => {
   const user = userEvent.setup();
-  sitesApi.listRuns.mockResolvedValue([]);
   sitesApi.updateSite.mockImplementation(async (_id, payload) => ({
     ...site,
     ...payload,
@@ -105,7 +120,6 @@ test("discards unsaved site changes", async () => {
     requires_auth: true,
     credentials: [{ id: 8, label: "Admin account", auth_mode: "form", login_fields: [] }],
   });
-  sitesApi.listRuns.mockResolvedValue([]);
 
   render(<SiteDetail siteId={site.id} initialTab="details" />);
 

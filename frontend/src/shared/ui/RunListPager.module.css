@@ -1,0 +1,14 @@
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 0;
+}
+
+.pager label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

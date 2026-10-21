@@ -5,6 +5,8 @@ export const listSites = () => req("/api/sites");
 
 export const getSite = (id) => req(`/api/sites/${id}`);
 
+export const getSiteHeader = (id) => req(`/api/sites/${id}/header`);
+
 export const createSite = (b) => req("/api/sites", { method: "POST", body: b });
 
 export const updateSite = (id, b) => req(`/api/sites/${id}`, { method: "PUT", body: b });
@@ -14,6 +16,17 @@ export const deleteSite = (id) => req(`/api/sites/${id}`, { method: "DELETE" });
 export const importSite = (text) => importJson("/api/sites/import", text);
 
 export const listRuns = (siteId) => req(`/api/sites/${siteId}/test-runs`);
+
+export const listSiteRunsPage = (siteId, { page, pageSize, sortField, sortDir }, signal) =>
+  req(
+    `/api/sites/${siteId}/test-runs/page?${new URLSearchParams({
+      page,
+      page_size: pageSize,
+      sort_field: sortField,
+      sort_dir: sortDir,
+    })}`,
+    { signal },
+  );
 
 export const createRun = (siteId, b) =>
   req(`/api/sites/${siteId}/test-runs`, { method: "POST", body: b });

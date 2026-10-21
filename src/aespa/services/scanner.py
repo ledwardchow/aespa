@@ -6313,10 +6313,6 @@ async def await_specialist_barrier(run_id: int, timeout: float = 60.0) -> int:
 
 
 def get_thinking_scan_status(run_id: int) -> dict:
-    if is_thinking_running(run_id):
-        status = _thinking_scan_status.get(run_id, "running")
-    else:
-        status = _thinking_scan_status.get(run_id, "idle")
     with Session(get_engine()) as s:
         findings_count = len(
             s.exec(select(ScanFinding).where(ScanFinding.test_run_id == run_id)).all()
@@ -6325,8 +6321,7 @@ def get_thinking_scan_status(run_id: int) -> dict:
         run_phase = run.phase if run else None
         run_outcome = run.outcome if run else None
         run_terminal_reason = run.terminal_reason if run else None
-        if run is not None and run.status == "paused" and status == "idle":
-            status = "paused"
+        status = get_thinking_scan_state(run_id, run.status if run else None)
     return {
         "status": status,
         "findings_count": findings_count,
@@ -6337,6 +6332,15 @@ def get_thinking_scan_status(run_id: int) -> dict:
         "run_outcome": run_outcome,
         "run_terminal_reason": run_terminal_reason,
     }
+
+
+def get_thinking_scan_state(run_id: int, run_status: str | None = None) -> str:
+    """Return the status badge state using a run already loaded by the caller."""
+    default = "running" if is_thinking_running(run_id) else "idle"
+    status = _thinking_scan_status.get(run_id, default)
+    if run_status == "paused" and status == "idle":
+        return "paused"
+    return status
 
 
 DEFAULT_THINKING_MAX_STEPS = 120
