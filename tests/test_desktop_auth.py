@@ -33,9 +33,7 @@ def test_desktop_login_link_uses_the_actual_port_and_fresh_tickets(tmp_path):
 def test_windows_reopen_preserves_signed_in_page_and_recovers_sign_in(
     monkeypatch, authenticated
 ):
-    monkeypatch.setitem(sys.modules, "pystray", SimpleNamespace())
     monkeypatch.setitem(sys.modules, "webview", SimpleNamespace())
-    monkeypatch.setitem(sys.modules, "PIL", SimpleNamespace(Image=SimpleNamespace()))
     monkeypatch.delitem(sys.modules, "aespa.desktop_win", raising=False)
     desktop = importlib.import_module("aespa.desktop_win")
     opened = []
@@ -47,7 +45,7 @@ def test_windows_reopen_preserves_signed_in_page_and_recovers_sign_in(
     desktop._console_server = SimpleNamespace(
         login_url=lambda: "http://127.0.0.1:8123/#aespa-login=fresh"
     )
-    desktop._on_open(None, None)
+    desktop._on_open()
     assert opened == (
         ["show", "http://127.0.0.1:8123/#aespa-login=fresh"]
         if authenticated == "false"

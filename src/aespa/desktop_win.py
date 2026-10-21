@@ -13,9 +13,7 @@ import sys
 import threading
 from importlib import import_module
 
-import pystray
 import webview
-from PIL import Image
 
 from aespa.browser import configure_browsers_path, download_chromium_if_missing
 from aespa.config import DEFAULT_WEB_DIR
@@ -37,7 +35,7 @@ def _on_closing() -> bool:
     return False
 
 
-def _on_open(_icon, _item) -> None:
+def _on_open() -> None:
     _window.show()
     authenticated = _window.evaluate_js(
         "document.documentElement.dataset.aespaAuthenticated"
@@ -46,13 +44,60 @@ def _on_open(_icon, _item) -> None:
         _window.load_url(_console_server.login_url())
 
 
-def _on_quit(icon, _item) -> None:
-    icon.stop()
-    webview.destroy()
-
-
-def _on_console(_icon, _item) -> None:
+def _on_console() -> None:
     _console_server.open()
+
+
+def _in_background(action):
+    # Tray events arrive on the WinForms UI thread, where pywebview calls such
+    # as evaluate_js would deadlock waiting on that same thread.
+    def handler(*_args) -> None:
+        threading.Thread(target=action, daemon=True).start()
+
+    return handler
+
+
+def _create_tray() -> None:
+    # Runs on the UI thread. pywebview's WinForms backend has already loaded
+    # pythonnet and these assemblies.
+    from System.Drawing import Bitmap, Icon
+    from System.Windows.Forms import (
+        ContextMenuStrip,
+        MouseButtons,
+        NotifyIcon,
+        SystemInformation,
+    )
+
+    bitmap = Bitmap(
+        Bitmap(str(DEFAULT_WEB_DIR / "icon.png")), SystemInformation.SmallIconSize
+    )
+    tray = NotifyIcon()
+    tray.Icon = Icon.FromHandle(bitmap.GetHicon())
+    tray.Text = "AESPA"
+
+    def on_quit(*_args) -> None:
+        # Dispose first so Windows doesn't leave a dead icon in the tray.
+        tray.Visible = False
+        tray.Dispose()
+        threading.Thread(target=webview.destroy, daemon=True).start()
+
+    def on_click(_sender, args) -> None:
+        if args.Button == MouseButtons.Left:
+            _in_background(_on_open)()
+
+    menu = ContextMenuStrip()
+    menu.Items.Add("Open AESPA").Click += _in_background(_on_open)
+    menu.Items.Add("Open Console").Click += _in_background(_on_console)
+    menu.Items.Add("Quit AESPA").Click += on_quit
+    tray.ContextMenuStrip = menu
+    tray.MouseClick += on_click
+    tray.Visible = True
+
+
+def _on_shown() -> None:
+    from System import Action
+
+    _window.native.Invoke(Action(_create_tray))
 
 
 def main() -> None:
@@ -83,18 +128,7 @@ def main() -> None:
         background_color="#0b0d12",
     )
     _window.events.closing += _on_closing
-
-    icon = pystray.Icon(
-        "aespa",
-        Image.open(DEFAULT_WEB_DIR / "icon.png"),
-        "AESPA",
-        menu=pystray.Menu(
-            pystray.MenuItem("Open AESPA", _on_open, default=True),
-            pystray.MenuItem("Open Console", _on_console),
-            pystray.MenuItem("Quit AESPA", _on_quit),
-        ),
-    )
-    icon.run_detached()
+    _window.events.shown += _on_shown
 
     webview.start()
 

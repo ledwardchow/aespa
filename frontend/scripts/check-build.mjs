@@ -9,7 +9,15 @@ for (const file of ["app.js", "styles.css"]) {
   if (!html.includes(`/${file}?v=__AESPA_ASSET_VERSION__`))
     throw new Error(`Missing versioned ${file} in HTML`);
 }
-for (const file of ["app.js", "styles.css", "sw.js", "manifest.json", "icon.png", "icon-sm.png"]) {
+for (const file of [
+  "app.js",
+  "styles.css",
+  "sw.js",
+  "manifest.json",
+  "icon.png",
+  "icon-sm.png",
+  "third-party-licenses.txt",
+]) {
   if (!fs.existsSync(path.join(root, file))) throw new Error(`Missing packaged asset: ${file}`);
 }
 const walk = (dir) =>

@@ -114,6 +114,10 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
+- **Web interface licenses**: The desktop apps and Docker image now include license notices for the open source packages in the web interface, such as React and D3, in `THIRD_PARTY_LICENSES.txt`. The web interface build also writes them to its own `third-party-licenses.txt`.
+
+- **Windows tray icon**: The Windows app's tray icon now uses Windows' built-in tray support instead of the pystray library, which removes an LGPL-licensed dependency. The tray menu works as before.
+
 - **README screenshots**: Updated the screenshots to show the current web, API, SAST, and system screens with fictional example data.
 
 - **Shared run services**: Creating, starting, and stopping web and SAST runs now uses shared services for both AESPA's own API and extensions, so both follow the same checks. Existing API behaviour is unchanged.

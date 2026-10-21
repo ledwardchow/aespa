@@ -1,10 +1,12 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { thirdPartyLicenses } from "./scripts/third-party-licenses.mjs";
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [
     react(),
+    thirdPartyLicenses(),
     {
       name: "aespa-static-asset-version",
       enforce: "post",

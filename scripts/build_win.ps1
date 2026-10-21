@@ -24,7 +24,6 @@ uv pip install --quiet . `
     "pywebview==6.2.1" `
     "pythonnet==3.1.0" `
     "clr-loader==0.3.1" `
-    "pystray==0.19.5" `
     "pillow==12.3.0"
 
 $Py = "$BuildVenv\Scripts\python.exe"
@@ -66,7 +65,6 @@ if (Test-Path "dist\AESPA") { Remove-Item -Recurse -Force "dist\AESPA" }
     --collect-all tiktoken `
     --collect-all google.genai `
     --collect-submodules google.auth `
-    --collect-submodules pystray `
     --collect-submodules aespa `
     "$RepoRoot\src\aespa\desktop_win.py"
 if ($LASTEXITCODE -ne 0) {
