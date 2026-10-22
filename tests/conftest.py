@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, create_engine
 
 import aespa.db
 from aespa.db import _migrate, get_session, set_engine
@@ -26,11 +26,11 @@ def _template_db_engine():
     Creating 90-odd tables and running every migration costs far more than the
     average test, so each test gets a copy of this database instead.
     """
-    # ensure models are registered with metadata before create_all
+    # Register models without creating their tables. The test database must
+    # have the same schema a new user gets from Alembic alone.
     from aespa import models as _models  # noqa: F401
 
     engine = _memory_engine()
-    SQLModel.metadata.create_all(engine)
     _migrate(engine)
     yield engine
     engine.dispose()

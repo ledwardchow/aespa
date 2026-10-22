@@ -132,6 +132,13 @@ Migration workflow for schema changes:
 4. Update `schemas.py` if the change crosses the API boundary.
 5. `init_db()` in `db.py` automatically runs `command.upgrade(cfg, "head")` on startup. Legacy databases lacking an `alembic_version` table are automatically stamped with the baseline revision.
 
+Migration rules and checks:
+
+| Rule | Enforcement |
+| --- | --- |
+| Every mapped table and column must be created by Alembic. | The test database is built from migrations alone. `test_migrations_create_all_model_columns` checks the result, and `migration-check.yml` runs the migration tests on pushes and pull requests. |
+| Do not change an existing migration revision. Add a new one so databases that applied the old revision can upgrade. | `check_migration_history.py` rejects changes to revisions already on the pull request's base branch. If an uncommitted revision was applied locally, add a follow-up revision and test that upgrade path. |
+
 ## Critical Gotcha: Run-ID Collision
 
 Web `TestRun.id` and `ApiTestRun.id` come from independent autoincrement sequences and collide in the same integer space.

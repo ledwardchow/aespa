@@ -128,6 +128,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
+- **Database migration checks**: Tests now build their databases through migrations and check that the installed schema has every field the app uses. Pull requests and pushes run the same check.
+
 - **Web interface licenses**: The desktop apps and Docker image now include license notices for the open source packages in the web interface, such as React and D3, in `THIRD_PARTY_LICENSES.txt`. The web interface build also writes them to its own `third-party-licenses.txt`.
 
 - **Windows tray icon**: The Windows app's tray icon now uses Windows' built-in tray support instead of the pystray library, which removes an LGPL-licensed dependency. The tray menu works as before.

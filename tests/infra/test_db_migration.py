@@ -25,6 +25,27 @@ def _downgrade_to(engine, revision: str) -> None:
     command.downgrade(db._get_alembic_config(engine), revision)
 
 
+def test_migrations_create_all_model_columns(_template_db_engine):
+    """The schema installed by Alembic must support every mapped model."""
+    inspector = inspect(_template_db_engine)
+    actual_tables = set(inspector.get_table_names())
+    missing = []
+    for table in SQLModel.metadata.sorted_tables:
+        if table.name not in actual_tables:
+            missing.append(f"{table.name} (table)")
+            continue
+        actual_columns = {
+            column["name"] for column in inspector.get_columns(table.name)
+        }
+        missing.extend(
+            f"{table.name}.{column.name}"
+            for column in table.columns
+            if column.name not in actual_columns
+        )
+
+    assert not missing, "Missing Alembic migrations for: " + ", ".join(missing)
+
+
 def test_python_executor_image_migration_updates_only_the_old_default():
     engine = create_engine(
         "sqlite:///:memory:",
