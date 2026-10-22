@@ -114,6 +114,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Housekeeping
 
+- **Container image publishing**: After Windows and macOS desktop releases succeed, AESPA and its optional Python executor publish automatically to GitHub Container Registry and Docker Hub. The GitHub packages are linked to this repository. The executor's `0.1` and `latest` tags are built for Intel/AMD64 and Apple Silicon/ARM64 on both registries.
+
 - **README screenshots**: Updated the screenshots to show the current web, API, SAST, and system screens with fictional example data.
 
 - **Shared run services**: Creating, starting, and stopping web and SAST runs now uses shared services for both AESPA's own API and extensions, so both follow the same checks. Existing API behaviour is unchanged.

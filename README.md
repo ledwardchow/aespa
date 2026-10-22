@@ -95,13 +95,18 @@ I don't recommend you use this, running it directly is much easier to troublesho
 
 The image bundles Chromium, so no separate Playwright install is needed.
 
-### From Docker Hub
+### From a container registry
 
-The image is published at [ledwardchow/aespa](https://hub.docker.com/r/ledwardchow/aespa). To run it without cloning this repo:
+After the Windows and macOS desktop releases succeed on `main`, the build publishes the image to [Docker Hub](https://hub.docker.com/r/ledwardchow/aespa) and [GitHub Container Registry](https://github.com/ledwardchow/aespa/pkgs/container/aespa). To run the Docker Hub image without cloning this repo:
 
 ```bash
 docker run -p 8000:8000 ledwardchow/aespa
 ```
+
+You can also run `ghcr.io/ledwardchow/aespa:latest` after the GitHub package is available to your account.
+
+To publish both registries manually, sign in to each registry and run
+`./scripts/publish.sh YOUR_DOCKER_HUB_USERNAME`.
 
 Then open `http://localhost:8000`.
 
@@ -159,18 +164,24 @@ docker pull ledwardchow/aespa-python-executor:0.1
 docker build -t ledwardchow/aespa-python-executor:0.1 runtime/python-executor
 ```
 
-To publish one Docker Hub executor tag for both Intel/AMD64 and Apple
-Silicon/ARM64 hosts, authenticate and pass your Docker Hub username:
+To publish executor tags for both Intel/AMD64 and Apple Silicon/ARM64 hosts to
+Docker Hub and GitHub Container Registry, authenticate to both registries and
+pass your Docker Hub username:
 
 ```bash
 docker login docker.io
+docker login ghcr.io
 ./scripts/publish_python_executor.sh YOUR_DOCKER_HUB_USERNAME
 ```
 
 The script creates or reuses an `aespa-multiarch` buildx builder, publishes
-`linux/amd64` and `linux/arm64` variants as
-`docker.io/YOUR_DOCKER_HUB_USERNAME/aespa-python-executor:0.1`, and verifies
-the published manifest. Set `AESPA_BUILDX_BUILDER` to use a different builder.
+`linux/amd64` and `linux/arm64` variants under both `:0.1` and `:latest` at
+`docker.io/YOUR_DOCKER_HUB_USERNAME/aespa-python-executor` and
+`ghcr.io/ledwardchow/aespa-python-executor`, and verifies all four published
+manifests. GHCR authentication for a manual push requires a classic personal
+access token with `write:packages`. Set `AESPA_BUILDX_BUILDER` to use a different
+builder. After the desktop release succeeds, GitHub Actions uses this repository's
+token to publish both images and link the GHCR packages to this repository.
 
 Enable and tune it under **Agent Settings → Python Sandbox**. Generated code has no direct network access; it can reach the test target only through AESPA's broker API. The broker applies the run's scope and request policy, and every transmitted request is recorded in the Traffic Log with its execution provenance. Do not mount the Docker socket into the main AESPA container when enabling this feature.
 

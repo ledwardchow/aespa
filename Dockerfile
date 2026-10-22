@@ -9,6 +9,7 @@ RUN npm run build && npm run check:build
 # Playwright base image ships chromium + all system deps already.
 # Keep this tag in step with the playwright version in uv.lock.
 FROM mcr.microsoft.com/playwright/python:v1.63.0-noble
+LABEL org.opencontainers.image.source="https://github.com/ledwardchow/aespa"
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 

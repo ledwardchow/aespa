@@ -10,11 +10,12 @@ Usage: ./scripts/publish_python_executor.sh DOCKER_HUB_USERNAME
 
 Examples:
   docker login docker.io
+  docker login ghcr.io
   ./scripts/publish_python_executor.sh acme
 
-Authenticate with Docker Hub before running this script. It publishes
-docker.io/USERNAME/aespa-python-executor:0.1 with both linux/amd64 and
-linux/arm64 images.
+Authenticate with Docker Hub and GHCR before running this script. It publishes
+aespa-python-executor with both :0.1 and :latest tags to Docker Hub and
+ghcr.io/ledwardchow, each containing linux/amd64 and linux/arm64 images.
 EOF
 }
 
@@ -29,7 +30,8 @@ if [[ ! "$DOCKER_HUB_USERNAME" =~ ^[a-z0-9][a-z0-9_-]{0,254}$ ]]; then
   usage >&2
   exit 2
 fi
-IMAGE_REF="docker.io/$DOCKER_HUB_USERNAME/aespa-python-executor:0.1"
+DOCKER_HUB_IMAGE="docker.io/$DOCKER_HUB_USERNAME/aespa-python-executor"
+GHCR_IMAGE="ghcr.io/ledwardchow/aespa-python-executor"
 
 command -v docker >/dev/null || {
   echo "Error: Docker is not installed or is not on PATH." >&2
@@ -47,15 +49,21 @@ else
 fi
 docker buildx inspect --bootstrap >/dev/null
 
-echo "==> Publishing linux/amd64 and linux/arm64 as $IMAGE_REF"
+echo "==> Publishing linux/amd64 and linux/arm64 to Docker Hub and GHCR"
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   --pull \
   --provenance=true \
   --sbom=true \
-  --tag "$IMAGE_REF" \
+  --tag "$DOCKER_HUB_IMAGE:0.1" \
+  --tag "$DOCKER_HUB_IMAGE:latest" \
+  --tag "$GHCR_IMAGE:0.1" \
+  --tag "$GHCR_IMAGE:latest" \
   --push \
   runtime/python-executor
 
-echo "==> Published manifest"
-docker buildx imagetools inspect "$IMAGE_REF"
+echo "==> Published manifests"
+docker buildx imagetools inspect "$DOCKER_HUB_IMAGE:0.1"
+docker buildx imagetools inspect "$DOCKER_HUB_IMAGE:latest"
+docker buildx imagetools inspect "$GHCR_IMAGE:0.1"
+docker buildx imagetools inspect "$GHCR_IMAGE:latest"

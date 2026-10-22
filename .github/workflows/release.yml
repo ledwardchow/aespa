@@ -162,7 +162,6 @@ jobs:
 
           test -s release-notes.md
 
-      # PAT (not GITHUB_TOKEN) so the new tag cascades into docker-publish.yml.
       - name: Create tag and release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
@@ -172,3 +171,12 @@ jobs:
             --title "v${{ needs.check.outputs.version }}" \
             --notes-file release-notes.md \
             --target "$GITHUB_SHA"
+
+  publish-containers:
+    needs: [check, release]
+    if: needs.check.outputs.should_release == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-publish.yml
+    secrets: inherit
