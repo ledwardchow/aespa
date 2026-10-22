@@ -1673,7 +1673,7 @@ class AliceGoal(SQLModel, table=True):
 
 
 class SastRun(SQLModel, table=True):
-    """A static-analysis scan over a source archive in an ApiCollection."""
+    """A static-analysis scan over an uploaded or prepared source archive."""
 
     __tablename__ = "sast_run"
 
@@ -1683,6 +1683,13 @@ class SastRun(SQLModel, table=True):
     collection_id: Optional[int] = Field(
         default=None, foreign_key="api_collection.id", index=True
     )
+    # Grouping links do not make a standalone scan a child of a Site or API.
+    site_id: Optional[int] = Field(default=None, foreign_key="site.id", index=True)
+    associated_collection_id: Optional[int] = Field(
+        default=None, foreign_key="api_collection.id", index=True
+    )
+    # After an edit, a null association means Unassociated even for legacy API scans.
+    group_override: bool = Field(default=False)
     document_id: Optional[int] = Field(
         default=None, index=True
     )  # the source_zip analysed

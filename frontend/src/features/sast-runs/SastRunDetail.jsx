@@ -441,6 +441,11 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         )}
       </div>
     );
+  const listTab = run.site_id
+    ? "site"
+    : run.associated_collection_id || (!run.group_override && run.collection_id)
+      ? "api"
+      : "unassociated";
   return (
     <>
       <PageHeader
@@ -448,7 +453,7 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
         title={
           <span className="sast-header-title">
             <span className="sast-header-main">
-              <Crumb href="#/sast-runs">SAST Scans</Crumb>
+              <Crumb href={`#/sast-runs/${listTab}`}>SAST Scans</Crumb>
               <Sep />
               <span className="sast-header-name">{run.name}</span>
               <span className="badge neutral">

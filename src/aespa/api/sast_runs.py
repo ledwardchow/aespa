@@ -21,7 +21,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.responses import Response as HTTPResponse
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlmodel import Session, select
 
 from aespa.api.alice import (
@@ -64,6 +64,8 @@ class SastSourceRunCreate(BaseModel):
     analysis_mode: str = "deep"
     llm_profile_id: int | None = None
     start_scan: bool = True
+    site_id: int | None = None
+    associated_collection_id: int | None = None
 
 
 class SastRunPageItem(BaseModel):
@@ -74,6 +76,11 @@ class SastRunPageItem(BaseModel):
     leads_count: int
     started_at: datetime | None
     llm_profile_id: int | None
+    site_id: int | None = None
+    collection_id: int | None = None
+    associated_collection_id: int | None = None
+    group_override: bool = False
+    associated_name: str | None = None
 
 
 class SastRunsPage(BaseModel):
@@ -98,6 +105,20 @@ def _get_run_or_404(session: Session, run_id: int) -> SastRun:
             status_code=status.HTTP_404_NOT_FOUND, detail="SAST run not found"
         )
     return run
+
+
+def _check_association(
+    session: Session, site_id: int | None, associated_collection_id: int | None
+) -> None:
+    if site_id is not None and associated_collection_id is not None:
+        raise HTTPException(status_code=422, detail="Choose one Site or API")
+    if site_id is not None and session.get(Site, site_id) is None:
+        raise HTTPException(status_code=404, detail="Site not found")
+    if (
+        associated_collection_id is not None
+        and session.get(ApiCollection, associated_collection_id) is None
+    ):
+        raise HTTPException(status_code=404, detail="API not found")
 
 
 def _to_summary(run: SastRun) -> SastRunSummary:
@@ -328,6 +349,8 @@ async def create_standalone_sast_run(
     analysis_mode: str = Form(default="deep"),
     llm_config_id: int | None = Form(default=None),
     llm_profile_id: int | None = Form(default=None),
+    site_id: int | None = Form(default=None),
+    associated_collection_id: int | None = Form(default=None),
     session: Session = Depends(get_session),
 ) -> SastRunSummary:
     """Create a standalone SAST run from an uploaded source archive.
@@ -337,6 +360,7 @@ async def create_standalone_sast_run(
     """
     # Check the mode before reading a large upload.
     sast_runs_svc.check_analysis_mode(analysis_mode)
+    _check_association(session, site_id, associated_collection_id)
     archive = await sast_runs_svc.store_upload(file.read, file.filename)
     run = sast_runs_svc.create_from_archive(
         session,
@@ -345,6 +369,8 @@ async def create_standalone_sast_run(
         analysis_mode=analysis_mode,
         llm_config_id=llm_config_id,
         llm_profile_id=llm_profile_id,
+        site_id=site_id,
+        associated_collection_id=associated_collection_id,
     )
     return _to_summary(run)
 
@@ -359,6 +385,7 @@ async def create_sast_run_from_source(
     session: Session = Depends(get_session),
 ) -> SastRunSummary:
     """Create a SAST run whose immutable archive is prepared by an extension."""
+    _check_association(session, payload.site_id, payload.associated_collection_id)
     run = await sast_runs_svc.create_from_source(
         session,
         provider_id=payload.provider_id,
@@ -366,6 +393,8 @@ async def create_sast_run_from_source(
         name=payload.name,
         analysis_mode=payload.analysis_mode,
         llm_profile_id=payload.llm_profile_id,
+        site_id=payload.site_id,
+        associated_collection_id=payload.associated_collection_id,
         start_scan=payload.start_scan,
     )
     return _to_summary(run)
@@ -387,23 +416,34 @@ def list_sast_runs_page(
     page: int = Query(default=1, ge=1),
     page_size: SastPageSize = SastPageSize.TWENTY_FIVE,
     sort_field: Literal[
-        "name", "status", "analysis_mode", "leads_count", "started_at"
+        "name", "target", "status", "analysis_mode", "leads_count", "started_at"
     ] = "started_at",
     sort_dir: Literal["asc", "desc"] = "desc",
+    association: Literal["all", "site", "api", "unassociated"] = "all",
+    target_id: int | None = Query(default=None, ge=1),
     session: Session = Depends(get_session),
 ) -> SastRunsPage:
+    if target_id is not None and association not in {"site", "api"}:
+        raise HTTPException(
+            status_code=422, detail="Choose the Site or API group to filter by target"
+        )
     sort_columns = {
         "name": SastRun.name,
+        "target": func.coalesce(Site.name, ApiCollection.name),
         "status": SastRun.status,
         "analysis_mode": SastRun.analysis_mode,
         "leads_count": SastRun.leads_count,
         "started_at": SastRun.started_at,
     }
     sort_column = sort_columns[sort_field]
-    if sort_field in {"name", "status", "analysis_mode"}:
+    if sort_field in {"name", "target", "status", "analysis_mode"}:
         sort_column = func.lower(sort_column)
     direction = "asc" if sort_dir == "asc" else "desc"
-    runs = session.exec(
+    grouped_collection_id = case(
+        (SastRun.group_override, SastRun.associated_collection_id),
+        else_=func.coalesce(SastRun.associated_collection_id, SastRun.collection_id),
+    )
+    query = (
         select(
             SastRun.id,
             SastRun.name,
@@ -412,12 +452,51 @@ def list_sast_runs_page(
             SastRun.leads_count,
             SastRun.started_at,
             SastRun.llm_profile_id,
+            SastRun.site_id,
+            SastRun.collection_id,
+            SastRun.associated_collection_id,
+            SastRun.group_override,
+            Site.name,
+            ApiCollection.name,
         )
-        .order_by(getattr(sort_column, direction)(), getattr(SastRun.id, direction)())
+        .outerjoin(Site, SastRun.site_id == Site.id)
+        .outerjoin(ApiCollection, grouped_collection_id == ApiCollection.id)
+    )
+    if association == "site":
+        query = query.where(SastRun.site_id.is_not(None))
+        if target_id is not None:
+            query = query.where(SastRun.site_id == target_id)
+    elif association == "api":
+        query = query.where(
+            SastRun.site_id.is_(None), grouped_collection_id.is_not(None)
+        )
+        if target_id is not None:
+            query = query.where(grouped_collection_id == target_id)
+    elif association == "unassociated":
+        query = query.where(SastRun.site_id.is_(None), grouped_collection_id.is_(None))
+    runs = session.exec(
+        query.order_by(
+            getattr(sort_column, direction)(), getattr(SastRun.id, direction)()
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
-    total = session.exec(select(func.count()).select_from(SastRun)).one()
+    count_query = select(func.count()).select_from(SastRun)
+    if association == "site":
+        count_query = count_query.where(SastRun.site_id.is_not(None))
+        if target_id is not None:
+            count_query = count_query.where(SastRun.site_id == target_id)
+    elif association == "api":
+        count_query = count_query.where(
+            SastRun.site_id.is_(None), grouped_collection_id.is_not(None)
+        )
+        if target_id is not None:
+            count_query = count_query.where(grouped_collection_id == target_id)
+    elif association == "unassociated":
+        count_query = count_query.where(
+            SastRun.site_id.is_(None), grouped_collection_id.is_(None)
+        )
+    total = session.exec(count_query).one()
     return SastRunsPage(
         items=[
             SastRunPageItem(
@@ -430,6 +509,11 @@ def list_sast_runs_page(
                 leads_count=leads_count,
                 started_at=started_at,
                 llm_profile_id=llm_profile_id,
+                site_id=site_id,
+                collection_id=collection_id,
+                associated_collection_id=associated_collection_id,
+                group_override=group_override,
+                associated_name=site_name or api_name,
             )
             for (
                 run_id,
@@ -439,6 +523,12 @@ def list_sast_runs_page(
                 leads_count,
                 started_at,
                 llm_profile_id,
+                site_id,
+                collection_id,
+                associated_collection_id,
+                group_override,
+                site_name,
+                api_name,
             ) in runs
         ],
         total=total,
@@ -531,20 +621,38 @@ def update_sast_run(
     payload: SastRunUpdate,
     session: Session = Depends(get_session),
 ) -> SastRunSummary:
-    """Change the model profile used by the next SAST scan or rerun."""
+    """Change a SAST scan's name, group, or next-scan model profile."""
     run = _get_run_or_404(session, run_id)
-    from aespa.services import sast_scanner
+    fields = payload.model_fields_set
+    if "llm_profile_id" in fields:
+        from aespa.services import sast_scanner
 
-    if run.status == "scanning" or sast_scanner.is_sast_scan_running(run_id):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Cannot change the model profile while the SAST scan is running",
+        if run.status == "scanning" or sast_scanner.is_sast_scan_running(run_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot change the model profile while the SAST scan is running",
+            )
+        if payload.llm_profile_id is not None:
+            from aespa.services.settings_profiles import get_scan_profile
+
+            get_scan_profile(session, payload.llm_profile_id)
+        run.llm_profile_id = payload.llm_profile_id
+    if "name" in fields:
+        name = (payload.name or "").strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Enter a scan name")
+        run.name = name
+    if fields & {"site_id", "associated_collection_id"}:
+        site_id = payload.site_id if "site_id" in fields else run.site_id
+        collection_id = (
+            payload.associated_collection_id
+            if "associated_collection_id" in fields
+            else run.associated_collection_id
         )
-    if payload.llm_profile_id is not None:
-        from aespa.services.settings_profiles import get_scan_profile
-
-        get_scan_profile(session, payload.llm_profile_id)
-    run.llm_profile_id = payload.llm_profile_id
+        _check_association(session, site_id, collection_id)
+        run.site_id = site_id
+        run.associated_collection_id = collection_id
+        run.group_override = True
     run.updated_at = datetime.now(_UTC)
     session.add(run)
     session.commit()
@@ -572,6 +680,16 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
 
     completion_status, completion_reasons, work_program = completion_decision(run_id)
     report = _json_object(run.report_json, {})
+    saved_work_program = report.get("work_program")
+    if (
+        run.status == "completed"
+        and isinstance(saved_work_program, dict)
+        and (saved_work_program.get("work_items") or {}).get("total", 0) > 0
+        and work_program["work_items"]["total"] == 0
+    ):
+        # A completed report retains its final counts even if older work rows
+        # are unavailable. Do not present a fresh zero count as scan history.
+        work_program = saved_work_program
     # New semantic runs persist the authoritative assurance decision in the
     # report. Keep the legacy work-program calculation for older runs that have
     # no semantic report yet.

@@ -248,6 +248,28 @@ function GlobalPolicyFields({ form, upd }) {
   );
 }
 
+export function SecurityChecksFields({ form, upd }) {
+  return (
+    <>
+      <div className="form-section-title">Automatic security checks</div>
+      <label className="toggle-row">
+        <input
+          type="checkbox"
+          checked={form.disable_deterministic_checks}
+          onChange={(event) => upd({ disable_deterministic_checks: event.target.checked })}
+        />
+        <span>Disable automatic security checks</span>
+      </label>
+      <div className="subtle" style={{ marginBottom: "10px" }}>
+        Applies to Sites, API, and SAST scans. Sites skip automatic TLS, authentication, IDOR, and
+        probe-result checks. API scans skip automatic TLS checks. SAST scans skip built-in source
+        and dependency checks. Sites still read JavaScript source for possible XSS paths, but those
+        leads need browser confirmation. Off by default.
+      </div>
+    </>
+  );
+}
+
 function GlobalHttpHeadersSettings() {
   const [hdrCfg, setHdrCfg] = useState(null);
   const [hdrForm, setHdrForm] = useState([]);
@@ -496,4 +518,8 @@ export function GlobalPolicySettings({ tab = "scan-behaviour" }) {
 
 export function ScannerPolicySettings() {
   return <PolicySettings Fields={ScannerPolicyFields} />;
+}
+
+export function SecurityChecksSettings() {
+  return <PolicySettings Fields={SecurityChecksFields} />;
 }

@@ -87,7 +87,7 @@ export const routes = {
       () => import("../features/sast-runs/SastRunsListPage.jsx"),
       "SastRunsListPage",
     ),
-    props: () => ({}),
+    props: (route) => ({ initialTab: route.tab }),
   },
   "sast-run-new": {
     section: "sast",

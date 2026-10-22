@@ -69,6 +69,15 @@ test("collapses SAST chat to a right rail and remembers the drawer state", async
   expect(localStorage.getItem("aespa_sast_alice_drawer_open")).toBe("true");
 });
 
+test("links an API-associated scan back to the API tab", async () => {
+  sastRunsApi.getSastRun.mockResolvedValue({ ...run, associated_collection_id: 4 });
+  render(<SastRunDetailExperience runId={249} initialTab="coverage" />);
+
+  expect((await screen.findByRole("link", { name: "SAST Scans" })).getAttribute("href")).toBe(
+    "#/sast-runs/api",
+  );
+});
+
 afterEach(() => {
   delete window.HTMLElement.prototype.scrollIntoView;
   vi.unstubAllGlobals();

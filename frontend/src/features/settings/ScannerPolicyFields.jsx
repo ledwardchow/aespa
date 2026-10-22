@@ -26,23 +26,6 @@ export function ScannerPolicyFields({ form, upd, disabled = false }) {
         <input
           type="checkbox"
           disabled={disabled}
-          checked={form.disable_deterministic_checks}
-          onChange={(e) =>
-            upd({
-              disable_deterministic_checks: e.target.checked,
-            })
-          }
-        />
-        <span>Disable automatic security checks</span>
-      </label>
-      <div className="subtle" style={{ marginBottom: "10px" }}>
-        Skip automatic TLS, authentication, IDOR, and probe-result checks. JavaScript source is
-        still read for possible XSS paths, but those leads need browser confirmation.
-      </div>
-      <label className="toggle-row">
-        <input
-          type="checkbox"
-          disabled={disabled}
           checked={form.execution_monitor_enabled}
           onChange={(e) =>
             upd({

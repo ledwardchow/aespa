@@ -116,6 +116,8 @@ def create_from_archive(
     analysis_mode: str = "deep",
     llm_config_id: int | None = None,
     llm_profile_id: int | None = None,
+    site_id: int | None = None,
+    associated_collection_id: int | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> SastRun:
     """Create a pending SAST run from a stored upload. Nothing is started."""
@@ -125,6 +127,8 @@ def create_from_archive(
 
     return sast_scanner.create_sast_run(
         collection_id=None,
+        site_id=site_id,
+        associated_collection_id=associated_collection_id,
         name=name or f"SAST – {archive.original_name}",
         source_archive_path=str(archive.path),
         source_filename=archive.original_name,
@@ -148,6 +152,8 @@ async def create_from_source(
     name: str | None = None,
     analysis_mode: str = "deep",
     llm_profile_id: int | None = None,
+    site_id: int | None = None,
+    associated_collection_id: int | None = None,
     start_scan: bool = True,
     metadata: dict[str, Any] | None = None,
 ) -> SastRun:
@@ -177,6 +183,8 @@ async def create_from_source(
     )
     run = sast_scanner.create_sast_run(
         collection_id=None,
+        site_id=site_id,
+        associated_collection_id=associated_collection_id,
         name=(name or "").strip() or default_name,
         source_provider=provider_id,
         source_locator=repository if isinstance(repository, str) else None,

@@ -3,13 +3,18 @@ import { req } from "./request.ts";
 
 export const listAllSastRuns = () => req(`/api/sast-runs`);
 
-export const listSastRunsPage = ({ page, pageSize, sortField, sortDir }, signal) =>
+export const listSastRunsPage = (
+  { page, pageSize, sortField, sortDir, association, targetId },
+  signal,
+) =>
   req(
     `/api/sast-runs/page?${new URLSearchParams({
       page,
       page_size: pageSize,
       sort_field: sortField,
       sort_dir: sortDir,
+      ...(association ? { association } : {}),
+      ...(targetId ? { target_id: targetId } : {}),
     })}`,
     { signal },
   );
@@ -69,12 +74,15 @@ export const revalidateSastLead = (id, leadId) =>
 
 export const getSastTokenUsage = (id) => req(`/api/sast-runs/${id}/token-usage`);
 
-export const createStandaloneSastRun = (file, name, llm_profile_id, analysis_mode) => {
+export const createStandaloneSastRun = (file, name, llm_profile_id, analysis_mode, association) => {
   const fd = new FormData();
   fd.append("file", file);
   if (name) fd.append("name", name);
   if (llm_profile_id) fd.append("llm_profile_id", llm_profile_id);
   if (analysis_mode) fd.append("analysis_mode", analysis_mode);
+  if (association?.site_id) fd.append("site_id", association.site_id);
+  if (association?.associated_collection_id)
+    fd.append("associated_collection_id", association.associated_collection_id);
   return req(`/api/sast-runs`, { method: "POST", body: fd });
 };
 
@@ -84,6 +92,8 @@ export const createSastRunFromSource = ({
   name,
   llm_profile_id,
   analysis_mode,
+  site_id,
+  associated_collection_id,
 }) =>
   req(`/api/sast-runs/from-source`, {
     method: "POST",
@@ -93,6 +103,8 @@ export const createSastRunFromSource = ({
       name,
       llm_profile_id,
       analysis_mode,
+      site_id,
+      associated_collection_id,
       start_scan: true,
     },
   });

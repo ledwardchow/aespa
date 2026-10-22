@@ -280,7 +280,7 @@ def _update_site_locked(session: Session, site_id: int, payload: SiteUpdate) -> 
 
 
 def delete_site(session: Session, site_id: int) -> None:
-    from aespa.models import SystemTarget, TestRun
+    from aespa.models import SastRun, SystemTarget, TestRun
     from aespa.services import run_cleanup
 
     site = get_site(session, site_id)
@@ -296,6 +296,9 @@ def delete_site(session: Session, site_id: int) -> None:
     runs = session.exec(select(TestRun).where(TestRun.site_id == site_id)).all()
     for run in runs:
         run_cleanup.cascade_delete_web_run(session, run.id)
+    for run in session.exec(select(SastRun).where(SastRun.site_id == site_id)).all():
+        run.site_id = None
+        session.add(run)
     session.delete(site)
     session.commit()
 

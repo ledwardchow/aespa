@@ -5,6 +5,7 @@ import { ScanPolicyPage } from "./ScanPolicyPage.jsx";
 vi.mock("./ScannerPolicySettings.jsx", () => ({
   GlobalPolicySettings: () => <div>Global settings</div>,
   ScannerPolicySettings: () => <div>Test Lead settings</div>,
+  SecurityChecksSettings: () => <div>Security checks settings</div>,
 }));
 vi.mock("./DebugPage.jsx", () => ({
   SystemSettingsPanels: ({ tab }) => <div>{tab} settings</div>,
@@ -90,6 +91,17 @@ test("shows feature visibility and debug settings under Global", () => {
   expect(window.location.hash).toBe("#/scan-policy/global/proxy");
   expect(screen.queryByText("debug settings")).toBeNull();
   expect(screen.queryByRole("tab", { name: "Scan Behaviour" })).toBeNull();
+});
+
+test("shows shared security checks under Global", () => {
+  render(<ScanPolicyPage />);
+
+  fireEvent.click(screen.getByRole("tab", { name: "Security Checks" }));
+  expect(screen.getByText("Security checks settings")).toBeTruthy();
+  expect(window.location.hash).toBe("#/scan-policy/global/security-checks");
+
+  fireEvent.click(screen.getByRole("tab", { name: "DAST" }));
+  expect(screen.queryByRole("tab", { name: "Security Checks" })).toBeNull();
 });
 
 test("opens a nested tab from its URL", () => {

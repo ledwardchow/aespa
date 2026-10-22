@@ -3,7 +3,11 @@ import styles from "./ScanPolicyPage.module.css";
 import { useState } from "react";
 import { nav } from "../../shared/navigation/router.js";
 import { ValidatorSettings } from "./ValidatorSettings.jsx";
-import { GlobalPolicySettings, ScannerPolicySettings } from "./ScannerPolicySettings.jsx";
+import {
+  GlobalPolicySettings,
+  ScannerPolicySettings,
+  SecurityChecksSettings,
+} from "./ScannerPolicySettings.jsx";
 import { SpecialistAgentSettings } from "./SpecialistAgentSettings.jsx";
 import { ReportingSettings } from "./ReportingSettings.jsx";
 import { CrawlerSettings } from "./CrawlerSettings.jsx";
@@ -38,6 +42,7 @@ const DAST_TABS = [
 
 const GLOBAL_TABS = [
   { key: "features", label: "General" },
+  { key: "security-checks", label: "Security Checks" },
   { key: "openai-refusals", label: "Refusal Handling" },
   { key: "debug", label: "Debugging" },
   { key: "proxy", label: "Connectivity" },
@@ -124,7 +129,13 @@ export function ScanPolicyPage({
         )}
         <div className={`scroll-content ${styles.scroll}`}>
           {tab === "global" &&
-            !["proxy", "libraries", "authentication", "openai-refusals"].includes(globalTab) && (
+            ![
+              "proxy",
+              "libraries",
+              "authentication",
+              "openai-refusals",
+              "security-checks",
+            ].includes(globalTab) && (
               <div className={styles.systemSettingsPanels}>
                 <SystemSettingsPanels
                   tab={globalTab}
@@ -148,6 +159,7 @@ export function ScanPolicyPage({
           {tab === "global" && globalTab === "libraries" && <RetireListSettings />}
           {tab === "global" && globalTab === "authentication" && <AuthenticationSettings />}
           {tab === "global" && globalTab === "openai-refusals" && <OpenAIRefusalSettings />}
+          {tab === "global" && globalTab === "security-checks" && <SecurityChecksSettings />}
           {tab === "systems" && <ComponentMapperSettings />}
           {tab === "dast" && dastTab === "scan-behaviour" && (
             <GlobalPolicySettings tab="scan-behaviour" />

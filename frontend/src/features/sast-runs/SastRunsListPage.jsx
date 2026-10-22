@@ -4,6 +4,8 @@ import { useBenchmarkLinks } from "../../shared/hooks/useBenchmarkLinks.js";
 import { BenchmarkBadge } from "../../shared/ui/BenchmarkBadge.jsx";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
+import * as sitesApi from "../../shared/api/sites.js";
+import * as apiCollectionsApi from "../../shared/api/apiCollections.js";
 
 import { useState, useEffect, useRef, useCallback } from "react";
 
@@ -14,12 +16,21 @@ import { NavigationRow } from "../../shared/ui/NavigationRow.jsx";
 import { PageHeader } from "../../shared/ui/PageHeader.jsx";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 import { PageError } from "../../shared/ui/Notice.jsx";
+import { Tabs } from "../../shared/ui/Tabs.tsx";
 
-export function SastRunsListPage() {
+const ASSOCIATION_TABS = [
+  { key: "site", label: "Site" },
+  { key: "api", label: "API" },
+  { key: "unassociated", label: "Unassociated" },
+];
+
+export function SastRunsListPage({ initialTab = "unassociated" }) {
   const [runs, setRuns] = useState(null);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+  const [association, setAssociation] = useState(initialTab);
+  const [targetFilter, setTargetFilter] = useState("");
   const [profiles, setProfiles] = useState([]);
   const [error, setError] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -28,12 +39,27 @@ export function SastRunsListPage() {
   const [sortDir, setSortDir] = useState("desc");
   const benchmarkLinks = useBenchmarkLinks();
   const [deletingRunId, setDeletingRunId] = useState(null);
+  const [editingRun, setEditingRun] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editGroup, setEditGroup] = useState("");
+  const [editTarget, setEditTarget] = useState("");
+  const [sites, setSites] = useState([]);
+  const [apiCollections, setApiCollections] = useState([]);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const editNameRef = useRef(null);
 
   const loadRuns = useCallback(
     async (signal) => {
       try {
         const result = await sastRunsApi.listSastRunsPage(
-          { page, pageSize, sortField, sortDir },
+          {
+            page,
+            pageSize,
+            sortField,
+            sortDir,
+            association,
+            ...(targetFilter ? { targetId: Number(targetFilter) } : {}),
+          },
           signal,
         );
         if (signal?.aborted) return;
@@ -47,10 +73,31 @@ export function SastRunsListPage() {
         if (!signal?.aborted) setError(e.message);
       }
     },
-    [page, pageSize, sortField, sortDir],
+    [page, pageSize, sortField, sortDir, association, targetFilter],
   );
 
   usePolling(loadRuns, { intervalMs: 3000 });
+
+  useEffect(() => {
+    setAssociation(initialTab);
+    setTargetFilter("");
+    setPage(1);
+    setRuns(null);
+  }, [initialTab]);
+
+  useEffect(() => {
+    if (association === "site") {
+      sitesApi
+        .listSites()
+        .then(setSites)
+        .catch((e) => setError(e.message));
+    } else if (association === "api") {
+      apiCollectionsApi
+        .listApiCollections()
+        .then(setApiCollections)
+        .catch((e) => setError(e.message));
+    }
+  }, [association]);
 
   useEffect(() => {
     settingsApi
@@ -58,6 +105,10 @@ export function SastRunsListPage() {
       .then((p) => setProfiles(p || []))
       .catch((e) => setError(e.message));
   }, []);
+
+  useEffect(() => {
+    if (editingRun) editNameRef.current?.focus();
+  }, [editingRun]);
 
   const onImport = async (event) => {
     const file = event.target.files && event.target.files[0];
@@ -100,12 +151,79 @@ export function SastRunsListPage() {
     }
   };
 
-  const sortArrow = (field) => {
-    if (sortField !== field) return null;
+  const onEdit = async (run) => {
+    setEditingRun(run);
+    setEditName(run.name);
+    setEditGroup(
+      run.site_id
+        ? "site"
+        : run.associated_collection_id || (run.collection_id && !run.group_override)
+          ? "api"
+          : "",
+    );
+    setEditTarget(
+      String(
+        run.site_id ||
+          run.associated_collection_id ||
+          (!run.group_override && run.collection_id) ||
+          "",
+      ),
+    );
+    setError(null);
+    try {
+      const [siteItems, apiItems] = await Promise.all([
+        sitesApi.listSites(),
+        apiCollectionsApi.listApiCollections(),
+      ]);
+      setSites(siteItems || []);
+      setApiCollections(apiItems || []);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const onSaveEdit = async (event) => {
+    event.preventDefault();
+    if (!editName.trim()) {
+      setError("Enter a scan name");
+      return;
+    }
+    if (editGroup && !editTarget) {
+      setError(`Choose a ${editGroup === "site" ? "Site" : "API"}`);
+      return;
+    }
+    setSavingEdit(true);
+    setError(null);
+    try {
+      await sastRunsApi.updateSastRun(editingRun.id, {
+        name: editName.trim(),
+        site_id: editGroup === "site" ? Number(editTarget) : null,
+        associated_collection_id: editGroup === "api" ? Number(editTarget) : null,
+      });
+      setEditingRun(null);
+      await loadRuns();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const sortableHeader = (label, field) => {
+    const active = sortField === field;
     return (
-      <span style={{ marginLeft: "4px", fontSize: "10px", opacity: 0.85 }}>
-        {sortDir === "asc" ? "▲" : "▼"}
-      </span>
+      <th aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
+        <button
+          className={`sast-sort-button${active ? " active" : ""}`}
+          type="button"
+          onClick={() => toggleSort(field)}
+        >
+          {label}
+          <span className="sast-sort-indicator" aria-hidden="true">
+            {active ? (sortDir === "asc" ? "▲" : "▼") : "↕"}
+          </span>
+        </button>
+      </th>
     );
   };
 
@@ -137,15 +255,124 @@ export function SastRunsListPage() {
           </>
         }
       />
+      <Tabs
+        label="SAST scan groups"
+        tabs={ASSOCIATION_TABS}
+        value={association}
+        onChange={(key) => {
+          setAssociation(key);
+          setTargetFilter("");
+          setPage(1);
+          setRuns(null);
+          nav(`#/sast-runs/${key}`);
+        }}
+      />
       <div className="content scroll-content">
         <PageError error={error} inline={!runs} onDismiss={() => setError(null)} />
+        {association !== "unassociated" && (
+          <div className="sast-runs-filter">
+            <label htmlFor="sast-runs-target-filter">
+              Filter by {association === "site" ? "Site" : "API"}
+            </label>
+            <select
+              id="sast-runs-target-filter"
+              className="select"
+              value={targetFilter}
+              onChange={(event) => {
+                setTargetFilter(event.target.value);
+                setPage(1);
+                setRuns(null);
+              }}
+            >
+              <option value="">All {association === "site" ? "Sites" : "APIs"}</option>
+              {(association === "site" ? sites : apiCollections).map((target) => (
+                <option key={target.id} value={target.id}>
+                  {target.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {editingRun && (
+          <form
+            className="card"
+            style={{ maxWidth: 620, marginBottom: 16 }}
+            onSubmit={onSaveEdit}
+            aria-label="Edit SAST scan"
+          >
+            <div className="form-section-title">Edit SAST scan</div>
+            <div className="field">
+              <label htmlFor="sast-edit-name">Name</label>
+              <input
+                id="sast-edit-name"
+                ref={editNameRef}
+                value={editName}
+                onChange={(event) => setEditName(event.target.value)}
+                required
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="sast-edit-group">Group</label>
+              <select
+                id="sast-edit-group"
+                className="select"
+                value={editGroup}
+                onChange={(event) => {
+                  setEditGroup(event.target.value);
+                  setEditTarget("");
+                }}
+              >
+                <option value="">Unassociated</option>
+                <option value="site">Site</option>
+                <option value="api">API</option>
+              </select>
+            </div>
+            {editGroup && (
+              <div className="field">
+                <label htmlFor="sast-edit-target">{editGroup === "site" ? "Site" : "API"}</label>
+                <select
+                  id="sast-edit-target"
+                  className="select"
+                  value={editTarget}
+                  onChange={(event) => setEditTarget(event.target.value)}
+                  required
+                >
+                  <option value="">Choose {editGroup === "site" ? "Site" : "API"}</option>
+                  {(editGroup === "site" ? sites : apiCollections).map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn" type="submit" disabled={savingEdit}>
+                {savingEdit ? "Saving…" : "Save changes"}
+              </button>
+              <button className="btn secondary" type="button" onClick={() => setEditingRun(null)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
         {runs === null && <div className="subtle">Loading…</div>}
         {runs !== null && total === 0 && (
           <EmptyState
             icon="🔍"
-            title="No SAST scans yet"
+            title={
+              targetFilter
+                ? `No scans for this ${association === "site" ? "Site" : "API"}`
+                : association === "unassociated"
+                  ? "No unassociated SAST scans"
+                  : `No ${association === "site" ? "Site" : "API"} SAST scans`
+            }
             sub={
-              'Click "New SAST Scan" to upload a source ZIP and analyse it. Leads can then be imported into a web or API test run.'
+              targetFilter
+                ? `Choose another ${association === "site" ? "Site" : "API"} or show all.`
+                : association === "unassociated"
+                  ? "Create a SAST scan without choosing a Site or API to list it here."
+                  : `Create a SAST scan and choose a ${association === "site" ? "Site" : "API"} to list it here.`
             }
           />
         )}
@@ -156,9 +383,10 @@ export function SastRunsListPage() {
                 <colgroup>
                   <col
                     style={{
-                      width: "30%",
+                      width: association === "unassociated" ? "30%" : "24%",
                     }}
                   />
+                  {association !== "unassociated" && <col style={{ width: "16%" }} />}
                   <col
                     style={{
                       width: "13%",
@@ -179,36 +407,13 @@ export function SastRunsListPage() {
                 </colgroup>
                 <thead>
                   <tr>
-                    <th
-                      style={{ cursor: "pointer", userSelect: "none" }}
-                      onClick={() => toggleSort("name")}
-                    >
-                      Name {sortArrow("name")}
-                    </th>
-                    <th
-                      style={{ cursor: "pointer", userSelect: "none" }}
-                      onClick={() => toggleSort("status")}
-                    >
-                      Status {sortArrow("status")}
-                    </th>
-                    <th
-                      style={{ cursor: "pointer", userSelect: "none" }}
-                      onClick={() => toggleSort("analysis_mode")}
-                    >
-                      Analysis {sortArrow("analysis_mode")}
-                    </th>
-                    <th
-                      style={{ cursor: "pointer", userSelect: "none" }}
-                      onClick={() => toggleSort("leads_count")}
-                    >
-                      Leads {sortArrow("leads_count")}
-                    </th>
-                    <th
-                      style={{ cursor: "pointer", userSelect: "none" }}
-                      onClick={() => toggleSort("started_at")}
-                    >
-                      Started {sortArrow("started_at")}
-                    </th>
+                    {sortableHeader("Name", "name")}
+                    {association !== "unassociated" &&
+                      sortableHeader(association === "site" ? "Site" : "API", "target")}
+                    {sortableHeader("Status", "status")}
+                    {sortableHeader("Analysis", "analysis_mode")}
+                    {sortableHeader("Leads", "leads_count")}
+                    {sortableHeader("Started", "started_at")}
                     <th></th>
                   </tr>
                 </thead>
@@ -247,6 +452,22 @@ export function SastRunsListPage() {
                         )}
                         <BenchmarkBadge href={benchmarkLinks[`sast:${r.id}`]} />
                       </td>
+                      {association !== "unassociated" && (
+                        <td>
+                          <a
+                            href={
+                              r.site_id
+                                ? `#/sites/${r.site_id}`
+                                : `#/apis/${r.associated_collection_id || r.collection_id}`
+                            }
+                          >
+                            {r.associated_name ||
+                              (r.site_id
+                                ? `Site #${r.site_id}`
+                                : `API #${r.associated_collection_id || r.collection_id}`)}
+                          </a>
+                        </td>
+                      )}
                       <td>
                         <StatusBadge status={r.status} />
                       </td>
@@ -260,6 +481,13 @@ export function SastRunsListPage() {
                           <a className="btn secondary sm" href={`#/sast-runs/${r.id}/progress`}>
                             Open
                           </a>
+                          <button
+                            type="button"
+                            className="btn secondary sm"
+                            onClick={() => onEdit(r)}
+                          >
+                            Edit
+                          </button>
                           <button
                             type="button"
                             className="btn danger-outline sm"

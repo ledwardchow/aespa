@@ -279,6 +279,34 @@ def test_analysis_endpoint_returns_persisted_semantic_state(client, isolated_db_
     }
 
 
+def test_completed_analysis_uses_saved_work_summary_when_detail_rows_are_missing(
+    client, isolated_db_engine
+):
+    sast_run_id, _ = _run_with_web_target(isolated_db_engine)
+    with Session(isolated_db_engine) as session:
+        run = session.get(SastRun, sast_run_id)
+        run.report_json = json.dumps(
+            {
+                "completion_status": "full",
+                "work_program": {
+                    "files": {"total": 117, "directly_opened": 43},
+                    "work_items": {"total": 150, "resolved": 150},
+                    "code_graph": {"files_parsed": 82, "functions": 253},
+                },
+            }
+        )
+        session.add(run)
+        session.commit()
+
+    response = client.get(f"/api/sast-runs/{sast_run_id}/analysis")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["work_program"]["code_graph"]["files_parsed"] == 82
+    assert body["work_program"]["work_items"]["resolved"] == 150
+    assert body["assurance"]["status"] == "full"
+
+
 def test_agent_log_recovers_fixed_agent_state_from_phase_history(
     client, isolated_db_engine
 ):

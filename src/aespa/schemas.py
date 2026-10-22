@@ -422,6 +422,9 @@ class SastRunSummary(BaseModel):
 
     id: int
     collection_id: int | None
+    site_id: int | None = None
+    associated_collection_id: int | None = None
+    group_override: bool = False
     document_id: int | None
     source_filename: str | None
     source_archive_path: str | None = None
@@ -451,9 +454,12 @@ class SastRunSummary(BaseModel):
 
 
 class SastRunUpdate(BaseModel):
-    """Mutable SAST settings. A null profile follows the globally active profile."""
+    """Mutable SAST settings and list grouping."""
 
     llm_profile_id: int | None = None
+    name: str | None = None
+    site_id: int | None = None
+    associated_collection_id: int | None = None
 
 
 class ScanLeadOut(BaseModel):

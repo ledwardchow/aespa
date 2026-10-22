@@ -92,6 +92,8 @@ export function parseRoute(hash = "#/"): Route {
   if ((m = routeHash.match(/^#\/api-runs\/(\d+)$/)))
     return { name: "api-run-detail", id: +m[1], findingRef, leadRef };
   if (routeHash === "#/sast-runs/new") return { name: "sast-run-new" };
+  if ((m = routeHash.match(/^#\/sast-runs\/(site|api|unassociated)$/)))
+    return { name: "sast-list", tab: m[1] };
   if (routeHash === "#/sast-runs") return { name: "sast-list" };
   if ((m = routeHash.match(/^#\/sast-runs\/(\d+)\/alice-popout$/)))
     return { name: "sast-alice-popout", id: +m[1] };
@@ -163,7 +165,7 @@ export function parseRoute(hash = "#/"): Route {
     return { name: "scan-policy", tab: routeHash.slice("#/scan-policy/".length) };
   if (
     (m = routeHash.match(
-      /^#\/scan-policy\/global\/(features|openai-refusals|debug|proxy|libraries|authentication)$/,
+      /^#\/scan-policy\/global\/(features|security-checks|openai-refusals|debug|proxy|libraries|authentication)$/,
     ))
   )
     return { name: "scan-policy", tab: "global", subTab: m[1] };

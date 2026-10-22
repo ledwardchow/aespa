@@ -644,6 +644,17 @@
   min-height: 0;
   overflow: auto;
 }
+.sast-runs-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.sast-runs-filter .select {
+  min-width: 180px;
+  max-width: min(100%, 320px);
+}
 .sast-runs-pager {
   display: flex;
   align-items: center;
@@ -1081,16 +1092,16 @@
   line-height: 1.6;
 }
 .sast-coverage-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(245px, 0.75fr);
-  gap: 10px;
-  align-items: start;
-}
-.sast-coverage-main {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+.sast-coverage-main {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 10px;
   min-width: 0;
+  align-items: start;
 }
 .sast-coverage-summary .sast-coverage-grid > .sast-coverage-name {
   font-weight: 600;
@@ -1175,31 +1186,160 @@
 }
 .sast-file-receipts {
   overflow: hidden;
+  container-type: inline-size;
+}
+.sast-file-toolbar {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.sast-file-toolbar input {
+  width: min(100%, 320px);
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font: inherit;
+}
+.sast-file-toolbar input:focus-visible,
+.sast-file-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .sast-file-list {
   max-height: 460px;
   overflow-y: auto;
 }
-.sast-file-list > div {
+.sast-file-columns,
+.sast-file-row {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  gap: 3px 8px;
+  grid-template-columns: minmax(140px, 1fr) 110px 100px 60px;
+  gap: 8px;
   align-items: center;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
 }
-.sast-file-list code {
-  min-width: 0;
-  overflow: hidden;
+.sast-file-columns {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+}
+.sast-file-row {
+  min-height: 38px;
+  padding: 2px 12px 2px 0;
+  border-bottom: 1px solid var(--border);
   color: var(--text-2);
-  font-size: 10px;
-  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.sast-file-row:hover {
+  background: var(--hover);
+}
+.sast-file-folder {
+  color: var(--text);
+  font-weight: 600;
+}
+.sast-file-name,
+.sast-file-label,
+.sast-file-toggle {
+  min-width: 0;
+}
+.sast-file-label,
+.sast-file-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
   white-space: nowrap;
 }
-.sast-file-list small {
-  grid-column: 2;
+.sast-file-label > span:last-child,
+.sast-file-toggle > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sast-file-toggle {
+  width: 100%;
+  padding: 3px 0;
+  color: inherit;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-weight: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sast-file-chevron,
+.sast-file-indent {
+  width: 10px;
+  flex: none;
   color: var(--muted);
-  font-size: 9px;
+}
+.sast-file-icon {
+  position: relative;
+  width: 14px;
+  height: 12px;
+  flex: none;
+}
+.sast-file-icon-folder {
+  height: 10px;
+  margin-top: 3px;
+  background: #bd9b57;
+  border-radius: 2px;
+}
+.sast-file-icon-folder::before {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  width: 7px;
+  height: 4px;
+  background: #bd9b57;
+  border-radius: 2px 2px 0 0;
+  content: "";
+}
+.sast-file-icon-document {
+  background: #7b8ba8;
+  border-radius: 2px;
+}
+.sast-file-icon-document::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 8px;
+  height: 1px;
+  background: var(--panel);
+  box-shadow: 0 3px var(--panel);
+  content: "";
+}
+.sast-file-type,
+.sast-file-reads {
+  color: var(--muted);
+}
+.sast-file-reads,
+.sast-file-columns > span:last-child {
+  text-align: right;
+}
+.sast-file-empty {
+  padding: 24px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+@container (max-width: 540px) {
+  .sast-file-columns,
+  .sast-file-row {
+    grid-template-columns: minmax(80px, 1fr) 78px 36px;
+    gap: 4px;
+  }
+  .sast-file-columns > span:nth-child(3),
+  .sast-file-type {
+    display: none;
+  }
+  .sast-file-row {
+    font-size: 11px;
+  }
 }
 .sast-activity-panel {
   display: flex;
@@ -1635,10 +1775,6 @@
   }
   .sast-run-summary-grid {
     grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
-  }
-  .sast-coverage-layout {
-    grid-template-columns: 1fr;
-    gap: 10px;
   }
   .sast-evidence-body {
     padding: 16px;

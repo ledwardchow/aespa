@@ -264,6 +264,8 @@ def import_sast_run(session: Session, bundle: Any) -> SastRun:
     run_data = dict(bundle["sast_run"])
     run_data.pop("id", None)
     run_data.pop("collection_id", None)
+    run_data.pop("site_id", None)
+    run_data.pop("associated_collection_id", None)
     run_data.pop("document_id", None)
     run_data.pop("source_archive_path", None)
     run_data["collection_id"] = None

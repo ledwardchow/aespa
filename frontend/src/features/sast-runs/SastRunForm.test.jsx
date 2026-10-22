@@ -4,17 +4,23 @@ import { beforeEach, expect, test, vi } from "vitest";
 import * as extensionsApi from "../../shared/api/extensions.js";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
+import * as sitesApi from "../../shared/api/sites.js";
+import * as apiCollectionsApi from "../../shared/api/apiCollections.js";
 import { nav } from "../../shared/navigation/router.js";
 import { SastRunForm } from "./SastRunForm.jsx";
 
 vi.mock("../../shared/api/extensions.js");
 vi.mock("../../shared/api/sastRuns.js");
 vi.mock("../../shared/api/settings.js");
+vi.mock("../../shared/api/sites.js");
+vi.mock("../../shared/api/apiCollections.js");
 vi.mock("../../shared/navigation/router.js", () => ({ nav: vi.fn() }));
 
 beforeEach(() => {
   vi.clearAllMocks();
   settingsApi.listLLMProfiles.mockResolvedValue([]);
+  sitesApi.listSites.mockResolvedValue([{ id: 3, name: "Shop" }]);
+  apiCollectionsApi.listApiCollections.mockResolvedValue([{ id: 4, name: "Payments" }]);
   extensionsApi.listSourceProviders.mockResolvedValue([
     {
       id: "aespa.githubrepository",
@@ -73,5 +79,20 @@ test("offers Deep mode when the experimental toggle is on", async () => {
 
   expect(sastRunsApi.createSastRunFromSource).toHaveBeenCalledWith(
     expect.objectContaining({ analysis_mode: "deep" }),
+  );
+});
+
+test("associates a new source scan with the chosen API", async () => {
+  const user = userEvent.setup();
+  render(<SastRunForm />);
+
+  await user.selectOptions(await screen.findByLabelText("Source"), "aespa.githubrepository");
+  await user.type(screen.getByLabelText(/Repository/), "acme/payments");
+  await user.selectOptions(screen.getByLabelText("Associate with"), "api");
+  await user.selectOptions(await screen.findByLabelText("API"), "4");
+  await user.click(screen.getByRole("button", { name: "Create and start scan" }));
+
+  expect(sastRunsApi.createSastRunFromSource).toHaveBeenCalledWith(
+    expect.objectContaining({ associated_collection_id: 4 }),
   );
 });

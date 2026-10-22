@@ -138,6 +138,7 @@ Migration rules and checks:
 | --- | --- |
 | Every mapped table and column must be created by Alembic. | The test database is built from migrations alone. `test_migrations_create_all_model_columns` checks the result, and `migration-check.yml` runs the migration tests on pushes and pull requests. |
 | Do not change an existing migration revision. Add a new one so databases that applied the old revision can upgrade. | `check_migration_history.py` rejects changes to revisions already on the pull request's base branch. If an uncommitted revision was applied locally, add a follow-up revision and test that upgrade path. |
+| Preserve saved SAST child rows when changing `sast_run`. A SQLite table rebuild can cascade-delete those rows when foreign keys are enabled. | `check_migration_history.py` rejects new revisions that rebuild or drop `sast_run`. `test_sast_association_migration_preserves_saved_scan_data` upgrades and downgrades a populated database with foreign keys enabled; `migration-check.yml` runs it on pushes and pull requests. |
 
 ## Critical Gotcha: Run-ID Collision
 

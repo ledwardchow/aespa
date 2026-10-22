@@ -3309,6 +3309,8 @@ def _is_light_run(sast_run_id: int) -> bool:
 def create_sast_run(
     *,
     collection_id: int | None = None,
+    site_id: int | None = None,
+    associated_collection_id: int | None = None,
     name: str,
     document_id: int | None = None,
     source_archive_path: str | None = None,
@@ -3333,8 +3335,12 @@ def create_sast_run(
     """
     if analysis_mode not in {"light", "deep"}:
         raise ValueError("analysis_mode must be either 'light' or 'deep'")
+    if site_id is not None and (collection_id is not None or associated_collection_id is not None):
+        raise ValueError("A SAST scan can be associated with one Site or API")
     run = SastRun(
         collection_id=collection_id,
+        site_id=site_id,
+        associated_collection_id=associated_collection_id,
         name=name,
         document_id=document_id,
         source_archive_path=source_archive_path,

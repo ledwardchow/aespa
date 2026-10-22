@@ -145,6 +145,11 @@ def delete_collection(session: Session, collection_id: int) -> None:
         select(SastRun).where(SastRun.collection_id == collection_id)
     ).all():
         run_cleanup.cascade_delete_sast_run(session, run.id)
+    for run in session.exec(
+        select(SastRun).where(SastRun.associated_collection_id == collection_id)
+    ).all():
+        run.associated_collection_id = None
+        session.add(run)
     # Leads carry a collection_id of their own; sweep any not tied to a SAST run.
     for lead in session.exec(
         select(ScanLead).where(ScanLead.collection_id == collection_id)

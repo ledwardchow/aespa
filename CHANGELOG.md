@@ -24,11 +24,15 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### Updates
 
+- **Automatic security checks setting**: The setting is now under Global > Security Checks, with a description of how it affects Sites, API, and SAST scans. It remains off by default.
+
+- **SAST file reads**: The Coverage tab now groups inventoried files into folders. You can expand folders or search for a file, and see direct read counts for each file and folder.
+
 - **Site and API test runs**: Test run lists now load one page at a time, with choices of 10, 25, 50, or 100 runs per page. Sorting covers all runs. Site rows load only the details needed for the list and Edit run, and the site header no longer loads saved workflows or account details. API collections load endpoints and credentials when you open those tabs instead of loading them with Test runs.
 
 - **External scanner leads**: Import other JSON, unstructured Markdown, and plain text reports using the selected run's model. Preview shows the proposed leads and marks missing confidence as Unknown. Import saves the previewed leads without another model call. Reports needing model review have a 128 KiB limit; SARIF and structured Markdown keep their direct import path.
 
-- **SAST scans list**: The list now loads one page at a time. You can show 10, 25, 50, or 100 scans per page and move between pages. Sorting still applies to the full list. Benchmark badges now load link IDs instead of full saved results, and checking scan status no longer reloads each listed scan from the database.
+- **SAST scans list**: New scans can be associated with a Site or API, or left unassociated. Existing scans can be renamed or moved between these groups from the list, including scans created under an API collection. The list has a tab for each group and shows the linked Site or API. You can filter the Site and API tabs by target and sort every table column, including the target name. Each tab loads one page at a time, with choices of 10, 25, 50, or 100 scans per page. Sorting and filtering apply to the full selected group. Benchmark badges now load link IDs instead of full saved results, and checking scan status no longer reloads each listed scan from the database.
 
 - **SAST source review efficiency**: Light and Deep scan agents can begin reviewing their assigned work or candidate without fetching the same details again. They can still look up the current record when needed.
 

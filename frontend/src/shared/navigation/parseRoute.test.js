@@ -28,6 +28,9 @@ test.each([
   ],
   ["#/sast-runs/7/progress", { name: "sast-run-detail", id: 7, tab: "progress" }],
   ["#/sast-runs/new", { name: "sast-run-new" }],
+  ["#/sast-runs/site", { name: "sast-list", tab: "site" }],
+  ["#/sast-runs/api", { name: "sast-list", tab: "api" }],
+  ["#/sast-runs/unassociated", { name: "sast-list", tab: "unassociated" }],
   ["#/systems/3/campaigns/new", { name: "campaign-new", id: 3 }],
   ["#/applications/3/campaigns/new", { name: "campaign-new", id: 3 }],
   [
@@ -56,6 +59,10 @@ test.each([
   ["#/scan-policy", { name: "scan-policy" }],
   ["#/external-integrations", { name: "scan-policy", tab: "global", subTab: "proxy" }],
   ["#/scan-policy/global/features", { name: "scan-policy", tab: "global", subTab: "features" }],
+  [
+    "#/scan-policy/global/security-checks",
+    { name: "scan-policy", tab: "global", subTab: "security-checks" },
+  ],
   [
     "#/scan-policy/global/openai-refusals",
     { name: "scan-policy", tab: "global", subTab: "openai-refusals" },

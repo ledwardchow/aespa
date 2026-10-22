@@ -1,6 +1,8 @@
 import * as extensionsApi from "../../shared/api/extensions.js";
 import * as sastRunsApi from "../../shared/api/sastRuns.js";
 import * as settingsApi from "../../shared/api/settings.js";
+import * as sitesApi from "../../shared/api/sites.js";
+import * as apiCollectionsApi from "../../shared/api/apiCollections.js";
 import { useEffect, useRef, useState } from "react";
 
 import { nav } from "../../shared/navigation/router.js";
@@ -69,6 +71,10 @@ export function SastRunForm({ showSastDeepScan = false }) {
   const [llmProfileId, setLlmProfileId] = useState("");
   const [analysisMode, setAnalysisMode] = useState("light");
   const [profiles, setProfiles] = useState([]);
+  const [sites, setSites] = useState([]);
+  const [apiCollections, setApiCollections] = useState([]);
+  const [associationType, setAssociationType] = useState("");
+  const [associationId, setAssociationId] = useState("");
   const [providers, setProviders] = useState([]);
   const [providerId, setProviderId] = useState(UPLOAD_PROVIDER_ID);
   const [providerValues, setProviderValues] = useState({});
@@ -81,6 +87,15 @@ export function SastRunForm({ showSastDeepScan = false }) {
       .then(([profileItems, providerItems]) => {
         setProfiles(profileItems || []);
         setProviders(providerItems || []);
+      })
+      .catch((loadError) => setError(loadError.message));
+  }, []);
+
+  useEffect(() => {
+    Promise.all([sitesApi.listSites(), apiCollectionsApi.listApiCollections()])
+      .then(([siteItems, apiItems]) => {
+        setSites(siteItems || []);
+        setApiCollections(apiItems || []);
       })
       .catch((loadError) => setError(loadError.message));
   }, []);
@@ -107,6 +122,16 @@ export function SastRunForm({ showSastDeepScan = false }) {
       );
       return;
     }
+    if (associationType && !associationId) {
+      setError(`Choose a ${associationType === "site" ? "Site" : "API"} or select Unassociated.`);
+      return;
+    }
+    const association = associationId
+      ? {
+          [associationType === "site" ? "site_id" : "associated_collection_id"]:
+            Number(associationId),
+        }
+      : {};
     setSaving(true);
     setError(null);
     try {
@@ -117,6 +142,7 @@ export function SastRunForm({ showSastDeepScan = false }) {
           name.trim() || null,
           llmProfileId ? +llmProfileId : null,
           effectiveAnalysisMode,
+          association,
         );
         await sastRunsApi.startSastScan(run.id);
       } else {
@@ -126,6 +152,7 @@ export function SastRunForm({ showSastDeepScan = false }) {
           name: name.trim() || null,
           llm_profile_id: llmProfileId ? +llmProfileId : null,
           analysis_mode: effectiveAnalysisMode,
+          ...association,
         });
       }
       nav(`#/sast-runs/${run.id}/progress`);
@@ -233,6 +260,44 @@ export function SastRunForm({ showSastDeepScan = false }) {
               placeholder="e.g. Payments API review"
             />
           </div>
+
+          <div className="field">
+            <label htmlFor="sast-association-type">Associate with</label>
+            <select
+              id="sast-association-type"
+              className="select"
+              value={associationType}
+              onChange={(event) => {
+                setAssociationType(event.target.value);
+                setAssociationId("");
+              }}
+            >
+              <option value="">Unassociated</option>
+              <option value="site">Site</option>
+              <option value="api">API</option>
+            </select>
+          </div>
+          {associationType && (
+            <div className="field">
+              <label htmlFor="sast-association-target">
+                {associationType === "site" ? "Site" : "API"}
+              </label>
+              <select
+                id="sast-association-target"
+                className="select"
+                value={associationId}
+                required
+                onChange={(event) => setAssociationId(event.target.value)}
+              >
+                <option value="">Choose {associationType === "site" ? "Site" : "API"}</option>
+                {(associationType === "site" ? sites : apiCollections).map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {showSastDeepScan && (
             <div className="field">
