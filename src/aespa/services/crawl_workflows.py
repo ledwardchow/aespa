@@ -2516,6 +2516,7 @@ async def _run_workflow_retry_scoped(
     run_id: int, workflow: dict, *, save_to_site: bool = False
 ) -> None:
     from aespa.services import crawler
+    from aespa.services import llm as llm_svc
     from aespa.services.settings import (
         get_browser_debug_config,
         get_global_http_header_config,
@@ -2579,22 +2580,27 @@ async def _run_workflow_retry_scoped(
             )
         _retry_shared[run_id] = shared
         proxy_url = proxy_cfg.scanner_proxy_url if proxy_cfg.proxy_scanner else None
-        await explore_after_crawl(
-            run_id,
-            llm_cfg=llm_cfg,
-            site=site,
-            creds=creds,
-            shared=shared,
-            max_pages=max(run.max_pages, len(pages) + _MAX_RETRY_ACTIONS),
-            browser_engine=browser_cfg.browser_engine,
-            browser_visible=bool(browser_cfg.browser_visible),
-            pw_proxy={"proxy": {"server": proxy_url}} if proxy_url else {},
-            global_http_header={
-                header.header_name: header.header_value for header in header_cfg.headers
-            },
-            selected_workflows=[workflow],
-            progress=report,
-        )
+        with llm_svc.llm_transport_scope(
+            proxy_cfg.llm_proxy_url if proxy_cfg.proxy_llm else None,
+            proxy_cfg.llm_ca_bundle_path,
+        ):
+            await explore_after_crawl(
+                run_id,
+                llm_cfg=llm_cfg,
+                site=site,
+                creds=creds,
+                shared=shared,
+                max_pages=max(run.max_pages, len(pages) + _MAX_RETRY_ACTIONS),
+                browser_engine=browser_cfg.browser_engine,
+                browser_visible=bool(browser_cfg.browser_visible),
+                pw_proxy={"proxy": {"server": proxy_url}} if proxy_url else {},
+                global_http_header={
+                    header.header_name: header.header_value
+                    for header in header_cfg.headers
+                },
+                selected_workflows=[workflow],
+                progress=report,
+            )
         if "result_status" not in _retry_results.get(key, {}):
             raise ValueError("The workflow did not produce a result")
         from aespa.services.workflow_workprogram import seed_workflow_tests

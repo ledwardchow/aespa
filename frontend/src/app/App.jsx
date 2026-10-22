@@ -31,7 +31,7 @@ export default function App() {
       </Suspense>
     </RouteErrorBoundary>
   );
-  return route.name === "alice-popout" ? (
+  return route.name === "alice-popout" || route.name === "sast-alice-popout" ? (
     content
   ) : (
     <AppShell section={definition?.section} preferences={preferences}>

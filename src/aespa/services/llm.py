@@ -1372,6 +1372,15 @@ def llm_transport_scope(proxy_url: str | None, ca_bundle_path: str | None):
         _llm_proxy_var.reset(proxy_token)
 
 
+@contextmanager
+def saved_llm_transport_scope():
+    """Apply saved LLM network settings to work outside a scan context."""
+    from aespa.services.llm_network import configured_llm_network
+
+    with llm_transport_scope(*configured_llm_network()):
+        yield
+
+
 def _emit_run_event(event: dict) -> None:
     """Emit an event to whatever log is wired for the active run.
 
@@ -1492,6 +1501,11 @@ def _bedrock_botocore_config(proxy_url: str | None):
     if proxy_url:
         kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
     return BotocoreConfig(**kwargs)
+
+
+def _bedrock_verify(proxy_url: str | None, ca_bundle: str | None):
+    """Let botocore use AWS_CA_BUNDLE when AESPA has no TLS override."""
+    return ca_bundle or (False if proxy_url else None)
 
 
 def _bedrock_session(profile: str | None, proxy_url: str | None, ca_bundle: str | None):
@@ -2460,7 +2474,7 @@ async def _stream_chat_completion_impl(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=_endpoint,
-                    verify=_ca_bundle or not _proxy_url,
+                    verify=_bedrock_verify(_proxy_url, _ca_bundle),
                     config=_boto_cfg,
                 )
                 return client.converse_stream(
@@ -4733,7 +4747,7 @@ async def _bedrock(
                 "bedrock-runtime",
                 region_name=region,
                 endpoint_url=_endpoint,
-                verify=_ca_bundle or not _proxy_url,
+                verify=_bedrock_verify(_proxy_url, _ca_bundle),
                 config=_boto_cfg,
             )
             return _client.converse(
@@ -7222,7 +7236,7 @@ async def _call_with_tools_impl(
                     "bedrock-runtime",
                     region_name=region,
                     endpoint_url=config.base_url or None,
-                    verify=_ca_bundle or not _proxy_url,
+                    verify=_bedrock_verify(_proxy_url, _ca_bundle),
                     config=_boto_cfg,
                 )
                 _infer_converse: dict = {"maxTokens": config.max_tokens}

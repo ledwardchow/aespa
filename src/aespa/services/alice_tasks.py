@@ -30,7 +30,7 @@ class AliceTask:
     tab_id: str
     think_msg_id: str
     reply_msg_id: str
-    run_type: str = "site"  # "site" | "api"
+    run_type: str = "site"  # "site" | "api" | "sast"
     goal_id: int | None = None
     goal: dict[str, Any] | None = None
     steering: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
@@ -90,7 +90,7 @@ def status(
 ) -> dict[str, Any]:
     from aespa.services import alice_goals
 
-    run_kind = "api" if run_type == "api" else "web"
+    run_kind = "web" if run_type == "site" else run_type
     running_tabs = [
         {
             "tab_id": t.tab_id,
@@ -143,7 +143,7 @@ async def start(
     """
     from aespa.services import alice_goals
 
-    run_kind = "api" if run_type == "api" else "web"
+    run_kind = "web" if run_type == "site" else run_type
     key = (run_type, run_id, tab_id)
     existing = _registry.get(key)
     command = re.fullmatch(r"/goal(?:\s+(.*))?", message.strip(), re.I | re.S)
@@ -243,7 +243,8 @@ async def stop(run_id: int, run_type: str = "site", tab_id: str | None = None) -
     if tab_id is None:
         from aespa.services.code_execution import cancel_run_executions
 
-        cancel_run_executions("api" if run_type == "api" else "web", run_id)
+        if run_type != "sast":
+            cancel_run_executions("api" if run_type == "api" else "web", run_id)
         results = [
             await _stop_task(t) for t in _run_tasks(run_id, run_type) if not t.done
         ]
@@ -282,7 +283,7 @@ async def steer_goal(
         return False
     from aespa.services import alice_goals
 
-    run_kind = "api" if run_type == "api" else "web"
+    run_kind = "web" if run_type == "site" else run_type
     current = alice_goals.get_goal(run_kind, task.run_id, task.tab_id)
     if current is None or current.status != "active":
         return False
@@ -403,7 +404,11 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
     from aespa.services import events as events_svc
 
     # Choose the right streaming function based on whether this is an API run.
-    if task.run_type == "api":
+    if task.run_type == "sast":
+        from aespa.services.alice_sast import run_sast_alice_turn_stream
+
+        stream_fn = run_sast_alice_turn_stream
+    elif task.run_type == "api":
         stream_fn = alice_svc.run_api_alice_turn_stream
     else:
         stream_fn = alice_svc.run_alice_turn_stream
@@ -411,7 +416,7 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
     # Tag every event this turn emits with the right run_kind for the lifetime of
     # the stream.  The scope remains authoritative for the surface marker; child
     # tasks spawned during the turn inherit it.
-    run_kind = "api" if task.run_type == "api" else "web"
+    run_kind = "web" if task.run_type == "site" else task.run_type
 
     # Give this tab its own live browser so concurrent tabs don't share or
     # close each other's pages. The context var is local to this asyncio task.
@@ -453,13 +458,14 @@ async def _run(task: AliceTask, message: str, history: list[dict]) -> None:
                     )
 
             # Calibrate all findings for this run when Alice finishes
-            is_api = task.run_type == "api"
-            from aespa.services.scanner import calibrate_all_findings_for_run
+            if task.run_type != "sast":
+                is_api = task.run_type == "api"
+                from aespa.services.scanner import calibrate_all_findings_for_run
 
-            try:
-                calibrate_all_findings_for_run(task.run_id, is_api_run=is_api)
-            except Exception as ce:
-                log.warning("calibrate_all_findings_for_run failed: %s", ce)
+                try:
+                    calibrate_all_findings_for_run(task.run_id, is_api_run=is_api)
+                except Exception as ce:
+                    log.warning("calibrate_all_findings_for_run failed: %s", ce)
     except asyncio.CancelledError:
         if task.goal_id is not None:
             from aespa.services import alice_goals

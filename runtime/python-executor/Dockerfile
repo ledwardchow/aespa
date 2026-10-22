@@ -1,4 +1,5 @@
 FROM python:3.12-slim
+LABEL org.opencontainers.image.source="https://github.com/ledwardchow/aespa"
 
 RUN useradd --uid 65532 --create-home --shell /usr/sbin/nologin sandbox
 COPY aespa_runtime /usr/local/lib/python3.12/site-packages/aespa_runtime

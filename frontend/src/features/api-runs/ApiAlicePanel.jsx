@@ -1,4 +1,5 @@
 import * as apiRunsApi from "../../shared/api/apiRuns.js";
+import * as sastRunsApi from "../../shared/api/sastRuns.js";
 
 import { useState, useEffect, useRef, useCallback } from "react";
 
@@ -6,16 +7,45 @@ import { renderAliceBlocks, renderAliceTraceBox } from "../../shared/alice/rende
 import { parseAliceTurnSegments } from "../../shared/alice/segments.js";
 import { renderMarkdown } from "../../shared/alice/markdown.jsx";
 import { normalizeAliceText } from "../../shared/alice/text.js";
-import { IconSend } from "../../shared/ui/Icons.jsx";
+import { IconChevronRight, IconExternalLink, IconSend } from "../../shared/ui/Icons.jsx";
 import { useAutoFollowScroll } from "../../shared/hooks/useAutoFollowScroll.js";
 import { AliceGoalBar } from "../../shared/ui/AliceGoalBar.jsx";
 
-export function ApiAlicePanel({ runId, agent, onRunningChange }) {
+const CHAT_APIS = {
+  sast: {
+    getSessions: sastRunsApi.getSastAliceSessions,
+    saveSessions: sastRunsApi.saveSastAliceSessions,
+    getStatus: sastRunsApi.getSastAliceStatus,
+    start: sastRunsApi.startSastAliceRun,
+    stop: sastRunsApi.stopSastAliceRun,
+  },
+  api: {
+    getSessions: apiRunsApi.getApiAliceSessions,
+    saveSessions: apiRunsApi.saveApiAliceSessions,
+    getStatus: apiRunsApi.getApiAliceStatus,
+    start: apiRunsApi.startApiAliceRun,
+    stop: apiRunsApi.stopApiAliceRun,
+    steer: apiRunsApi.steerApiAliceGoal,
+  },
+};
+
+export function ApiAlicePanel({
+  runId,
+  agent,
+  onRunningChange = () => {},
+  onCollapse,
+  onPopOut,
+  popout = false,
+  runKind = "api",
+}) {
+  const chatApi = CHAT_APIS[runKind];
+  const storagePrefix = `${runKind}_alice`;
   const [isExpanded, setExpanded] = useState(true);
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
   // ── ALICE chat state ──────────────────────────────────────────────────────
   const [aliceChats, setAliceChats] = useState(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(`api_alice_chats_${runId}`) || "null");
+      const saved = JSON.parse(localStorage.getItem(`${storagePrefix}_chats_${runId}`) || "null");
       return saved && saved.length
         ? saved
         : [
@@ -37,7 +67,7 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
   });
   const [activeAliceTabId, setActiveAliceTabId] = useState(() => {
     try {
-      return localStorage.getItem(`api_alice_active_tab_${runId}`) || "tab-default";
+      return localStorage.getItem(`${storagePrefix}_active_tab_${runId}`) || "tab-default";
     } catch {
       return "tab-default";
     }
@@ -64,20 +94,35 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
   activeAliceTabIdRef.current = activeAliceTabId;
   const sessionsRef = useRef(aliceChats);
   sessionsRef.current = aliceChats;
+  const handlePopOut = () => {
+    const url = new URL(window.location.href);
+    url.hash = `#/sast-runs/${runId}/alice-popout`;
+    const name = `aespa-sast-alice-${runId}`;
+    const popup =
+      window.open(
+        url.toString(),
+        name,
+        "popup,width=760,height=860,resizable=yes,scrollbars=yes",
+      ) || window.open(url.toString(), name);
+    if (!popup) return;
+    popup.focus();
+    onPopOut?.();
+  };
 
   // ── Persist alice chats ───────────────────────────────────────────────────
   useEffect(() => {
+    if (!sessionsLoaded) return;
     try {
-      localStorage.setItem(`api_alice_chats_${runId}`, JSON.stringify(aliceChats));
-      localStorage.setItem(`api_alice_active_tab_${runId}`, activeAliceTabId);
+      localStorage.setItem(`${storagePrefix}_chats_${runId}`, JSON.stringify(aliceChats));
+      localStorage.setItem(`${storagePrefix}_active_tab_${runId}`, activeAliceTabId);
     } catch {}
-    apiRunsApi
-      .saveApiAliceSessions(runId, {
+    chatApi
+      .saveSessions(runId, {
         chats: aliceChats,
         active_tab_id: activeAliceTabId,
       })
       .catch(() => {});
-  }, [aliceChats, activeAliceTabId, runId]);
+  }, [aliceChats, activeAliceTabId, runId, runKind, sessionsLoaded, storagePrefix, chatApi]);
 
   // ── Cleanup stream on unmount ─────────────────────────────────────────────
   useEffect(() => {
@@ -92,7 +137,7 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
     (tabId, cursor = 0) => {
       streamsRef.current[tabId]?.close();
       const es = new EventSource(
-        `/api/api-test-runs/${runId}/alice/stream?cursor=${cursor}` +
+        `/api/${runKind === "sast" ? "sast-runs" : "api-test-runs"}/${runId}/alice/stream?cursor=${cursor}` +
           `&tab_id=${encodeURIComponent(tabId)}`,
       );
       streamsRef.current[tabId] = es;
@@ -289,13 +334,13 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
       };
       es.onerror = closeStream;
     },
-    [runId, setTabRunning],
+    [runId, runKind, setTabRunning],
   );
 
   // ── On mount: load sessions, agent log, check alice status ────────────────
   useEffect(() => {
-    apiRunsApi
-      .getApiAliceSessions(runId)
+    chatApi
+      .getSessions(runId)
       .then((data) => {
         const chats = data.chats || [];
         if (chats.length) {
@@ -304,11 +349,12 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
           setActiveAliceTabId(aid);
           activeAliceTabIdRef.current = aid;
         }
+        setSessionsLoaded(true);
       })
-      .catch(() => {});
+      .catch(() => setSessionsLoaded(true));
 
-    apiRunsApi
-      .getApiAliceStatus(runId)
+    chatApi
+      .getStatus(runId)
       .then((st) => {
         const runningTabs =
           st?.running_tabs || (st?.running && st.tab_id ? [{ tab_id: st.tab_id }] : []);
@@ -327,7 +373,7 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
         }
       })
       .catch(() => {});
-  }, [runId, connectAliceStream, setTabRunning]);
+  }, [runId, runKind, connectAliceStream, setTabRunning, chatApi]);
 
   // ── ALICE send / stop ─────────────────────────────────────────────────────
   const submitAliceDirective = async (rawText) => {
@@ -362,7 +408,7 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
         ),
       );
       setAliceInputText("");
-      apiRunsApi.steerApiAliceGoal(runId, { message: userText, tab_id: tabId }).catch(() => {});
+      chatApi.steer?.(runId, { message: userText, tab_id: tabId }).catch(() => {});
       return;
     }
     setAliceInputText("");
@@ -425,7 +471,7 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
       text: m.text,
     }));
     try {
-      await apiRunsApi.startApiAliceRun(runId, {
+      await chatApi.start(runId, {
         message: userText,
         history,
         tab_id: tabId,
@@ -440,7 +486,7 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
   const handleAliceSend = () => submitAliceDirective(aliceInputText);
   const handleAliceStop = () => {
     const tabId = activeAliceTabIdRef.current;
-    apiRunsApi.stopApiAliceRun(runId, tabId).catch(() => {});
+    chatApi.stop(runId, tabId).catch(() => {});
     streamsRef.current[tabId]?.close();
     delete streamsRef.current[tabId];
     setTabRunning(tabId, false);
@@ -513,33 +559,61 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
   const aliceMessages = activeAliceTab?.messages || [];
   const { historyRef: aliceHistoryRef, handleScroll: handleAliceHistoryScroll } =
     useAutoFollowScroll(activeAliceTabId, aliceMessages, aliceRunning);
-  const isActive = agent.status === "active";
+  const isActive = runKind === "sast" ? anyAliceRunning : agent.status === "active";
   useEffect(() => {
     onRunningChange(anyAliceRunning);
   }, [anyAliceRunning, onRunningChange]);
   return (
     <div
-      className="agent-row agent-row--alice-chat agent-row--expandable"
-      onClick={() => setExpanded((value) => !value)}
+      className={
+        "agent-row agent-row--expandable" +
+        (popout ? "" : " agent-row--alice-chat") +
+        (runKind === "sast" ? " sast-alice-panel" : "") +
+        (popout ? " sast-alice-panel--popout" : "")
+      }
+      onClick={popout || runKind === "sast" ? undefined : () => setExpanded((value) => !value)}
     >
-      <span
-        className={"agent-dot agent-dot--alice" + (isActive ? " agent-dot--active" : "")}
-        aria-hidden="true"
-      ></span>
-      <span className={"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>
-        A.L.I.C.E.
-      </span>
-      <span
-        className={
-          "agent-badge" + (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")
-        }
-      >
-        {isActive ? "Running" : "Idle"}
-      </span>
-      <span className="agent-current-task">{agent.task}</span>
-      <span className="activity-expand-chevron">{isExpanded ? "▲" : "▼"}</span>
-      {isExpanded && (
-        <div className="alice-chat-container" onClick={(e) => e.stopPropagation()}>
+      {!popout && (
+        <>
+          <span
+            className={"agent-dot agent-dot--alice" + (isActive ? " agent-dot--active" : "")}
+            aria-hidden="true"
+          ></span>
+          <span className={"agent-role-name" + (isActive ? " agent-role-name--pulse" : "")}>
+            A.L.I.C.E.
+          </span>
+          <span
+            className={
+              "agent-badge" + (isActive ? " agent-badge-alice-active" : " agent-badge-alice-idle")
+            }
+          >
+            {isActive ? "Running" : "Idle"}
+          </span>
+          <span className="agent-current-task">
+            {runKind === "sast" && anyAliceRunning ? "Reviewing source…" : agent.task}
+          </span>
+          {runKind === "sast" ? (
+            <button
+              type="button"
+              className="sast-alice-collapse"
+              aria-label="Collapse A.L.I.C.E. chat"
+              aria-expanded="true"
+              aria-controls="sast-alice-sidebar"
+              title="Collapse A.L.I.C.E. chat"
+              onClick={onCollapse}
+            >
+              <IconChevronRight />
+            </button>
+          ) : (
+            <span className="activity-expand-chevron">{isExpanded ? "▲" : "▼"}</span>
+          )}
+        </>
+      )}
+      {(popout || isExpanded) && (
+        <div
+          className={"alice-chat-container" + (popout ? " alice-chat-container--popout" : "")}
+          onClick={(e) => e.stopPropagation()}
+        >
           <div className="alice-chat-tabs-bar">
             {aliceChats.map((tab) => {
               const isActiveTab = tab.id === activeAliceTabId;
@@ -568,11 +642,21 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
             <button className="alice-chat-add-tab-btn" onClick={createAliceTab} title="New Session">
               +
             </button>
+            {runKind === "sast" && !popout && (
+              <button
+                className="alice-chat-popout-btn"
+                onClick={handlePopOut}
+                title="Open A.L.I.C.E. in a new window or tab"
+                aria-label="Open A.L.I.C.E. in a new window or tab"
+              >
+                <IconExternalLink />
+              </button>
+            )}
           </div>
           <div
             className="alice-chat-history"
             style={{
-              height: `${aliceChatHeight}px`,
+              height: runKind === "sast" ? undefined : `${aliceChatHeight}px`,
             }}
             ref={aliceHistoryRef}
             onScroll={handleAliceHistoryScroll}
@@ -586,7 +670,9 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
                   fontSize: 13,
                 }}
               >
-                Send A.L.I.C.E. an instruction to begin interactive API testing.
+                {runKind === "sast"
+                  ? "Ask about this source snapshot, coverage, or potential issues."
+                  : "Send A.L.I.C.E. an instruction to begin interactive API testing."}
               </div>
             )}
             {aliceMessages.map((msg, _msgIdx) => {
@@ -655,28 +741,34 @@ export function ApiAlicePanel({ runId, agent, onRunningChange }) {
               </div>
             )}
           </div>
-          <div className="alice-chat-resizer" onMouseDown={startAliceResize}></div>
-          <AliceGoalBar
-            goal={activeAliceGoal}
-            running={aliceRunning}
-            onPause={handleAliceStop}
-            onResume={() => submitAliceDirective("/goal resume")}
-            onEdit={() => {
-              const objective = window.prompt(
-                "Update the goal objective",
-                activeAliceGoal?.objective || "",
-              );
-              if (objective?.trim()) submitAliceDirective(`/goal ${objective.trim()}`);
-            }}
-            onClear={() => submitAliceDirective("/goal clear")}
-          />
+          {runKind !== "sast" && (
+            <div className="alice-chat-resizer" onMouseDown={startAliceResize}></div>
+          )}
+          {runKind !== "sast" && (
+            <AliceGoalBar
+              goal={activeAliceGoal}
+              running={aliceRunning}
+              onPause={handleAliceStop}
+              onResume={() => submitAliceDirective("/goal resume")}
+              onEdit={() => {
+                const objective = window.prompt(
+                  "Update the goal objective",
+                  activeAliceGoal?.objective || "",
+                );
+                if (objective?.trim()) submitAliceDirective(`/goal ${objective.trim()}`);
+              }}
+              onClear={() => submitAliceDirective("/goal clear")}
+            />
+          )}
           <div className="alice-chat-input-bar">
             <input
               className="alice-chat-input"
               placeholder={
                 aliceRunning && activeAliceGoal?.status === "active"
                   ? "Add guidance to the active goal…"
-                  : "Direct A.L.I.C.E., or use /goal <objective>…"
+                  : runKind === "sast"
+                    ? "Ask about source files, coverage, or potential issues…"
+                    : "Direct A.L.I.C.E., or use /goal <objective>…"
               }
               value={aliceInputText}
               disabled={aliceRunning && activeAliceGoal?.status !== "active"}

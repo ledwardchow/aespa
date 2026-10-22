@@ -1026,7 +1026,10 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
         sast_worker_prompt,
     )
     from aespa.services.settings import get_llm_config_for_role
-    from aespa.services.settings_integrations import get_scanner_policy
+    from aespa.services.settings_integrations import (
+        get_scanner_policy,
+        get_upstream_proxy_config,
+    )
 
     _sast_stop_requested.discard(sast_run_id)
     _sast_pause_requested.discard(sast_run_id)
@@ -1090,6 +1093,7 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 or llm_cfg_obj
             )
             scanner_policy = get_scanner_policy(s)
+            upstream_proxy = get_upstream_proxy_config(s)
             endpoints = (
                 list(
                     s.exec(
@@ -1107,6 +1111,11 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
                 if obj is not None and id(obj) not in detached:
                     s.expunge(obj)
                     detached.add(id(obj))
+
+        llm_svc.set_llm_proxy(
+            upstream_proxy.llm_proxy_url if upstream_proxy.proxy_llm else None
+        )
+        llm_svc.set_llm_ca_bundle(upstream_proxy.llm_ca_bundle_path)
 
         # ── Extract archive ────────────────────────────────────────────────────
         # Use a deterministic path under <data_dir>/sast_extract/<id>/ so a
@@ -2155,6 +2164,8 @@ async def _sast_scan_task(sast_run_id: int, *, resume: bool = False) -> None:
             from aespa.services import llm as llm_svc
 
             llm_svc.clear_run_context()
+            llm_svc.set_llm_proxy(None)
+            llm_svc.set_llm_ca_bundle(None)
         except Exception:
             pass
         owned_lease = _sast_workspace_leases.pop(sast_run_id, None)

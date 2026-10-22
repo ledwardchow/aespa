@@ -24,6 +24,12 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlmodel import Session, select
 
+from aespa.api.alice import (
+    AliceRunRequest,
+    AliceSessionsRequest,
+    _load_sessions,
+    _save_sessions,
+)
 from aespa.db import get_session
 from aespa.models import (
     AgentLog,
@@ -591,14 +597,98 @@ def get_sast_analysis(run_id: int, session: Session = Depends(get_session)) -> d
     }
 
 
+@router.get("/api/sast-runs/{run_id}/alice/sessions")
+def get_sast_alice_sessions(
+    run_id: int, session: Session = Depends(get_session)
+) -> dict:
+    _get_run_or_404(session, run_id)
+    return _load_sessions(run_id, session, run_kind="sast")
+
+
+@router.put("/api/sast-runs/{run_id}/alice/sessions")
+def save_sast_alice_sessions(
+    run_id: int, req: AliceSessionsRequest, session: Session = Depends(get_session)
+) -> dict:
+    _get_run_or_404(session, run_id)
+    _save_sessions(run_id, req, session, run_kind="sast")
+    return {"ok": True}
+
+
+@router.post("/api/sast-runs/{run_id}/alice/run")
+async def start_sast_alice_run(
+    run_id: int, req: AliceRunRequest, session: Session = Depends(get_session)
+) -> dict:
+    run = _get_run_or_404(session, run_id)
+    from aespa.services.alice_sast import _archive_path
+
+    archive = _archive_path(session, run)
+    if run.status == "preparing" or archive is None or not archive.is_file():
+        raise HTTPException(status_code=409, detail="Source snapshot is not ready")
+    from aespa.services import alice_tasks
+
+    await alice_tasks.start(
+        run_id,
+        tab_id=req.tab_id,
+        think_msg_id=req.think_msg_id,
+        reply_msg_id=req.reply_msg_id,
+        message=req.message,
+        history=req.history,
+        run_type="sast",
+    )
+    return {"ok": True}
+
+
+@router.get("/api/sast-runs/{run_id}/alice/stream")
+async def stream_sast_alice(
+    run_id: int,
+    cursor: int = Query(default=0, ge=0),
+    tab_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+) -> StreamingResponse:
+    _get_run_or_404(session, run_id)
+    from aespa.services import alice_tasks
+
+    return StreamingResponse(
+        alice_tasks.stream_events(run_id, cursor, run_type="sast", tab_id=tab_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/api/sast-runs/{run_id}/alice/status")
+def get_sast_alice_status(
+    run_id: int,
+    tab_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import alice_tasks
+
+    return alice_tasks.status(run_id, run_type="sast", tab_id=tab_id)
+
+
+@router.delete("/api/sast-runs/{run_id}/alice/run")
+async def stop_sast_alice_run(
+    run_id: int,
+    tab_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+) -> dict:
+    _get_run_or_404(session, run_id)
+    from aespa.services import alice_tasks
+
+    stopped = await alice_tasks.stop(run_id, run_type="sast", tab_id=tab_id)
+    return {"ok": True, "stopped": stopped}
+
+
 @router.delete("/api/sast-runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_sast_run(run_id: int, session: Session = Depends(get_session)) -> None:
     _get_run_or_404(session, run_id)
     run_cleanup.ensure_sast_run_deletable(session, run_id)
+    from aespa.services import alice_tasks, sast_scanner, sast_sources
     from aespa.services import campaigns as campaigns_svc
-    from aespa.services import sast_scanner, sast_sources
 
     await campaigns_svc.stop_member_tasks_for_run("sast", run_id)
+    await alice_tasks.stop(run_id, run_type="sast")
     await sast_sources.stop_source_preparation_and_wait(run_id)
     if sast_scanner.is_sast_scan_running(run_id):
         await sast_scanner.stop_sast_scan_and_wait(run_id)

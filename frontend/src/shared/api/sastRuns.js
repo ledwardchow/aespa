@@ -18,6 +18,17 @@ export const getSastScanLog = (id) => req(`/api/sast-runs/${id}/scan-log`);
 
 export const getSastRun = (id) => req(`/api/sast-runs/${id}`);
 
+export const getSastAliceSessions = (id) => req(`/api/sast-runs/${id}/alice/sessions`);
+export const saveSastAliceSessions = (id, body) =>
+  req(`/api/sast-runs/${id}/alice/sessions`, { method: "PUT", body });
+export const getSastAliceStatus = (id) => req(`/api/sast-runs/${id}/alice/status`);
+export const startSastAliceRun = (id, body) =>
+  req(`/api/sast-runs/${id}/alice/run`, { method: "POST", body });
+export const stopSastAliceRun = (id, tabId) =>
+  req(`/api/sast-runs/${id}/alice/run` + (tabId ? `?tab_id=${encodeURIComponent(tabId)}` : ""), {
+    method: "DELETE",
+  });
+
 export const importSastRun = (text) => importJson("/api/sast-runs/import", text);
 
 export const updateSastRun = (id, b) => req(`/api/sast-runs/${id}`, { method: "PATCH", body: b });

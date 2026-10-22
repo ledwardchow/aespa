@@ -860,7 +860,9 @@ def _legacy_months(session: Session, selected_months: set[str]) -> list[str]:
 
 
 def refresh_prices(session: Session) -> dict[str, Any]:
-    response = httpx.get(PRICE_FEED_URL, timeout=30.0)
+    from aespa.services.llm_network import httpx_options
+
+    response = httpx.get(PRICE_FEED_URL, timeout=30.0, **httpx_options())
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict) or len(payload) > 100_000:

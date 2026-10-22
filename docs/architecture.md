@@ -1422,6 +1422,7 @@ The API is a **FastAPI** application with both synchronous and asynchronous rout
 | `/api/sast-runs/{id}/scan/` | `sast_runs.py` | Start/stop/status for SAST scans |
 | `/api/sast-runs/{id}/leads` | `sast_runs.py` | List the *original* `ScanLead` rows for a SAST run (imported copies excluded) |
 | `/api/sast-runs/{id}/agent-log` | `sast_runs.py` | SAST agent activity log |
+| `/api/sast-runs/{id}/alice/*` | `sast_runs.py` | Saved source chat sessions, background turns, status, stop, and replay stream |
 | `/api/statistics/llm` | `statistics.py` | Monthly, all-time, and date-range LLM token and native-credit usage |
 | `/api/statistics/llm/prices/refresh` | `statistics.py` | Download the latest LiteLLM price map |
 | `/api/statistics/llm/prices` | `statistics.py` | Save a monthly or future price override |
@@ -1525,6 +1526,14 @@ A top-level **SAST** screen lists all `SastRun` records and has a **New SAST Sca
 | **Candidates** | Original `ScanLead` rows with severity, confidence score, location, validation evidence, and handoff actions; exportable to Markdown |
 | **Activity** | Agent activity log and `TokenUsageBar` telemetry |
 
+The SAST run detail view also has an A.L.I.C.E. source chat beside these views. Its
+turns use `run_kind="sast"` for tasks, sessions, events, and token usage. Each
+turn safely extracts the retained source archive into its own temporary directory,
+separate from the scanner workspace, and exposes only bounded source inspection
+and read-only run/lead context tools. The temporary directory is removed after
+the turn. The chat persists until the SAST run is deleted and always refers to
+that run's immutable source revision.
+
 The phase rail exposes all ten SAST phases from scope through report and scrolls horizontally when the window cannot fit them. Semantic views use completed report state when available and fall back to in-progress phase data while a scan is running. Older runs show an explicit unavailable state rather than fabricating semantic results.
 
 ---
@@ -1537,7 +1546,7 @@ The phase rail exposes all ten SAST phases from scope through report and scrolls
 - **Background tasks** — crawl and scan jobs run as `asyncio.Task`s; handles are stored in-memory so the API can stop them
 - **Specialist agents** — each specialist runs as its own `asyncio.Task`; tracked in `_specialist_tasks[run_id]` so it is cancelled when the parent scan is stopped. Extra handoffs wait in `_specialist_pending[run_id]` and start as slots open. The final specialist barrier waits for both active and queued work.
 - **Finding validation** — end-of-scan findings use one managed bounded batch; manual finding actions use tracked inline tasks capped by `AdversarialValidatorConfig.end_scan_max_concurrent`. Both appear as one run-level validation job and are stopped together.
-- **ALICE background tasks** - `alice_tasks.py` holds a module-level `_registry: dict[tuple[str, int], AliceTask]`, keyed by `(run_type, run_id)`, where `run_type` is `site` or `api`. Each task runs independently of the HTTP connection. Its bounded event buffer supports reconnect replay; older cursors receive a state snapshot.
+- **ALICE background tasks** - `alice_tasks.py` holds a module-level registry keyed by `(run_type, run_id, tab_id)`, where `run_type` is `site`, `api`, or `sast`. Each task runs independently of the HTTP connection. Its bounded event buffer supports reconnect replay; older cursors receive a state snapshot.
 - **Scan checkpointing** — the LLM conversation history is serialised to the DB at regular intervals by `checkpoint.py`; `start_thinking_scan_resume` restores it on restart
 - **Bounded scan completion** — `scan_completion.py` tracks structural progress across agentic turns to enforce termination policy and prevent non-terminating tool loops
 - **Database** — SQLite via SQLAlchemy sync sessions wrapped in `run_in_executor` where needed. Alembic applies schema changes at startup. Databases created before Alembic receive a one-time compatibility upgrade; normal startups only reconcile interrupted jobs and temporary workspaces.
@@ -1593,7 +1602,7 @@ class AliceTask:
     tab_id: str           # which chat session tab started this turn
     think_msg_id: str     # client-assigned ID for the thinking bubble
     reply_msg_id: str     # client-assigned ID for the reply bubble
-    run_type: str        # site or api; part of the registry key
+    run_type: str        # site, api, or sast; part of the registry key
     events: list[dict]    # retained SSE events (capped at BUFFER_LIMIT=2000)
     dropped: int         # events removed from the front; cursors remain absolute
     waiters: set[asyncio.Queue]  # one queue per connected SSE client

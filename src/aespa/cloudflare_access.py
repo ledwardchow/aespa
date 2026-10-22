@@ -17,7 +17,11 @@ def _get_jwks(issuer: str) -> dict:
         if now < expiry:
             return keys
 
-    resp = httpx.get(f"{issuer.rstrip('/')}/cdn-cgi/access/certs")
+    from aespa.services.llm_network import httpx_options
+
+    resp = httpx.get(
+        f"{issuer.rstrip('/')}/cdn-cgi/access/certs", **httpx_options()
+    )
     resp.raise_for_status()
     keys = resp.json()
     _JWKS_CACHE[issuer] = (keys, now + JWKS_CACHE_TTL)

@@ -303,4 +303,12 @@ export const routes = {
     ),
     props: (route) => ({ runId: route.id }),
   },
+  "sast-alice-popout": {
+    section: "sast-alice-popout",
+    Component: lazyNamed(
+      () => import("../features/sast-runs/SastAlicePopout.jsx"),
+      "SastAlicePopout",
+    ),
+    props: (route) => ({ runId: route.id }),
+  },
 };

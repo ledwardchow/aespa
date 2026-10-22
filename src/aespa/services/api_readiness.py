@@ -113,7 +113,8 @@ async def assess_readiness(session: Session, collection_id: int) -> dict:
     )
 
     try:
-        raw = await llm_svc.plain_completion(llm_cfg, prompt)
+        with llm_svc.saved_llm_transport_scope():
+            raw = await llm_svc.plain_completion(llm_cfg, prompt)
     except Exception as exc:
         raise ReadinessError(f"LLM call failed: {exc}") from exc
 

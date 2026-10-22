@@ -699,6 +699,22 @@ def cascade_delete_sast_run(session: Session, run_id: int) -> None:
 
     for lead in original_leads:
         session.delete(lead)
+    for goal in session.exec(
+        select(AliceGoal)
+        .where(AliceGoal.test_run_id == run_id)
+        .where(AliceGoal.run_kind == "sast")
+    ).all():
+        session.delete(goal)
+    for chat in session.exec(
+        select(AliceChatSession)
+        .where(AliceChatSession.test_run_id == run_id)
+        .where(AliceChatSession.run_kind == "sast")
+    ).all():
+        for message in session.exec(
+            select(AliceChatMessage).where(AliceChatMessage.session_id == chat.id)
+        ).all():
+            session.delete(message)
+        session.delete(chat)
     for slog in session.exec(
         select(ScanLog)
         .where(ScanLog.test_run_id == run_id)

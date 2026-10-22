@@ -2,6 +2,7 @@ import { runHref } from "../../shared/navigation/links.ts";
 import { SastModelSelector, profileLabel } from "./SastModelSelector.jsx";
 import { SastRunActionsMenu } from "./SastRunActionsMenu.jsx";
 import { ActivityView } from "./ActivityView.jsx";
+import { ApiAlicePanel } from "../api-runs/ApiAlicePanel.jsx";
 import { CoverageView } from "./CoverageView.jsx";
 import { CandidatesView } from "./CandidatesView.jsx";
 import { EfficiencyView, RepositoryModelView, ThreatModelView } from "./SemanticAnalysisView.jsx";
@@ -16,6 +17,7 @@ import { downloadTextFile } from "../../shared/lib/download.js";
 import { usePolling } from "../../shared/hooks/usePolling.js";
 
 import { PageHeader, Crumb, Sep } from "../../shared/ui/PageHeader.jsx";
+import { IconChevronLeft } from "../../shared/ui/Icons.jsx";
 import { Notice, PageError } from "../../shared/ui/Notice.jsx";
 import { StatusBadge } from "../../shared/ui/StatusBadge.jsx";
 import { TokenUsageBar } from "../../shared/ui/TokenUsageBar.jsx";
@@ -65,6 +67,16 @@ const TAB_PHASES = {
   efficiency: "report",
   candidates: "discovery",
 };
+
+const ALICE_DRAWER_KEY = "aespa_sast_alice_drawer_open";
+
+function initialAliceDrawerOpen() {
+  try {
+    const saved = localStorage.getItem(ALICE_DRAWER_KEY);
+    if (saved === "true" || saved === "false") return saved === "true";
+  } catch {}
+  return typeof window === "undefined" || window.innerWidth > 900;
+}
 
 function normaliseTab(tab) {
   const candidate = TAB_ALIASES[tab] || tab;
@@ -118,8 +130,40 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
   const [tokenExpanded, setTokenExpanded] = useState(false);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [alicePoppedOut, setAlicePoppedOut] = useState(false);
+  const [aliceDrawerOpen, setAliceDrawerOpen] = useState(initialAliceDrawerOpen);
+  const updateAliceDrawer = useCallback((open) => {
+    setAliceDrawerOpen(open);
+    try {
+      localStorage.setItem(ALICE_DRAWER_KEY, String(open));
+    } catch {}
+  }, []);
   const bottomRef = useRef(null);
   const liveEventSequence = useRef(0);
+
+  useEffect(() => {
+    const restoreChat = (data) => {
+      if (data?.type === "aespa-sast-alice-popout-close" && Number(data.runId) === runId) {
+        setAlicePoppedOut(false);
+        updateAliceDrawer(true);
+      }
+    };
+    const onMessage = (event) => {
+      if (event.origin === window.location.origin) restoreChat(event.data);
+    };
+    const onStorage = (event) => {
+      if (event.key !== `aespa-sast-alice-popout-close:${runId}`) return;
+      try {
+        restoreChat(JSON.parse(event.newValue || "null"));
+      } catch {}
+    };
+    window.addEventListener("message", onMessage);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [runId, updateAliceDrawer]);
 
   const loadData = useCallback(async () => {
     try {
@@ -552,134 +596,187 @@ export function SastRunDetailExperience({ runId, initialTab, initialLeadRef }) {
           tokenExpanded={tokenExpanded}
           setTokenExpanded={setTokenExpanded}
         />
-        <div
-          className={"sast-run-content" + (tab === "activity" ? " sast-run-content--activity" : "")}
-        >
-          <PageError error={error} onDismiss={() => setError(null)} />
-          {run.error_message && ["failed", "cancelled"].includes(run.status) ? (
-            <div className="alert error">{run.error_message}</div>
-          ) : null}
-          {notice ? (
-            <Notice variant="info" onDismiss={() => setNotice(null)}>
-              {notice}
-            </Notice>
-          ) : null}
-          {tab === "coverage" ? (
-            <div className="sast-summary-grid sast-run-summary-grid">
-              <div>
-                <span>Security checks</span>
-                <strong>
-                  {workItemSummary.resolved || 0}/{workItemSummary.total || 0}
-                </strong>
-                <small>{workItemSummary.unresolved || 0} remaining</small>
+        <div className="sast-body-with-alice">
+          <div
+            className={
+              "sast-run-content" + (tab === "activity" ? " sast-run-content--activity" : "")
+            }
+          >
+            <PageError error={error} onDismiss={() => setError(null)} />
+            {run.error_message && ["failed", "cancelled"].includes(run.status) ? (
+              <div className="alert error">{run.error_message}</div>
+            ) : null}
+            {notice ? (
+              <Notice variant="info" onDismiss={() => setNotice(null)}>
+                {notice}
+              </Notice>
+            ) : null}
+            {tab === "coverage" ? (
+              <div className="sast-summary-grid sast-run-summary-grid">
+                <div>
+                  <span>Security checks</span>
+                  <strong>
+                    {workItemSummary.resolved || 0}/{workItemSummary.total || 0}
+                  </strong>
+                  <small>{workItemSummary.unresolved || 0} remaining</small>
+                </div>
+                <div>
+                  <span>Analysis batches</span>
+                  <strong>
+                    {workerSummary.complete || 0}/{workerSummary.total || 0}
+                  </strong>
+                  <small>
+                    {unfinishedWorkers} unfinished
+                    {failedWorkers ? ` · ${failedWorkers} failed` : ""}
+                  </small>
+                </div>
+                <div>
+                  <span>Direct file reads</span>
+                  <strong>
+                    {fileSummary.directly_opened || 0}/{fileSummary.total || 0}
+                  </strong>
+                  <small>grep excluded</small>
+                </div>
+                <div>
+                  <span>Search matches</span>
+                  <strong>{fileSummary.with_search_matches || 0}</strong>
+                  <small>files returned</small>
+                </div>
+                <div>
+                  <span>Findings</span>
+                  <strong>{leads.length}</strong>
+                  <small>possible issues found</small>
+                </div>
+                <div>
+                  <span>Reportable</span>
+                  <strong>{reportableCount}</strong>
+                  <small>confirmed by validation</small>
+                </div>
+                <div>
+                  <span>Missing evidence</span>
+                  <strong>{proofGapCount}</strong>
+                  <small>open questions on findings</small>
+                </div>
               </div>
-              <div>
-                <span>Analysis batches</span>
-                <strong>
-                  {workerSummary.complete || 0}/{workerSummary.total || 0}
-                </strong>
-                <small>
-                  {unfinishedWorkers} unfinished
-                  {failedWorkers ? ` · ${failedWorkers} failed` : ""}
-                </small>
+            ) : null}
+            {tab === "candidates" && (
+              <CandidatesView
+                runId={runId}
+                leads={leads}
+                selectedLead={selectedLead}
+                onSelect={setSelectedLeadId}
+                targets={targets}
+                onQueue={onQueue}
+                queueBusy={queueBusy}
+                reportableCount={reportableCount}
+                onExport={onExportReport}
+                onRevalidate={onRevalidate}
+                revalidatingLeadId={revalidatingLeadId}
+                canRevalidate={run?.status === "completed" && !scanRunning && !resumableWork}
+                initialLeadRef={initialLeadRef}
+                onCloseDetail={() => {
+                  if (initialLeadRef) nav(runHref({ runKind: "sast", runId }, "candidates"));
+                }}
+              />
+            )}
+            {tab === "coverage" && (
+              <div className="sast-assurance-note">
+                <span>
+                  <strong>Coverage:</strong>{" "}
+                  {analysis.assurance?.reasons?.length
+                    ? analysis.assurance.reasons.join(" ")
+                    : "Every generated source and sink security check was completed."}
+                </span>
+                <span
+                  className={`sast-state sast-state-${analysis.assurance?.status === "full" ? "confirmed" : "inconclusive"}`}
+                >
+                  {analysis.assurance?.status || "pending"}
+                </span>
               </div>
-              <div>
-                <span>Direct file reads</span>
-                <strong>
-                  {fileSummary.directly_opened || 0}/{fileSummary.total || 0}
-                </strong>
-                <small>grep excluded</small>
-              </div>
-              <div>
-                <span>Search matches</span>
-                <strong>{fileSummary.with_search_matches || 0}</strong>
-                <small>files returned</small>
-              </div>
-              <div>
-                <span>Findings</span>
-                <strong>{leads.length}</strong>
-                <small>possible issues found</small>
-              </div>
-              <div>
-                <span>Reportable</span>
-                <strong>{reportableCount}</strong>
-                <small>confirmed by validation</small>
-              </div>
-              <div>
-                <span>Missing evidence</span>
-                <strong>{proofGapCount}</strong>
-                <small>open questions on findings</small>
-              </div>
-            </div>
-          ) : null}
-          {tab === "candidates" && (
-            <CandidatesView
-              runId={runId}
-              leads={leads}
-              selectedLead={selectedLead}
-              onSelect={setSelectedLeadId}
-              targets={targets}
-              onQueue={onQueue}
-              queueBusy={queueBusy}
-              reportableCount={reportableCount}
-              onExport={onExportReport}
-              onRevalidate={onRevalidate}
-              revalidatingLeadId={revalidatingLeadId}
-              canRevalidate={run?.status === "completed" && !scanRunning && !resumableWork}
-              initialLeadRef={initialLeadRef}
-              onCloseDetail={() => {
-                if (initialLeadRef) nav(runHref({ runKind: "sast", runId }, "candidates"));
-              }}
-            />
-          )}
-          {tab === "coverage" && (
-            <div className="sast-assurance-note">
-              <span>
-                <strong>Coverage:</strong>{" "}
-                {analysis.assurance?.reasons?.length
-                  ? analysis.assurance.reasons.join(" ")
-                  : "Every generated source and sink security check was completed."}
-              </span>
-              <span
-                className={`sast-state sast-state-${analysis.assurance?.status === "full" ? "confirmed" : "inconclusive"}`}
+            )}
+            {tab === "coverage" && (
+              <CoverageView coverage={analysis.coverage} workProgram={analysis.work_program} />
+            )}
+            {tab === "model" && (
+              <RepositoryModelView model={repositoryModel} status={semanticStatus} />
+            )}
+            {tab === "threats" && (
+              <ThreatModelView
+                threatModel={threatModel}
+                planning={planning}
+                closure={closure}
+                report={analysis.report}
+                status={semanticStatus}
+              />
+            )}
+            {tab === "efficiency" && (
+              <EfficiencyView
+                telemetry={efficiencyTelemetry}
+                report={analysis.report}
+                status={semanticStatus}
+                phaseState={analysis.phases}
+              />
+            )}
+            {tab === "activity" && (
+              <ActivityView
+                logs={logs}
+                agentLog={agentLog}
+                scanRunning={scanRunning}
+                runId={runId}
+                analysisMode={run.analysis_mode}
+              />
+            )}
+            <div ref={bottomRef} />
+          </div>
+          <aside
+            id="sast-alice-sidebar"
+            className={
+              "sast-alice-sidebar" + (aliceDrawerOpen ? "" : " sast-alice-sidebar--collapsed")
+            }
+            aria-label="ALICE source chat"
+          >
+            {!aliceDrawerOpen && (
+              <button
+                type="button"
+                className="sast-alice-rail-button"
+                aria-label="Show A.L.I.C.E. chat"
+                aria-expanded="false"
+                aria-controls="sast-alice-sidebar"
+                title="Show A.L.I.C.E. chat"
+                onClick={() => updateAliceDrawer(true)}
               >
-                {analysis.assurance?.status || "pending"}
-              </span>
+                <IconChevronLeft />
+                <span className="sast-alice-rail-label">A.L.I.C.E.</span>
+              </button>
+            )}
+            <div className="sast-alice-content" hidden={!aliceDrawerOpen}>
+              {alicePoppedOut ? (
+                <div className="sast-alice-unavailable">
+                  <strong>A.L.I.C.E. is open in another window.</strong>
+                  <button className="btn ghost sm" onClick={() => setAlicePoppedOut(false)}>
+                    Show chat here
+                  </button>
+                </div>
+              ) : run.source_archive_path || run.document_id || run.collection_id ? (
+                <ApiAlicePanel
+                  key={runId}
+                  runKind="sast"
+                  runId={runId}
+                  agent={{ status: "idle", task: "Ask about this source snapshot" }}
+                  onCollapse={() => updateAliceDrawer(false)}
+                  onPopOut={() => {
+                    setAlicePoppedOut(true);
+                    updateAliceDrawer(false);
+                  }}
+                />
+              ) : (
+                <div className="sast-alice-unavailable">
+                  <strong>A.L.I.C.E.</strong>
+                  <span>Chat is available when the source snapshot is ready.</span>
+                </div>
+              )}
             </div>
-          )}
-          {tab === "coverage" && (
-            <CoverageView coverage={analysis.coverage} workProgram={analysis.work_program} />
-          )}
-          {tab === "model" && (
-            <RepositoryModelView model={repositoryModel} status={semanticStatus} />
-          )}
-          {tab === "threats" && (
-            <ThreatModelView
-              threatModel={threatModel}
-              planning={planning}
-              closure={closure}
-              report={analysis.report}
-              status={semanticStatus}
-            />
-          )}
-          {tab === "efficiency" && (
-            <EfficiencyView
-              telemetry={efficiencyTelemetry}
-              report={analysis.report}
-              status={semanticStatus}
-              phaseState={analysis.phases}
-            />
-          )}
-          {tab === "activity" && (
-            <ActivityView
-              logs={logs}
-              agentLog={agentLog}
-              scanRunning={scanRunning}
-              runId={runId}
-              analysisMode={run.analysis_mode}
-            />
-          )}
-          <div ref={bottomRef} />
+          </aside>
         </div>
       </div>
     </>

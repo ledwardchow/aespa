@@ -770,27 +770,28 @@ async def map_campaign_component(
             run_kind="campaign",
         )
 
-        summary = await llm_svc.thinking_agentic_loop(
-            llm_config,
-            system_message=COMPONENT_MAPPER_SYSTEM_PROMPT,
-            initial_user_message=(
-                f"Map the external interfaces of component {component.name!r}. "
-                "Begin by listing the repository and reading its manifests/configuration. "
-                "The following validated SAST leads are immutable candidates for "
-                "lead_anchor facts; connect only when source evidence proves reachability:\n"
-                + json.dumps(lead_context, separators=(",", ":"))
-            ),
-            tool_executor=executor,
-            stop_check=stop_check,
-            tools=COMPONENT_MAPPER_TOOLS,
-            max_context_chars=120_000,
-            termination_check=lambda: budget_reason,
-            text_only_repair_message=(
-                "Your previous response did not call a tool. Continue by calling "
-                "exactly one mapper tool: list_files, glob, read_file, grep, "
-                "record_interface_fact, or done."
-            ),
-        )
+        with llm_svc.saved_llm_transport_scope():
+            summary = await llm_svc.thinking_agentic_loop(
+                llm_config,
+                system_message=COMPONENT_MAPPER_SYSTEM_PROMPT,
+                initial_user_message=(
+                    f"Map the external interfaces of component {component.name!r}. "
+                    "Begin by listing the repository and reading its manifests/configuration. "
+                    "The following validated SAST leads are immutable candidates for "
+                    "lead_anchor facts; connect only when source evidence proves reachability:\n"
+                    + json.dumps(lead_context, separators=(",", ":"))
+                ),
+                tool_executor=executor,
+                stop_check=stop_check,
+                tools=COMPONENT_MAPPER_TOOLS,
+                max_context_chars=120_000,
+                termination_check=lambda: budget_reason,
+                text_only_repair_message=(
+                    "Your previous response did not call a tool. Continue by calling "
+                    "exactly one mapper tool: list_files, glob, read_file, grep, "
+                    "record_interface_fact, or done."
+                ),
+            )
         if stop_check and stop_check():
             raise asyncio.CancelledError
         if budget_reason and not summary:

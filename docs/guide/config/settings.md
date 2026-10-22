@@ -98,11 +98,12 @@ The same page accepts optional PEM CA bundle paths for application traffic and
 testing traffic. Enter paths on the computer running AESPA. When a path is set,
 those requests check the server certificate against that bundle. The bundle
 must contain all CA certificates needed for the destinations it will reach.
-Model lists, ChatGPT sign-in requests, Benchmark Lab model comparisons, and
-result publishing use the LLM proxy and CA bundle settings. Session checks use
-the testing proxy and CA bundle. Vulnerable-library list updates use the
-testing CA bundle. CLI based LLM providers receive the LLM proxy and CA path
-through environment variables, but each CLI decides how to use them.
+Model lists, ChatGPT sign-in requests, Benchmark Lab model comparisons, result
+publishing, model price downloads, and Cloudflare Access sign-in checks use the
+application proxy and CA bundle settings. Session checks use the testing proxy
+and CA bundle. Vulnerable-library list updates use the testing CA bundle. CLI
+based LLM providers receive the application proxy and CA path through environment
+variables, but each CLI decides how to use them.
 Browser based tests still accept HTTPS certificate errors.
 
 ## System Settings

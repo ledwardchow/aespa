@@ -28,6 +28,7 @@ const run = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.removeItem("aespa_sast_alice_drawer_open");
   FakeEventSource.instances = [];
   vi.stubGlobal("EventSource", FakeEventSource);
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -45,7 +46,27 @@ beforeEach(() => {
   sastRunsApi.getSastLeads.mockResolvedValue([]);
   sastRunsApi.getSastTokenUsage.mockResolvedValue({});
   sastRunsApi.getSastLiveTargets.mockResolvedValue([]);
+  sastRunsApi.getSastAliceSessions.mockResolvedValue({ chats: [] });
+  sastRunsApi.getSastAliceStatus.mockResolvedValue({ running: false });
+  sastRunsApi.saveSastAliceSessions.mockResolvedValue({});
   settingsApi.listLLMProfiles.mockResolvedValue([]);
+});
+
+test("collapses SAST chat to a right rail and remembers the drawer state", async () => {
+  const user = userEvent.setup();
+  sastRunsApi.getSastRun.mockResolvedValue({ ...run, source_archive_path: "/tmp/source.zip" });
+  render(<SastRunDetailExperience runId={249} initialTab="coverage" />);
+
+  await user.click(await screen.findByRole("button", { name: "Collapse A.L.I.C.E. chat" }));
+  const rail = screen.getByRole("button", { name: "Show A.L.I.C.E. chat" });
+  expect(rail.getAttribute("aria-expanded")).toBe("false");
+  expect(document.querySelector(".sast-alice-sidebar--collapsed")).toBeTruthy();
+  expect(localStorage.getItem("aespa_sast_alice_drawer_open")).toBe("false");
+
+  await user.click(rail);
+  expect(screen.getByRole("button", { name: "Collapse A.L.I.C.E. chat" })).toBeTruthy();
+  expect(document.querySelector(".sast-alice-sidebar--collapsed")).toBeNull();
+  expect(localStorage.getItem("aespa_sast_alice_drawer_open")).toBe("true");
 });
 
 afterEach(() => {

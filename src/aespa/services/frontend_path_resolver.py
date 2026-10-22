@@ -864,11 +864,12 @@ async def revise_path_with_llm(
         )
     )
     try:
-        raw = await llm_svc.plain_completion(
-            llm_config,
-            prompt,
-            system_prompt=_REWRITE_SYSTEM_PROMPT,
-        )
+        with llm_svc.saved_llm_transport_scope():
+            raw = await llm_svc.plain_completion(
+                llm_config,
+                prompt,
+                system_prompt=_REWRITE_SYSTEM_PROMPT,
+            )
         decoded = llm_svc.extract_json_response(raw, expect=dict)
         rewrite, error = _validate_rewrite(
             decoded, approved_path=approved_path, final_path=final_path

@@ -1,9 +1,11 @@
-name: Publish to Docker Hub
+name: Publish container images
 
 on:
-  push:
-    tags: ["v*"]        # push a tag like v0.6.20260625.3 to release
-  workflow_dispatch: {}  # or run manually from the Actions tab
+  workflow_call:
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   publish:
@@ -18,12 +20,21 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish AESPA
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -31,3 +42,19 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/aespa:${{ steps.ver.outputs.version }}
             ${{ secrets.DOCKERHUB_USERNAME }}/aespa:latest
+            ghcr.io/${{ github.repository_owner }}/aespa:${{ steps.ver.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/aespa:latest
+
+      - name: Publish Python executor
+        uses: docker/build-push-action@v6
+        with:
+          context: runtime/python-executor
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/aespa-python-executor:0.1
+            ${{ secrets.DOCKERHUB_USERNAME }}/aespa-python-executor:latest
+            ghcr.io/${{ github.repository_owner }}/aespa-python-executor:0.1
+            ghcr.io/${{ github.repository_owner }}/aespa-python-executor:latest
