@@ -751,7 +751,8 @@ File contents:
 JSON object (reply with ONLY the object, nothing else):"""
 
     try:
-        raw = await llm_svc.plain_completion(llm_cfg, prompt)
+        with llm_svc.saved_llm_transport_scope():
+            raw = await llm_svc.plain_completion(llm_cfg, prompt)
     except Exception as exc:
         raise ParseError(f"LLM extraction failed: {exc}") from exc
 

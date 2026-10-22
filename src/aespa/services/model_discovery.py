@@ -333,9 +333,11 @@ async def discover_bedrock_models(
         )
 
         proxy, ca_bundle = configured_llm_network()
+        from aespa.services.llm import _bedrock_verify
+
         client_kwargs: dict[str, Any] = {
             "region_name": region,
-            "verify": ca_bundle or not proxy,
+            "verify": _bedrock_verify(proxy, ca_bundle),
         }
         if proxy:
             from aespa.services.llm import _bedrock_botocore_config

@@ -142,7 +142,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 - **Saved benchmark analyses**: Open analyses from graphs or results lists and group findings by OWASP category or severity. Comments appear on graph cards and can be included in published summaries. Signed-in users can edit comments on the private benchmark site; the public graph site displays them.
 
-- **Custom CA bundles**: Connectivity settings now accept separate PEM CA bundles for application and testing traffic. Application requests include LLM calls and Benchmark Lab; testing requests include session checks and vulnerable-library updates. CLI providers receive the application CA path. Browser tests continue accepting certificate errors.
+- **Custom CA bundles**: Connectivity settings now accept separate PEM CA bundles for application and testing traffic. Application requests include LLM calls, SAST scans, API document parsing and readiness checks, campaign mapping, saved crawl workflow retries, Benchmark Lab, model price downloads, and Cloudflare Access sign-in checks. Bedrock also accepts `AWS_CA_BUNDLE` when no application CA bundle is saved. Testing requests include session checks and vulnerable-library updates. CLI providers receive the application CA path. Browser tests continue accepting certificate errors.
+
 
 - **Saved crawls**: Save a finished crawl to its site and load it into a new run to skip crawling again. The site page lets you rename, import, download, or delete saved crawls. Saved crawls include workflow history and captured session data. On a run, **Save crawl** saves the crawl to its site or downloads it as a file; this replaces the separate Export crawl menu item.
 

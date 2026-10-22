@@ -2073,7 +2073,7 @@ def test_workflow_retry_api_accepts_unfinished_notes_but_not_destructive_or_old_
 
 
 def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypatch):
-    from aespa.services import settings
+    from aespa.services import llm, settings
 
     with Session(isolated_db_engine) as session:
         site = Site(name="Shop", base_url="https://shop.test")
@@ -2097,7 +2097,12 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
     monkeypatch.setattr(
         settings,
         "get_upstream_proxy_config",
-        lambda *_: SimpleNamespace(proxy_scanner=False),
+        lambda *_: SimpleNamespace(
+            proxy_scanner=False,
+            proxy_llm=True,
+            llm_proxy_url="http://proxy.local:8080",
+            llm_ca_bundle_path="/certs/company.pem",
+        ),
     )
     monkeypatch.setattr(
         settings,
@@ -2115,6 +2120,10 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
 
     async def fake_explore(run_id, **kwargs):
         captured.update(run_id=run_id, **kwargs)
+        captured["llm_network"] = (
+            llm._llm_proxy_var.get(),
+            llm._llm_ca_bundle_var.get(),
+        )
         kwargs["progress"](
             {
                 "stage": "checking_page",
@@ -2148,6 +2157,10 @@ def test_retry_runner_saves_only_reached_workflows(isolated_db_engine, monkeypat
     assert captured["run_id"] == run_id
     assert captured["max_pages"] == 25
     assert captured["selected_workflows"] == [workflow]
+    assert captured["llm_network"] == (
+        "http://proxy.local:8080",
+        "/certs/company.pem",
+    )
     status = _retry_state(run_id, 123)
     assert status["status"] == "complete"
     assert status["note_id"] == 123

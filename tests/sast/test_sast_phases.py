@@ -22,11 +22,58 @@ from aespa.models import (
     ScanLead,
     ScanLog,
     Site,
+    UpstreamProxyConfig,
 )
 from aespa.models import TestRun as WebTestRun
 from aespa.services import events as events_svc
 from aespa.services import sast_scanner
 from aespa.services.scan_leads import create_lead
+
+
+@pytest.mark.parametrize("analysis_mode", ["light", "deep"])
+def test_sast_scan_uses_saved_llm_network_settings(
+    analysis_mode, isolated_db_engine, monkeypatch, tmp_path
+):
+    from aespa.services import llm, sast_scanner_light
+
+    scanner_module = sast_scanner_light if analysis_mode == "light" else sast_scanner
+    monkeypatch.setenv("AESPA_DATA_DIR", str(tmp_path))
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("app.py", "print('ok')\n")
+    with Session(isolated_db_engine) as session:
+        config = LLMConfig(name="test", is_active=True, model="fake")
+        session.add(config)
+        session.add(
+            UpstreamProxyConfig(
+                proxy_llm=True,
+                llm_proxy_url="http://proxy.local:8080",
+                llm_ca_bundle_path="/certs/company.pem",
+            )
+        )
+        session.commit()
+        run = SastRun(
+            name="certificate test",
+            analysis_mode=analysis_mode,
+            source_archive_path=str(archive),
+            llm_config_id=config.id,
+        )
+        session.add(run)
+        session.commit()
+        run_id = run.id
+
+    seen = []
+
+    def capture_network(*args, **kwargs):
+        seen.append((llm._llm_proxy_var.get(), llm._llm_ca_bundle_var.get()))
+        raise RuntimeError("Stop after checking LLM transport")
+
+    monkeypatch.setattr(llm, "set_run_context", capture_network)
+    asyncio.run(scanner_module._sast_scan_task(run_id))
+
+    assert seen == [("http://proxy.local:8080", "/certs/company.pem")]
+    assert llm._llm_proxy_var.get() is None
+    assert llm._llm_ca_bundle_var.get() is None
 
 
 @pytest.mark.parametrize(

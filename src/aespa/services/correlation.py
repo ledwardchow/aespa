@@ -1789,11 +1789,12 @@ async def match_ambiguous_connections(
                 separators=(",", ":"),
             )
         )
-        raw = await llm_svc.plain_completion(
-            llm_config,
-            prompt,
-            system_prompt=CONNECTION_MATCHER_SYSTEM_PROMPT,
-        )
+        with llm_svc.saved_llm_transport_scope():
+            raw = await llm_svc.plain_completion(
+                llm_config,
+                prompt,
+                system_prompt=CONNECTION_MATCHER_SYSTEM_PROMPT,
+            )
         try:
             decoded = llm_svc.extract_json_response(raw, expect=list)
         except (TypeError, ValueError) as exc:
@@ -2394,14 +2395,15 @@ async def _rewrite_pre_crawl_frontend_paths(
             )
         )
         try:
-            raw = await llm_svc.plain_completion(
-                llm_config,
-                prompt,
-                system_prompt=(
-                    "You are an evidence-constrained security test planner. "
-                    "Return valid JSON only and preserve every unmentioned field."
-                ),
-            )
+            with llm_svc.saved_llm_transport_scope():
+                raw = await llm_svc.plain_completion(
+                    llm_config,
+                    prompt,
+                    system_prompt=(
+                        "You are an evidence-constrained security test planner. "
+                        "Return valid JSON only and preserve every unmentioned field."
+                    ),
+                )
             decoded = llm_svc.extract_json_response(raw, expect=dict)
             if not isinstance(decoded, dict):
                 raise ValueError("response was not an object")
