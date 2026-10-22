@@ -21,6 +21,7 @@ test.each([
   ],
   ["#/api-runs/7/leads?lead=L-4", { name: "api-run-detail", id: 7, tab: "leads", leadRef: "L-4" }],
   ["#/runs/7/alice-popout", { name: "alice-popout", id: 7 }],
+  ["#/sast-runs/7/alice-popout", { name: "sast-alice-popout", id: 7 }],
   [
     "#/runs/7/findings?finding=F-12&lead=L-3",
     { name: "run-detail", id: 7, tab: "findings", findingRef: "F-12", leadRef: "L-3" },

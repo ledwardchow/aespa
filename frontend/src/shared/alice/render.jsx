@@ -43,7 +43,7 @@ const aliceTraceSummary = (text) => {
     if (b.type === "tool_call" && b.tool) lastTool = b.tool;
   }
   let label = lastStep > 0 ? `Step ${lastStep}` : "Reasoning";
-  if (lastTool) label += ` · ${lastTool}`;
+  if (lastTool) label = lastStep > 0 ? `${label} · ${lastTool}` : `Used tool: ${lastTool}`;
   return {
     label,
     lastStep,
@@ -79,6 +79,9 @@ export const renderAliceTraceBox = (segKey, segText, stepData, isOpen, toggle) =
 };
 export const renderAliceBlocks = (text, isThinking, stepData = {}) => {
   const blocks = parseAliceThinking(text);
+  const usedTools = Object.entries(stepData)
+    .sort(([left], [right]) => Number(left) - Number(right))
+    .flatMap(([, step]) => step.tools || []);
   return blocks.map((block, idx) => {
     if (block.type === "status") {
       let icon = <span className="alice-status-dot"></span>;
@@ -94,7 +97,31 @@ export const renderAliceBlocks = (text, isThinking, stepData = {}) => {
       if (block.stepKind) {
         const stepEntry = (stepData || {})[block.stepNum] || {};
         let detailContent = null;
-        if (
+        if (block.toolOrdinal !== undefined) {
+          const tool = usedTools[block.toolOrdinal];
+          detailContent = (
+            <div className="alice-step-detail">
+              {tool ? (
+                <>
+                  <span className="alice-step-msg-role">Call</span>
+                  <pre className="alice-step-msg-content">
+                    {JSON.stringify(tool.input ?? {}, null, 2)}
+                  </pre>
+                  {tool.result !== null && tool.result !== undefined && (
+                    <>
+                      <span className="alice-step-msg-role">Result</span>
+                      <pre className="alice-step-msg-content">{tool.result}</pre>
+                    </>
+                  )}
+                </>
+              ) : (
+                <span className="alice-step-msg-content">
+                  Tool call details are unavailable for this saved chat.
+                </span>
+              )}
+            </div>
+          );
+        } else if (
           block.stepKind === "llm_call" &&
           stepEntry.llmMessages &&
           stepEntry.llmMessages.length > 0

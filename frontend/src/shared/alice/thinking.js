@@ -9,6 +9,7 @@ export const parseAliceThinking = (text) => {
   let inCodeBlock = false;
   let codeLang = "";
   const toolCntByStep = {}; // track how many Executing tool lines seen per step
+  let usedToolOrdinal = 0;
   let codeContent = [];
   let inToolCall = false;
   let toolCallContent = [];
@@ -164,6 +165,24 @@ export const parseAliceThinking = (text) => {
     }
 
     // Step/Status logs
+    const usedToolMatch = trimmed.match(/^Used tool:\s*([a-zA-Z0-9_]+)$/);
+    const oldSastToolMatch = trimmed.match(/^\[Step \d+\]\s+([a-zA-Z0-9_]+)$/);
+    if (usedToolMatch || oldSastToolMatch) {
+      const toolName = (usedToolMatch || oldSastToolMatch)[1];
+      if (currentParagraph.length > 0) {
+        blocks.push({ type: "thought", text: currentParagraph.join("\n") });
+        currentParagraph = [];
+      }
+      blocks.push({
+        type: "status",
+        status: "routing",
+        text: `Used tool: ${toolName}`,
+        stepKind: "tool_call",
+        toolName,
+        toolOrdinal: usedToolOrdinal++,
+      });
+      continue;
+    }
     const normalizedStatus = trimmed.replace(
       /^\[A\.L\.I\.C\.E\. Initiali[sz]ing\]/,
       "[A.L.I.C.E. Initialising]",

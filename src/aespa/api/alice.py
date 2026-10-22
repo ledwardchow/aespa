@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from aespa.db import get_session
-from aespa.models import AliceChatMessage, AliceChatSession, AliceGoal, TestRun
+from aespa.models import AliceChatMessage, AliceChatSession, AliceGoal, SastRun, TestRun
 from aespa.services import alice_goals, alice_tasks
 
 router = APIRouter(tags=["alice"])
@@ -48,7 +48,7 @@ class AliceSteerRequest(BaseModel):
 
 
 def _load_sessions(run_id: int, session: Session, run_kind: str = "web") -> dict:
-    run = session.get(TestRun, run_id)
+    run = session.get(SastRun if run_kind == "sast" else TestRun, run_id)
     # Stable per-run identity. SQLite reuses INTEGER PRIMARY KEY ids after the
     # highest run is deleted, so a new run can inherit a deleted run's id. The
     # client uses this token to detect that case and discard stale localStorage

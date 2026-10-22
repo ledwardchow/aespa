@@ -6,6 +6,8 @@ All pull requests merged to `main`, in reverse chronological order.
 
 ### New features
 
+- **A.L.I.C.E. for SAST scans**: Chat with A.L.I.C.E. from a SAST run to inspect its saved source snapshot, review coverage, and ask about potential issues. Collapse the side chat to a narrow right-hand tab or open it in a separate window when you need more space. Its reasoning view lists the source tools it used, and each entry opens the saved call and result. Chats are saved with the run and can be reopened later, including for source imported from GitHub. A.L.I.C.E. reads the archived source without contacting the live target or changing scan results.
+
 - **OpenAI refusal recovery**: Global settings now has an option to retry a web or API scan step with shorter instructions when ChatGPT-plan or Codex blocks it for cybersecurity risk. If that retry is also refused, AESPA tries once more with fresh context from saved scan data. The option starts off. The first request, target, and tools stay the same. The activity log shows each retry and whether the provider accepts it or leaves the test unresolved. Repeated refusals can be skipped without a fixed count limit; other scan limits still apply.
 
 - **Site settings export**: The Export button lets you download a site's settings and saved accounts without its test runs or results, or download everything. Importing a settings-only file creates a site ready for new runs, including when saved workflows have blank instructions.

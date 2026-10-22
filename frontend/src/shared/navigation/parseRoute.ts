@@ -93,6 +93,8 @@ export function parseRoute(hash = "#/"): Route {
     return { name: "api-run-detail", id: +m[1], findingRef, leadRef };
   if (routeHash === "#/sast-runs/new") return { name: "sast-run-new" };
   if (routeHash === "#/sast-runs") return { name: "sast-list" };
+  if ((m = routeHash.match(/^#\/sast-runs\/(\d+)\/alice-popout$/)))
+    return { name: "sast-alice-popout", id: +m[1] };
   if ((m = routeHash.match(/^#\/sast-runs\/(\d+)\/([a-z-]+)$/)))
     return { name: "sast-run-detail", id: +m[1], tab: m[2], leadRef };
   if ((m = routeHash.match(/^#\/sast-runs\/(\d+)$/)))

@@ -2,6 +2,7 @@ import { runIdentityKey } from "../runs/identity.ts";
 const paths = {
   web: (id) => `/api/test-runs/${id}/alice`,
   api: (id) => `/api/api-test-runs/${id}/alice`,
+  sast: (id) => `/api/sast-runs/${id}/alice`,
 };
 
 /** Returns the shared ALICE HTTP endpoints for an explicit run identity. */
